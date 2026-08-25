@@ -45,7 +45,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 </style>
 </head>
 <body>
-<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="text">Text</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom" disabled>Custom Operation</button></div></header>
+<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="text">Text</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom" disabled>Custom Operation</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
 <div class="columns">
 <div class="col" id="col1"></div>
 <div class="col" id="col2"></div>
@@ -115,9 +115,9 @@ function updBtn(){
   var dt=$("designText"),cn=$("cn"),ti=$("ti");
   var hasInput=(dt&&dt.value.trim())||textImageFile;
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
-  var blocked=activeJobId!==null||!workerAlive;
+  var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasInput||!hasDetails||blocked;
-  if(blk){if(!workerAlive)blk.textContent="Worker is not running. Restart the server.";else if(activeJobId)blk.textContent="A job is waiting for the client\u2019s choice. Cancel it or complete it to start a new one.";else blk.textContent=""}
+  if(blk){if(!workerAlive)blk.textContent="Worker is not running. Restart the server.";else if(!isLoggedIn)blk.textContent="Sign in to ChatGPT first.";else if(activeJobId)blk.textContent="A job is waiting for the client\u2019s choice. Cancel it or complete it to start a new one.";else blk.textContent=""}
 }
 function submitJob(){
   var tpl1=$("tpl1"),err=$("tplErr");
@@ -127,7 +127,25 @@ function submitJob(){
   $("genBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";lastStage=-1;lastImgKey="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){activeJobId=d.job_id;pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("genBtn").disabled=false});
 }
-function checkStatus(){fetch("/api/status").then(function(r){return r.json()}).then(function(s){workerAlive=s.worker_alive;if(!workerAlive)workerStatus.innerHTML='<div class="worker-dead">The background worker has stopped. Close any open automation browser window and restart the server.</div>';else workerStatus.innerHTML="";if(s.blocking_job_id){activeJobId=s.blocking_job_id;pollJob(s.blocking_job_id)}updBtn()})}
+var isLoggedIn=false;
+function checkStatus(){fetch("/api/status").then(function(r){return r.json()}).then(function(s){workerAlive=s.worker_alive;if(!workerAlive)workerStatus.innerHTML='<div class="worker-dead">The background worker has stopped. Close any open automation browser window and restart the server.</div>';else workerStatus.innerHTML="";isLoggedIn=!!s.logged_in;updateSessionUI();if(s.blocking_job_id){activeJobId=s.blocking_job_id;pollJob(s.blocking_job_id)}updBtn()})}
+function updateSessionUI(){
+  var el=$("sessionIndicator");if(!el)return;
+  if(isLoggedIn){el.innerHTML='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981"></span> Signed in'}
+  else{el.innerHTML='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b"></span> Not signed in <button onclick="startLogin()" style="margin-left:6px;padding:4px 10px;font-size:.72rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:5px;cursor:pointer">Sign in</button>'}
+}
+window.startLogin=function(){
+  fetch("/api/session/login",{method:"POST"}).then(function(r){return r.json()}).then(function(){
+    var el=$("sessionIndicator");
+    el.innerHTML='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b;animation:pulse 1s infinite"></span> Browser window opened. Log in there, then click: <button onclick="confirmLogin()" style="margin-left:6px;padding:4px 10px;font-size:.72rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:5px;cursor:pointer">Done</button>';
+  });
+};
+window.confirmLogin=function(){
+  fetch("/api/session/confirm",{method:"POST"}).then(function(r){return r.json()}).then(function(d){
+    isLoggedIn=d.logged_in;updateSessionUI();updBtn();updMockupBtn();updArtworkBtn();
+    if(!isLoggedIn){var el=$("sessionIndicator");el.innerHTML+=' <span style="color:#dc2626;font-size:.72rem;margin-left:6px">Still not signed in. Try again.</span>'}
+  });
+};
 
 function pollJob(id){stepStart=Date.now();clr();elapsedTimer=setInterval(updElapsed,1000);pollingTimer=setInterval(function(){fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(render)},2000);fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(render)}
 function clr(){if(pollingTimer)clearInterval(pollingTimer);if(elapsedTimer)clearInterval(elapsedTimer);pollingTimer=elapsedTimer=null}
@@ -267,9 +285,9 @@ function updMockupBtn(){
   var cn=$("mcn"),ti=$("mti");
   var hasImg=!!mockupImageFile;
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
-  var blocked=activeJobId!==null||!workerAlive;
+  var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasImg||!hasDetails||blocked;
-  if(blk){if(!workerAlive)blk.textContent="Worker is not running.";else if(activeJobId)blk.textContent="A job is waiting for input. Cancel or complete it first.";else blk.textContent=""}
+  if(blk){if(!workerAlive)blk.textContent="Worker is not running.";else if(!isLoggedIn)blk.textContent="Sign in to ChatGPT first.";else if(activeJobId)blk.textContent="A job is waiting for input. Cancel or complete it first.";else blk.textContent=""}
 }
 function submitMockupJob(){
   var cols=parseInt(($("mCols")||{}).value||"0",10);
@@ -332,9 +350,9 @@ function updArtworkBtn(){
   var cn=$("acn"),ti=$("ati");
   var hasFiles=artworkFiles.length>0;
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
-  var blocked=activeJobId!==null||!workerAlive;
+  var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasFiles||!hasDetails||blocked;
-  if(blk){if(!workerAlive)blk.textContent="Worker is not running.";else if(activeJobId)blk.textContent="A job is in progress. Cancel or complete it first.";else blk.textContent=""}
+  if(blk){if(!workerAlive)blk.textContent="Worker is not running.";else if(!isLoggedIn)blk.textContent="Sign in to ChatGPT first.";else if(activeJobId)blk.textContent="A job is in progress. Cancel or complete it first.";else blk.textContent=""}
 }
 function submitArtworkJob(){
   var tpl=$("tplArtRegen");
@@ -626,7 +644,10 @@ function renderHist(){
     historyList.appendChild(div);
   });
 }
-setInterval(function(){fetch("/api/status").then(function(r){return r.json()}).then(function(s){if(!s.worker_alive&&workerAlive){workerAlive=false;workerStatus.innerHTML='<div class="worker-dead">The background worker has stopped. Close any open automation browser window and restart the server.</div>';clr();var b=$("genBtn");if(b)b.disabled=true}})},5000);
+setInterval(function(){fetch("/api/status").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(s){if(!s)return;if(!s.worker_alive&&workerAlive){workerAlive=false;workerStatus.innerHTML='<div class="worker-dead">The background worker has stopped. Close any open automation browser window and restart the server.</div>';clr();var b=$("genBtn");if(b)b.disabled=true}})},5000);
+// Auth: load user info and handle 401 globally
+fetch("/api/auth/me").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(d){if(d){var ui=$("userInfo");if(ui)ui.innerHTML='<span>'+d.username+'</span><a href="#" onclick="doLogout();return false" style="color:var(--accent);text-decoration:none;font-weight:600">Sign out</a>'}});
+window.doLogout=function(){fetch("/api/auth/logout",{method:"POST"}).then(function(){window.location.href="/login"})};
 checkStatus();
 })();
 </script>

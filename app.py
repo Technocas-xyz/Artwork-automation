@@ -18,13 +18,19 @@ from pathlib import Path
 from queue import Queue
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from config.job_options import JOB_OPTIONS, PARAMETERISED_OPTIONS
 from config.workflows import TEXT_TURN_0, TEXT_TURN_1, TEXT_TURN_2, TEXT_TURN_3, MOCKUP_REGENERATE, EXTRACT_BOXES, EXTRACT_ARTWORKS, EXTRACT_CONTACT_SHEET, EXTRACT_SINGLE, ARTWORK_REGENERATE
+from src.auth import (
+    APP_USERNAME, APP_PASSWORD_HASH, verify_password, sign_cookie,
+    get_current_user, check_rate_limit, record_failure, record_success,
+    COOKIE_NAME, PUBLIC_PATHS, PUBLIC_PREFIXES,
+)
 from src.browser import launch_context, is_logged_in
 from src.extract import crop_boxes, grid_split, validate_crops, ExtractionError
 from src.generator import generate, open_chat, send_turn, send_text_turn, get_last_text_reply, get_boxes, extract_artwork_images
@@ -38,6 +44,30 @@ from src.vault import save_to_vault
 
 app = FastAPI(title="Artwork Automation")
 
+
+# Auth middleware
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        # Allow public paths
+        if path in PUBLIC_PATHS or any(path.startswith(p) for p in PUBLIC_PREFIXES):
+            return await call_next(request)
+        # Allow login page
+        if path == "/login":
+            return await call_next(request)
+        # Check auth
+        user = get_current_user(request)
+        if not user:
+            # API calls get 401, page loads get redirect
+            if path.startswith("/api/"):
+                return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+            return RedirectResponse("/login", status_code=302)
+        # Authenticated — continue
+        return await call_next(request)
+
+
+app.add_middleware(AuthMiddleware)
+
 jobs: dict[str, dict[str, Any]] = {}
 job_queue: Queue[str] = Queue()
 
@@ -50,6 +80,13 @@ ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 _worker_alive: bool = True
 _worker_error: str = ""
+
+# Session state (updated by the worker thread)
+_session_logged_in: bool = False
+_session_account: str = "acct1"
+_session_check_time: float = 0.0
+_session_action: str = ""  # "", "check", "login"
+_session_result: threading.Event = threading.Event()
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -122,14 +159,17 @@ _cancel_flag: dict[str, bool] = {}
 
 
 def _worker() -> None:
-    global _worker_alive, _worker_error
+    global _worker_alive, _worker_error, _session_logged_in, _session_check_time
 
     try:
         context = launch_context("acct1")
         page = context.pages[0] if context.pages else context.new_page()
         page.goto("https://chatgpt.com", wait_until="domcontentloaded")
-        if not is_logged_in(page):
-            print("[worker] WARNING: Not logged in. Run login.py first.")
+        _session_logged_in = is_logged_in(page)
+        if not _session_logged_in:
+            print("[worker] WARNING: Not logged in. Use the Sign In button in the UI.")
+        else:
+            print("[worker] Session OK — logged in.")
     except Exception as exc:
         _worker_alive = False
         _worker_error = str(exc)
@@ -140,6 +180,22 @@ def _worker() -> None:
     while True:
         try:
             job_id: str = job_queue.get()
+
+            # Handle session actions
+            if job_id == "__session_check__":
+                _session_logged_in = is_logged_in(page)
+                _session_check_time = time.time()
+                _session_result.set()
+                continue
+            elif job_id == "__session_login__":
+                page.goto("https://chatgpt.com", wait_until="domcontentloaded")
+                try:
+                    page.bring_to_front()
+                except Exception:
+                    pass
+                _session_result.set()
+                continue
+
             job = jobs.get(job_id)
             if job is None:
                 continue
@@ -574,6 +630,49 @@ def _any_job_blocking() -> str | None:
 # ---------------------------------------------------------------------------
 
 
+@app.get("/login", response_class=HTMLResponse)
+def serve_login():
+    return HTMLResponse(content=Path("static/login.html").read_text(encoding="utf-8"))
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/auth/login")
+def auth_login(req: LoginRequest, request: Request):
+    ip = request.client.host if request.client else "unknown"
+    if not check_rate_limit(ip):
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in 5 minutes.")
+    if req.username != APP_USERNAME or not verify_password(req.password, APP_PASSWORD_HASH):
+        record_failure(ip)
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    record_success(ip)
+    cookie_value = sign_cookie(req.username)
+    response = JSONResponse(content={"ok": True, "username": req.username})
+    response.set_cookie(
+        key=COOKIE_NAME, value=cookie_value,
+        httponly=True, samesite="lax", max_age=86400 * 7,
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def auth_logout():
+    response = JSONResponse(content={"ok": True})
+    response.delete_cookie(key=COOKIE_NAME)
+    return response
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"username": user}
+
+
 @app.get("/", response_class=HTMLResponse)
 def serve_index():
     return HTMLResponse(content=Path("static/index.html").read_text(encoding="utf-8"))
@@ -977,7 +1076,38 @@ def open_folder(req: OpenFolderRequest):
 @app.get("/api/status")
 def get_status():
     blocking = _any_job_blocking()
-    return {"blocking_job_id": blocking, "worker_alive": _worker_alive, "worker_error": _worker_error}
+    return {"blocking_job_id": blocking, "worker_alive": _worker_alive, "worker_error": _worker_error, "logged_in": _session_logged_in}
+
+
+@app.get("/api/session")
+def get_session():
+    """Check if the browser session is logged in. Uses cached result if recent."""
+    if time.time() - _session_check_time > 30:
+        # Ask worker to re-check (non-blocking if worker is busy)
+        _session_result.clear()
+        job_queue.put("__session_check__")
+        _session_result.wait(timeout=10)
+    return {"logged_in": _session_logged_in, "account": _session_account}
+
+
+@app.post("/api/session/login")
+def session_login():
+    """Navigate the worker's browser to ChatGPT login page and bring to front."""
+    if not _worker_alive:
+        raise HTTPException(status_code=503, detail="Worker is not running.")
+    _session_result.clear()
+    job_queue.put("__session_login__")
+    _session_result.wait(timeout=15)
+    return {"ok": True}
+
+
+@app.post("/api/session/confirm")
+def session_confirm():
+    """Re-check login status after the operator logged in manually."""
+    _session_result.clear()
+    job_queue.put("__session_check__")
+    _session_result.wait(timeout=10)
+    return {"logged_in": _session_logged_in}
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
