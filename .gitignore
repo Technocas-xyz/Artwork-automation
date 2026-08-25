@@ -1,0 +1,12 @@
+﻿.venv/
+profiles/
+input/
+output/
+vault/
+logs/
+__pycache__/
+*.pyc
+.env
+*.log
+static/index-BEFORE-REDESIGN.html
+static/index-WORKING.html

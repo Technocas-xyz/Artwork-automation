@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Artwork Generator</title>
+<style>
+:root{--accent:#2563eb;--accent-hover:#1d4ed8;--bg:#f8f9fa;--surface:#fff;--border:#e2e5e9;--text:#1a1a1a;--muted:#6b7280;--radius:10px}
+*{box-sizing:border-box;margin:0;padding:0}html,body{height:100%;overflow:hidden}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);display:flex;flex-direction:column}
+header{padding:14px 24px;border-bottom:1px solid var(--border);background:var(--surface);display:flex;align-items:center;gap:24px}
+header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
+.wf-tabs{display:flex;gap:6px}.wf-tab{padding:7px 16px;font-size:.85rem;font-weight:600;border:2px solid var(--border);border-radius:8px;background:var(--surface);cursor:pointer;transition:.15s}.wf-tab.active{border-color:var(--accent);background:#eff6ff;color:var(--accent)}.wf-tab:disabled{opacity:.4;cursor:not-allowed}
+.columns{flex:1;display:grid;grid-template-columns:1fr 1.1fr 1.3fr;gap:0;overflow:hidden}
+.col{padding:18px;overflow-y:auto;border-right:1px solid var(--border)}.col:last-child{border-right:none}
+.col-title{font-size:.82rem;font-weight:600;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);margin-bottom:12px}
+.drop-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:16px;text-align:center;margin-bottom:10px;cursor:pointer;transition:.2s}.drop-zone.dragover{border-color:var(--accent);background:#eff6ff}.drop-zone p{font-size:.8rem;color:var(--muted)}.drop-zone .browse-btn{display:inline-block;margin-top:6px;padding:5px 12px;font-size:.76rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer}
+.upload-error{color:#dc2626;font-size:.76rem;margin-top:4px}.uploaded-preview{margin-top:6px}.uploaded-preview img{max-width:100%;max-height:90px;border-radius:6px;border:1px solid var(--border)}
+.field-group{margin-bottom:10px}.field-group label{display:block;font-size:.76rem;font-weight:600;color:var(--muted);margin-bottom:3px}.field-group input,.field-group textarea{width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font-size:.88rem;font-family:inherit}.field-group textarea{resize:vertical}
+.text-input-large{width:100%;padding:12px 14px;font-size:1.1rem;font-weight:600;border:2px solid var(--border);border-radius:var(--radius);text-align:center;margin-bottom:10px}.text-input-large:focus{border-color:var(--accent);outline:none}
+.or-divider{text-align:center;font-size:.78rem;color:var(--muted);margin:8px 0;font-weight:600}
+.gen-btn{width:100%;padding:14px;font-size:1rem;font-weight:700;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;transition:.2s;margin-top:8px}.gen-btn:hover{background:var(--accent-hover)}.gen-btn:disabled{background:#94a3b8;cursor:not-allowed}
+.blocker-msg{font-size:.78rem;color:#dc2626;margin-top:5px;line-height:1.3}
+.edit-toggle{font-size:.74rem;color:var(--muted);cursor:pointer;margin:8px 0 4px;user-select:none}.edit-toggle:hover{color:var(--accent)}.edit-toggle.open::before{content:"▾ "}.edit-toggle::before{content:"▸ "}
+.edit-body{display:none;margin-bottom:10px}.edit-body.open{display:block}.edit-body textarea{width:100%;min-height:200px;padding:10px;font-size:.76rem;font-family:Consolas,Monaco,monospace;border:1px solid var(--border);border-radius:8px;resize:vertical}.edit-body .reset-link{font-size:.68rem;color:var(--accent);cursor:pointer;margin-top:2px;display:inline-block}
+.tpl-error{color:#dc2626;font-size:.72rem;margin-top:2px}
+.worker-dead{padding:14px 16px;border-radius:var(--radius);margin-bottom:14px;background:#fee2e2;border:1px solid #fecaca;color:#991b1b;font-size:.86rem}
+.progress-box{padding:14px 16px;border-radius:var(--radius);margin-bottom:14px;background:#fef3c7;border:1px solid #fde68a}
+.progress-steps{display:flex;gap:4px;margin-bottom:8px}.progress-step{flex:1;height:6px;border-radius:3px;background:#e5e7eb}.progress-step.done{background:#10b981}.progress-step.active{background:var(--accent);animation:pulse 1.5s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.progress-label{font-size:.88rem;font-weight:600;color:#92400e;margin-bottom:4px}.progress-bar{height:4px;border-radius:2px;overflow:hidden;margin:6px 0;background:#fde68a}.progress-bar-inner{height:100%;width:100%;background:repeating-linear-gradient(-45deg,#f59e0b,#f59e0b 10px,#fbbf24 10px,#fbbf24 20px);animation:stripe .8s linear infinite}@keyframes stripe{0%{transform:translateX(0)}100%{transform:translateX(28px)}}
+.progress-elapsed{font-size:.76rem;color:#92400e;opacity:.8}.progress-hint{font-size:.72rem;color:#92400e;margin-top:3px;opacity:.7}
+.status-box{padding:12px 14px;border-radius:var(--radius);margin-bottom:10px;font-size:.86rem}.status-box.done{background:#d1fae5;color:#065f46;border:1px solid #a7f3d0}.status-box.failed{background:#fee2e2;color:#991b1b;border:1px solid #fecaca}.status-box.awaiting{background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe}
+.job-header{font-size:.82rem;font-weight:600;color:var(--muted);margin-bottom:10px}
+.stage-result{margin-bottom:18px}.stage-result h3{font-size:.82rem;font-weight:600;color:var(--muted);margin-bottom:6px}.stage-result img{width:100%;max-height:360px;object-fit:contain;border-radius:var(--radius);border:1px solid var(--border);cursor:pointer;background:#fff}.stage-result img.transparent-bg{background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/14px 14px}.stage-result .dl-btn{display:inline-block;margin-top:6px;padding:8px 16px;font-size:.8rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:8px;text-decoration:none;cursor:pointer}
+.cancel-btn{display:inline-block;padding:8px 16px;font-size:.82rem;font-weight:600;background:#dc2626;color:#fff;border:none;border-radius:8px;cursor:pointer;margin-top:8px}
+.selection-area{margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}.selection-area p{font-size:.84rem;margin-bottom:8px;font-weight:500}
+.choice-btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.choice-btn{width:46px;height:46px;font-size:1.05rem;font-weight:700;border:2px solid var(--border);border-radius:10px;background:var(--surface);cursor:pointer;transition:.15s}.choice-btn:hover{border-color:var(--accent);background:#eff6ff}
+.regen-btn{padding:10px 16px;font-size:.82rem;font-weight:600;border:2px solid #dc2626;border-radius:10px;background:#fff;color:#dc2626;cursor:pointer;margin-left:8px}.regen-btn:hover{background:#fee2e2}
+.wait-elapsed{font-size:.72rem;color:var(--muted);margin-top:6px}
+.text-confirm-area{margin-top:10px}.text-confirm-area textarea{width:100%;padding:10px;font-size:1rem;border:1px solid var(--border);border-radius:8px;min-height:56px;font-family:inherit;margin-bottom:8px}.text-confirm-btn{padding:9px 18px;font-size:.88rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer}
+.vault-info{padding:10px 14px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:var(--radius);font-size:.8rem;margin-bottom:10px}.vault-info code{font-size:.76rem;word-break:break-all}.vault-btn{margin-top:5px;padding:6px 11px;font-size:.76rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer}
+.prompt-toggle{font-size:.72rem;color:var(--muted);cursor:pointer;margin-top:4px;user-select:none}.prompt-toggle:hover{color:var(--accent)}.prompt-content{display:none;margin-top:4px;padding:7px 9px;background:#f9fafb;border:1px solid var(--border);border-radius:6px;font-family:Consolas,Monaco,monospace;font-size:.7rem;white-space:pre-wrap;max-height:110px;overflow-y:auto;color:var(--muted)}.prompt-content.open{display:block}
+.history-section{border-top:1px solid var(--border);padding-top:12px;margin-top:12px}.history-section h3{font-size:.8rem;color:var(--muted);margin-bottom:6px}.history-item{padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:.76rem;cursor:pointer}.history-item:hover{border-color:var(--accent)}.history-item .hi-label{font-weight:600}.history-detail{display:none;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)}.history-detail.open{display:block}.history-detail img{max-width:100%;max-height:90px;border-radius:6px;margin-right:4px;margin-bottom:3px;border:1px solid var(--border)}
+.coming-soon{text-align:center;color:var(--muted);padding:40px 0;font-size:.88rem}
+</style>
+</head>
+<body>
+<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="text">Text</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom" disabled>Custom Operation</button></div></header>
+<div class="columns">
+<div class="col" id="col1"></div>
+<div class="col" id="col2"></div>
+<div class="col" id="col3"><div class="col-title">Results</div><div id="workerStatus"></div><div id="statusArea"></div><div id="resultArea"></div><div class="history-section" id="historySection" style="display:none"><h3>Previous Runs</h3><div id="historyList"></div></div></div>
+</div>
+<script>
+(function(){
+var activeJobId=null,pollingTimer=null,elapsedTimer=null,stepStart=null,pauseStart=null;
+var historyItems=[],textImageFile="",mockupImageFile="",workerAlive=true;
+var currentWorkflow="text";
+var DT={turn1:"",turn2:"",turn3:""};
+var lastStatus="",lastStage=-1,lastImgKey="";
+
+function $(id){return document.getElementById(id)}
+var col1=$("col1"),col2=$("col2"),statusArea=$("statusArea"),resultArea=$("resultArea"),workerStatus=$("workerStatus"),historySection=$("historySection"),historyList=$("historyList");
+
+// === EVENT DELEGATION on resultArea ===
+resultArea.addEventListener("click",function(e){
+  try{
+  var t=e.target.closest("[data-action]");
+  if(!t)return;
+  var a=t.dataset.action,jid=t.dataset.job;
+  if(a==="select") doSelect(jid,parseInt(t.dataset.choice,10));
+  else if(a==="regenerate") doRegenerate(jid);
+  else if(a==="cancel") doCancelJob(jid);
+  else if(a==="confirm-text") doConfirmText(jid);
+  else if(a==="accept-crops") doAcceptCrops(jid);
+  else if(a==="reextract") doReextract(jid,t.dataset.mode||"auto");
+  else if(a==="recrop-apply") doRecrop(jid);
+  else if(a==="submit-multi") doSubmitMulti(jid);
+  else if(a==="submit-numbers") doSubmitNumbers(jid);
+  else if(a==="toggle"){var tgt=$(t.dataset.target);if(tgt){tgt.classList.toggle("open");t.classList.toggle("open")}}
+  else if(a==="open-folder") fetch("/api/open-folder",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:t.dataset.path})});
+  }catch(err){console.error("[delegation]",err)}
+});
+
+fetch("/api/templates").then(function(r){return r.json()}).then(function(d){DT=d;renderCols()}).catch(function(e){console.error("[templates] fetch failed, using defaults:",e);DT={turn1:"",turn2:"",turn3:"",extract:"",regen:"",artwork:""};renderCols()});
+document.querySelectorAll(".wf-tab").forEach(function(t){t.addEventListener("click",function(){if(t.disabled)return;document.querySelectorAll(".wf-tab").forEach(function(x){x.classList.remove("active")});t.classList.add("active");currentWorkflow=t.dataset.wf;renderCols()})});
+
+function renderCols(){if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else{mockupImageFile="";artworkFiles=[];renderCol1();renderCol2()}
+  updBtn();
+}
+function renderCol1(){
+  col1.innerHTML='<div class="col-title">Design Text</div><input type="text" class="text-input-large" id="designText" placeholder="Type the text for the design"><div class="or-divider">\u2014 OR upload an image containing the text \u2014</div><div class="drop-zone" id="dz"><p>Drag image here or</p><button class="browse-btn" id="dzBtn">Choose file</button><input type="file" id="dzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="dzErr"></div><div class="uploaded-preview" id="dzPrev"></div>';
+  var dz=$("dz"),btn=$("dzBtn"),fi=$("dzFile"),dt=$("designText");
+  btn.onclick=function(e){e.stopPropagation();fi.click()};dz.onclick=function(){fi.click()};
+  dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
+  dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)upImg(e.dataTransfer.files[0])};
+  fi.onchange=function(){if(fi.files.length)upImg(fi.files[0]);fi.value=""};
+  dt.oninput=function(){if(dt.value.trim()){textImageFile="";$("dzPrev").innerHTML=""}updBtn()};
+}
+function upImg(file){
+  $("dzErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
+  if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$("dzErr").textContent="Only .png .jpg .jpeg .webp accepted.";return}
+  var fd=new FormData();fd.append("files",file);
+  fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){textImageFile=d.saved[0].name;$("dzPrev").innerHTML='<img src="/input/'+textImageFile+'">';var dt=$("designText");if(dt)dt.value="";updBtn()}}).catch(function(e){$("dzErr").textContent=e.message});
+}
+function renderCol2(){
+  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="cn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="ti" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="tplTog">Edit prompt for step 1</div><div class="edit-body" id="tplBody"><textarea id="tpl1">'+esc(DT.turn1)+'</textarea><div class="tpl-error" id="tplErr"></div></div><button class="gen-btn" id="genBtn" disabled>Generate</button><div class="blocker-msg" id="blkMsg"></div>';
+  $("cn").oninput=updBtn;$("ti").oninput=updBtn;
+  $("tplTog").onclick=function(){$("tplTog").classList.toggle("open");$("tplBody").classList.toggle("open")};
+  $("genBtn").onclick=submitJob;
+  checkStatus();
+}
+function updBtn(){
+  var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();return}
+  var dt=$("designText"),cn=$("cn"),ti=$("ti");
+  var hasInput=(dt&&dt.value.trim())||textImageFile;
+  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
+  var blocked=activeJobId!==null||!workerAlive;
+  btn.disabled=!hasInput||!hasDetails||blocked;
+  if(blk){if(!workerAlive)blk.textContent="Worker is not running. Restart the server.";else if(activeJobId)blk.textContent="A job is waiting for the client\u2019s choice. Cancel it or complete it to start a new one.";else blk.textContent=""}
+}
+function submitJob(){
+  var tpl1=$("tpl1"),err=$("tplErr");
+  if(tpl1&&tpl1.value.trim()&&tpl1.value.indexOf("{text}")<0){if(err)err.textContent="Must contain {text}";return}
+  if(err)err.textContent="";
+  var body={workflow:"text",text:($("designText")||{}).value||"",text_image:textImageFile,client:$("cn").value.trim(),task_id:$("ti").value.trim(),files:[],options:[],params:{},custom_note:"",template_turn1:tpl1?tpl1.value:""};
+  $("genBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";lastStage=-1;lastImgKey="";
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){activeJobId=d.job_id;pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("genBtn").disabled=false});
+}
+function checkStatus(){fetch("/api/status").then(function(r){return r.json()}).then(function(s){workerAlive=s.worker_alive;if(!workerAlive)workerStatus.innerHTML='<div class="worker-dead">The background worker has stopped. Close any open automation browser window and restart the server.</div>';else workerStatus.innerHTML="";if(s.blocking_job_id){activeJobId=s.blocking_job_id;pollJob(s.blocking_job_id)}updBtn()})}
+
+function pollJob(id){stepStart=Date.now();clr();elapsedTimer=setInterval(updElapsed,1000);pollingTimer=setInterval(function(){fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(render)},2000);fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(render)}
+function clr(){if(pollingTimer)clearInterval(pollingTimer);if(elapsedTimer)clearInterval(elapsedTimer);pollingTimer=elapsedTimer=null}
+function updElapsed(){var el=$("stepEl");if(el&&stepStart)el.textContent=fmt(Math.round((Date.now()-stepStart)/1000))}
+
+function render(job){
+  console.log("[render] job:",job);
+  try{
+  if(!workerAlive)return;
+  var imgKey=JSON.stringify(job.stage_images||{});
+  var changed=job.status!==lastStatus||job.stage!==lastStage||imgKey!==lastImgKey;
+
+  if(job.status==="running"||job.status==="queued"){
+    var stage=job.stage||0,label=job.stage_label||"Working...";
+    var steps=job.text_image?[0,1,2,3]:[1,2,3];
+    var sh='<div class="progress-steps">';steps.forEach(function(s){sh+='<div class="progress-step '+(s<stage?"done":s===stage?"active":"")+'"></div>'});sh+='</div>';
+    statusArea.innerHTML='<div class="progress-box">'+sh+'<div class="progress-label">Step '+stage+' \u2014 '+esc(label)+'</div><div class="progress-bar"><div class="progress-bar-inner"></div></div><div class="progress-elapsed">Elapsed: <span id="stepEl">0:00</span></div><div class="progress-hint">This normally takes 2 to 4 minutes per step</div></div>';
+    if(changed)resultArea.innerHTML=renderStages(job)+cancelHtml(job);
+  }else if(job.status==="awaiting_selection"){
+    if(changed){clearInterval(elapsedTimer);elapsedTimer=null;pauseStart=job.paused_at?job.paused_at*1000:Date.now();statusArea.innerHTML="";resultArea.innerHTML=renderAwaiting(job);startPauseTimer()}
+  }else if(job.status==="awaiting_text_confirmation"){
+    if(changed){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Text extracted from image. Check and confirm:</div>';resultArea.innerHTML='<div class="text-confirm-area"><textarea id="extTxt">'+esc(job.extracted_text||"")+'</textarea><button class="text-confirm-btn" data-action="confirm-text" data-job="'+job.id+'">Confirm and continue</button></div>'+cancelHtml(job)}
+  }else if(job.status==="awaiting_crop_review"){
+    if(changed){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Review the extracted designs below.</div>';resultArea.innerHTML=renderCropReview(job);maybeInitBoxEditor(job);startPauseTimer()}
+  }else if(job.status==="awaiting_multi_selection"){
+    if(changed){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Select which artworks the client approved for regeneration.</div>';resultArea.innerHTML=renderMultiSelect(job);startPauseTimer()}
+  }else if(job.status==="awaiting_number_selection"){
+    if(changed){clearInterval(elapsedTimer);statusArea.innerHTML="";resultArea.innerHTML=renderNumberSelection(job);startPauseTimer()}
+  }else if(job.status==="done"||job.status==="done_with_errors"){
+    clr();var activeT=job.active_time?Math.round(job.active_time):0;
+    var doneMsg=job.status==="done_with_errors"?'Done with some errors ('+fmt(activeT)+' processing time)':'All done! ('+fmt(activeT)+' processing time)';
+    var doneClass=job.status==="done_with_errors"?"awaiting":"done";
+    statusArea.innerHTML='<div class="status-box '+doneClass+'">'+doneMsg+'</div>';
+    if(job.workflow==="mockup")resultArea.innerHTML=renderMockupResults(job);
+    else if(job.workflow==="artwork")resultArea.innerHTML=renderArtworkResults(job);
+    else resultArea.innerHTML=renderStages(job);
+    activeJobId=null;updBtn();addHist(job);
+  }else if(job.status==="failed"||job.status==="cancelled"){
+    clr();var msg=job.status==="cancelled"?"Job cancelled.":"Something went wrong: "+(job.error||"Unknown error");
+    statusArea.innerHTML='<div class="status-box failed">'+esc(msg)+'</div>';resultArea.innerHTML="";activeJobId=null;updBtn();addHist(job);
+  }
+  lastStatus=job.status;lastStage=job.stage;lastImgKey=imgKey;
+  }catch(e){console.error("[render] error:",e);resultArea.innerHTML='<div class="status-box failed">UI rendering error: '+esc(e.message)+'</div>'}
+}
+
+function renderAwaiting(job){
+  var si=job.stage_images||{},stage=job.stage||1;
+  var stageKey=stage===1?"stage1":"stage2";
+  var choices=job.choices||[],prompts=job.prompts||[],hasT0=job.text_image?1:0;
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
+  if(stage===2&&si.stage1){html+=stageBlock("Step 1 \u2014 Style variations \u2014 chosen: #"+(choices[0]||"?"),job.id,"stage1",prompts,hasT0,false)}
+  if(!si[stageKey]){html+='<div class="status-box failed">Error: The collage image could not be loaded.</div>'+cancelHtml(job);return html}
+  var title=stage===1?"Step 1 \u2014 Style variations":"Step 2 \u2014 Colour variations";
+  html+=stageBlock(title,job.id,stageKey,prompts,hasT0+(stage-1),false);
+  var selText=stage===1?"Which style number did the client choose?":"Which colour number did the client choose?";
+  html+='<div class="selection-area"><p>'+selText+'</p><div class="choice-btns">';
+  for(var i=1;i<=8;i++)html+='<button class="choice-btn" data-action="select" data-job="'+job.id+'" data-choice="'+i+'">'+i+'</button>';
+  html+='<button class="regen-btn" data-action="regenerate" data-job="'+job.id+'">None of these \u2014 regenerate</button></div>';
+  var nextStep=stage===1?2:3;
+  var nextTpl=stage===1?(job.template_turn2||DT.turn2):(job.template_turn3||DT.turn3);
+  var tplId="nextTpl_"+job.id;
+  html+='<div class="edit-toggle" data-action="toggle" data-target="'+tplId+'_body">Edit prompt for step '+nextStep+'</div>';
+  html+='<div class="edit-body" id="'+tplId+'_body"><textarea id="'+tplId+'">'+esc(nextTpl)+'</textarea><div class="tpl-error" id="selTplErr"></div></div>';
+  html+='<div class="wait-elapsed">Waiting: <span id="pauseEl">0:00</span></div>';
+  html+=cancelHtml(job)+'</div>';
+  return html;
+}
+
+function renderStages(job){
+  var si=job.stage_images||{},choices=job.choices||[],prompts=job.prompts||[],hasT0=job.text_image?1:0;
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
+  if(si.stage1){html+=stageBlock("Step 1 \u2014 Style variations"+(choices[0]?" \u2014 chosen: #"+choices[0]:""),job.id,"stage1",prompts,hasT0,false)}
+  if(si.stage2){html+=stageBlock("Step 2 \u2014 Colour variations"+(choices[1]?" \u2014 chosen: #"+choices[1]:""),job.id,"stage2",prompts,hasT0+1,false)}
+  if(si.final){html+=stageBlock("Final artwork",job.id,"final",prompts,hasT0+2,true)}
+  if(job.status==="done"&&job.vault_folder){html+='<div class="vault-info">Saved to:<br><code>'+esc(job.vault_folder)+'</code><br><button class="vault-btn" data-action="open-folder" data-path="'+esc(job.vault_folder)+'">Open folder</button></div>'}
+  return html;
+}
+
+function stageBlock(title,jobId,stageKey,prompts,pIdx,isFinal){
+  var url="/api/jobs/"+jobId+"/stage/"+stageKey+".png";
+  var cls=isFinal?"transparent-bg":"";
+  var pId="pt_"+Math.random().toString(36).slice(2,7);
+  var h='<div class="stage-result"><h3>'+title+'</h3><a href="'+url+'" target="_blank"><img src="'+url+'" class="'+cls+'"></a>';
+  h+='<a class="dl-btn" href="'+url+'" download>Download to send to client</a>';
+  if(prompts&&pIdx<prompts.length&&prompts[pIdx]){h+='<div class="prompt-toggle" data-action="toggle" data-target="'+pId+'">Prompt used</div><div class="prompt-content" id="'+pId+'">'+esc(prompts[pIdx])+'</div>'}
+  return h+'</div>';
+}
+function cancelHtml(job){return '<button class="cancel-btn" data-action="cancel" data-job="'+job.id+'">Cancel job</button>'}
+
+// --- Action handlers ---
+function doSelect(jid,choice){
+  resultArea.querySelectorAll(".choice-btn,.regen-btn").forEach(function(b){b.disabled=true});
+  var tpl=$("nextTpl_"+jid),err=$("selTplErr"),template=null;
+  if(tpl&&tpl.value.trim())template=tpl.value;
+  fetch("/api/jobs/"+jid+"/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({choice:choice,template:template})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){stepStart=Date.now();lastStatus="";if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000);if(pauseTimer){clearInterval(pauseTimer);pauseTimer=null}}).catch(function(e){if(err)err.textContent=e.message;resultArea.querySelectorAll(".choice-btn,.regen-btn").forEach(function(b){b.disabled=false})});
+}
+function doRegenerate(jid){
+  resultArea.querySelectorAll(".choice-btn,.regen-btn").forEach(function(b){b.disabled=true});
+  fetch("/api/jobs/"+jid+"/regenerate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({template:null})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){stepStart=Date.now();lastStatus="";if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000);if(pauseTimer){clearInterval(pauseTimer);pauseTimer=null}}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';resultArea.querySelectorAll(".choice-btn,.regen-btn").forEach(function(b){b.disabled=false})});
+}
+function doCancelJob(jid){
+  fetch("/api/jobs/"+jid+"/cancel",{method:"POST",headers:{"Content-Type":"application/json"}}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){clr();if(pauseTimer){clearInterval(pauseTimer);pauseTimer=null}statusArea.innerHTML='<div class="status-box failed">Job cancelled.</div>';resultArea.innerHTML="";activeJobId=null;lastStatus="";updBtn()}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+}
+function doConfirmText(jid){
+  var ta=$("extTxt");if(!ta||!ta.value.trim())return;
+  fetch("/api/jobs/"+jid+"/confirm-text",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:ta.value.trim()})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){stepStart=Date.now();lastStatus="";if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+}
+
+var pauseTimer=null;
+function startPauseTimer(){if(pauseTimer)clearInterval(pauseTimer);pauseTimer=setInterval(function(){var el=$("pauseEl");if(el&&pauseStart)el.textContent=fmt(Math.round((Date.now()-pauseStart)/1000))},1000)}
+
+// === MOCKUP WORKFLOW UI ===
+function renderMockupCol1(){
+  col1.innerHTML='<div class="col-title">Mockup Image</div><div class="drop-zone" id="mdz"><p>Drag mockup image here or</p><button class="browse-btn" id="mdzBtn">Choose file</button><input type="file" id="mdzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="mdzErr"></div><div class="uploaded-preview" id="mdzPrev"></div><p style="font-size:.72rem;color:var(--muted);margin-top:8px;">Upload the client\'s mockup sheet. The system will extract individual designs from it.</p>';
+  var dz=$("mdz"),btn=$("mdzBtn"),fi=$("mdzFile");
+  btn.onclick=function(e){e.stopPropagation();fi.click()};dz.onclick=function(){fi.click()};
+  dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
+  dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)upMockup(e.dataTransfer.files[0])};
+  fi.onchange=function(){if(fi.files.length)upMockup(fi.files[0]);fi.value=""};
+}
+function upMockup(file){
+  $("mdzErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
+  if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$("mdzErr").textContent="Only .png .jpg .jpeg .webp accepted.";return}
+  var fd=new FormData();fd.append("files",file);
+  fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){mockupImageFile=d.saved[0].name;$("mdzPrev").innerHTML='<img src="/input/'+mockupImageFile+'" style="max-height:180px">';updMockupBtn()}}).catch(function(e){$("mdzErr").textContent=e.message});
+}
+function renderMockupCol2(){
+  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="mcn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="mti" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="mTplTog">Edit detection prompt</div><div class="edit-body" id="mTplBody"><textarea id="tplExtract">'+esc(DT.extract||"")+'</textarea><div class="tpl-error" id="mTplErr"></div></div><div class="edit-toggle" id="mAdvTog">Advanced settings</div><div class="edit-body" id="mAdvBody"><div class="field-group"><label>Manual grid override (leave 0 for ChatGPT auto-detect)</label></div><div style="display:flex;gap:8px"><div class="field-group"><label>Cols</label><input type="number" id="mCols" value="0" min="0" max="10"></div><div class="field-group"><label>Rows</label><input type="number" id="mRows" value="0" min="0" max="10"></div></div><div class="field-group"><label>Padding (px around each design)</label><input type="number" id="mPad" value="0" min="0" max="50"></div></div><button class="gen-btn" id="mGenBtn" disabled>Extract Artworks</button><div class="blocker-msg" id="mBlkMsg"></div>';
+  $("mcn").oninput=updMockupBtn;$("mti").oninput=updMockupBtn;
+  $("mTplTog").onclick=function(){$("mTplTog").classList.toggle("open");$("mTplBody").classList.toggle("open")};
+  $("mAdvTog").onclick=function(){$("mAdvTog").classList.toggle("open");$("mAdvBody").classList.toggle("open")};
+  $("mGenBtn").onclick=submitMockupJob;
+  checkStatus();
+}
+function updMockupBtn(){
+  var btn=$("mGenBtn"),blk=$("mBlkMsg");if(!btn)return;
+  var cn=$("mcn"),ti=$("mti");
+  var hasImg=!!mockupImageFile;
+  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
+  var blocked=activeJobId!==null||!workerAlive;
+  btn.disabled=!hasImg||!hasDetails||blocked;
+  if(blk){if(!workerAlive)blk.textContent="Worker is not running.";else if(activeJobId)blk.textContent="A job is waiting for input. Cancel or complete it first.";else blk.textContent=""}
+}
+function submitMockupJob(){
+  var cols=parseInt(($("mCols")||{}).value||"0",10);
+  var rows=parseInt(($("mRows")||{}).value||"0",10);
+  var mode=(cols>0&&rows>0)?"grid":"auto";
+  var tplExt=$("tplExtract");
+  if($("mTplErr"))$("mTplErr").textContent="";
+  var body={workflow:"mockup",mockup_image:mockupImageFile,extract_mode:mode,grid_cols:cols||4,grid_rows:rows||2,client:$("mcn").value.trim(),task_id:$("mti").value.trim(),text:"",text_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:tplExt?tplExt.value:"",template_regen:""};
+  console.log("[submitMockupJob] body:",body);
+  $("mGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){activeJobId=d.job_id;pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("mGenBtn").disabled=false});
+}
+
+// === ARTWORK GENERATION WORKFLOW UI ===
+var artworkFiles=[];
+function renderArtworkCol1(){
+  col1.innerHTML='<div class="col-title">Artwork Files</div><div class="drop-zone" id="adz"><p>Drag artwork files here or</p><button class="browse-btn" id="adzBtn">Choose files</button><input type="file" id="adzFile" multiple accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="adzErr"></div><div id="adzList"></div>';
+  var dz=$("adz"),btn=$("adzBtn"),fi=$("adzFile");
+  btn.onclick=function(e){e.stopPropagation();fi.click()};dz.onclick=function(){fi.click()};
+  dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
+  dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)upArtworks(e.dataTransfer.files)};
+  fi.onchange=function(){if(fi.files.length)upArtworks(fi.files);fi.value=""};
+  renderArtworkList();
+}
+function upArtworks(fileList){
+  $("adzErr").textContent="";
+  var fd=new FormData();
+  for(var i=0;i<fileList.length;i++)fd.append("files",fileList[i]);
+  fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){
+    if(d.rejected&&d.rejected.length)$("adzErr").textContent="Skipped: "+d.rejected.join(", ");
+    if(d.saved)d.saved.forEach(function(f){artworkFiles.push(f.name)});
+    renderArtworkList();updArtworkBtn();
+  }).catch(function(e){$("adzErr").textContent=e.message});
+}
+function renderArtworkList(){
+  var el=$("adzList");if(!el)return;
+  if(!artworkFiles.length){el.innerHTML='<p style="font-size:.76rem;color:var(--muted);margin-top:8px">No files uploaded yet.</p>';return}
+  var html='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:6px;margin-top:8px">';
+  for(var i=0;i<artworkFiles.length;i++){
+    html+='<div style="position:relative;border:1px solid var(--border);border-radius:6px;padding:4px;text-align:center">';
+    html+='<img src="/input/'+artworkFiles[i]+'" style="width:100%;max-height:70px;object-fit:contain;border-radius:3px">';
+    html+='<div style="font-size:.64rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(artworkFiles[i])+'</div>';
+    html+='<span onclick="removeArtwork('+i+')" style="position:absolute;top:2px;right:4px;cursor:pointer;font-size:.8rem;color:#dc2626;font-weight:700">\u00d7</span>';
+    html+='</div>';
+  }
+  html+='</div>';
+  el.innerHTML=html;
+}
+window.removeArtwork=function(idx){artworkFiles.splice(idx,1);renderArtworkList();updArtworkBtn()};
+function renderArtworkCol2(){
+  var artTpl=DT.artwork||DT.artwork_regen||"Regenerate this artwork as a clean final version suitable for DTF garment printing.";
+  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="acn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="ati" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="aTplTog">Edit regeneration prompt</div><div class="edit-body" id="aTplBody"><textarea id="tplArtRegen">'+esc(artTpl)+'</textarea></div><button class="gen-btn" id="aGenBtn" disabled>Generate</button><div class="blocker-msg" id="aBlkMsg"></div>';
+  $("acn").oninput=updArtworkBtn;$("ati").oninput=updArtworkBtn;
+  $("aTplTog").onclick=function(){$("aTplTog").classList.toggle("open");$("aTplBody").classList.toggle("open")};
+  $("aGenBtn").onclick=submitArtworkJob;
+  checkStatus();
+}
+function updArtworkBtn(){
+  var btn=$("aGenBtn"),blk=$("aBlkMsg");if(!btn)return;
+  var cn=$("acn"),ti=$("ati");
+  var hasFiles=artworkFiles.length>0;
+  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
+  var blocked=activeJobId!==null||!workerAlive;
+  btn.disabled=!hasFiles||!hasDetails||blocked;
+  if(blk){if(!workerAlive)blk.textContent="Worker is not running.";else if(activeJobId)blk.textContent="A job is in progress. Cancel or complete it first.";else blk.textContent=""}
+}
+function submitArtworkJob(){
+  var tpl=$("tplArtRegen");
+  var body={workflow:"artwork",artwork_files:artworkFiles,client:$("acn").value.trim(),task_id:$("ati").value.trim(),template_regen:tpl?tpl.value:"",text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
+  console.log("[submitArtworkJob] artworkFiles:",artworkFiles,"body:",body);
+  $("aGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){activeJobId=d.job_id;pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("aGenBtn").disabled=false});
+}
+
+function doAcceptCrops(jid){
+  fetch("/api/jobs/"+jid+"/crops",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"accept"})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){lastStatus="";stepStart=Date.now();if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+}
+function doReextract(jid,mode){
+  var cols=parseInt(($("reCols")||{}).value||"4",10);
+  var rows=parseInt(($("reRows")||{}).value||"2",10);
+  var pad=8;
+  fetch("/api/jobs/"+jid+"/crops",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:mode==="grid"?"reextract":"redetect",mode:mode,cols:cols,rows:rows,padding:pad})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){lastStatus=""}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+}
+function doRecrop(jid){
+  if(!window._editorBoxes||!window._editorBoxes.length){statusArea.innerHTML='<div class="status-box failed">No boxes to crop. Draw or adjust boxes on the image first.</div>';return}
+  fetch("/api/jobs/"+jid+"/crops",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"recrop",boxes:window._editorBoxes,padding:8})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){lastStatus=""}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+}
+
+// === BOX EDITOR ===
+var _editorJobId=null;
+window._editorBoxes=[];
+var _edImg=null,_edScale=1,_edDrag=null,_edNew=null;
+var HANDLE=8;
+
+window.initBoxEditor=function(jobId,boxes){
+  _editorJobId=jobId;
+  window._editorBoxes=boxes&&boxes.length?boxes.map(function(b){return{x:b.x||0,y:b.y||0,w:b.w||0,h:b.h||0}}):[];
+  _edImg=new Image();
+  _edImg.onload=function(){drawEditor()};
+  _edImg.src="/api/jobs/"+jobId+"/source";
+};
+
+function drawEditor(){
+  var canvas=$("boxCanvas");if(!canvas||!_edImg)return;
+  var wrap=$("boxEditorWrap");
+  var dispW=wrap.clientWidth;
+  _edScale=dispW/_edImg.naturalWidth;
+  var dispH=Math.round(_edImg.naturalHeight*_edScale);
+  canvas.width=dispW;canvas.height=dispH;
+  canvas.style.height=dispH+"px";
+  var ctx=canvas.getContext("2d");
+  ctx.drawImage(_edImg,0,0,dispW,dispH);
+  for(var i=0;i<window._editorBoxes.length;i++){
+    var b=window._editorBoxes[i];
+    var sx=b.x*_edScale,sy=b.y*_edScale,sw=b.w*_edScale,sh=b.h*_edScale;
+    ctx.strokeStyle="#2563eb";ctx.lineWidth=2;ctx.strokeRect(sx,sy,sw,sh);
+    ctx.fillStyle="rgba(37,99,235,0.08)";ctx.fillRect(sx,sy,sw,sh);
+    ctx.fillStyle="#2563eb";ctx.font="bold 12px sans-serif";ctx.fillText("#"+(i+1),sx+3,sy+14);
+    var corners=[[sx,sy],[sx+sw,sy],[sx,sy+sh],[sx+sw,sy+sh]];
+    ctx.fillStyle="#fff";ctx.strokeStyle="#2563eb";ctx.lineWidth=1.5;
+    corners.forEach(function(c){ctx.beginPath();ctx.arc(c[0],c[1],HANDLE/2,0,Math.PI*2);ctx.fill();ctx.stroke()});
+  }
+  if(!canvas._bound){
+    canvas._bound=true;
+    canvas.addEventListener("mousedown",edDown);
+    canvas.addEventListener("mousemove",edMove);
+    canvas.addEventListener("mouseup",edUp);
+    canvas.addEventListener("contextmenu",edCtx);
+  }
+}
+function edXY(e){var r=$("boxCanvas").getBoundingClientRect();return{x:(e.clientX-r.left)/_edScale,y:(e.clientY-r.top)/_edScale}}
+function edDown(e){
+  if(e.button!==0)return;var p=edXY(e);
+  for(var i=window._editorBoxes.length-1;i>=0;i--){
+    var b=window._editorBoxes[i];
+    var cs=[{cx:b.x,cy:b.y,e:"tl"},{cx:b.x+b.w,cy:b.y,e:"tr"},{cx:b.x,cy:b.y+b.h,e:"bl"},{cx:b.x+b.w,cy:b.y+b.h,e:"br"}];
+    for(var j=0;j<cs.length;j++){if(Math.abs(p.x-cs[j].cx)<HANDLE/_edScale+2&&Math.abs(p.y-cs[j].cy)<HANDLE/_edScale+2){_edDrag={t:"rsz",i:i,e:cs[j].e,sx:p.x,sy:p.y,o:{x:b.x,y:b.y,w:b.w,h:b.h}};return}}
+    if(p.x>=b.x&&p.x<=b.x+b.w&&p.y>=b.y&&p.y<=b.y+b.h){_edDrag={t:"mv",i:i,sx:p.x,sy:p.y,o:{x:b.x,y:b.y}};return}
+  }
+  _edNew={x:p.x,y:p.y,w:0,h:0};_edDrag={t:"nw",sx:p.x,sy:p.y};
+}
+function edMove(e){
+  if(!_edDrag)return;var p=edXY(e);
+  if(_edDrag.t==="mv"){var b=window._editorBoxes[_edDrag.i];b.x=_edDrag.o.x+(p.x-_edDrag.sx);b.y=_edDrag.o.y+(p.y-_edDrag.sy)}
+  else if(_edDrag.t==="rsz"){var b2=window._editorBoxes[_edDrag.i],o=_edDrag.o,dx=p.x-_edDrag.sx,dy=p.y-_edDrag.sy;
+    if(_edDrag.e[1]==="l"){b2.x=o.x+dx;b2.w=o.w-dx}if(_edDrag.e[1]==="r"||_edDrag.e.length===2&&_edDrag.e[1]==="r"){b2.w=o.w+dx}
+    if(_edDrag.e[0]==="t"){b2.y=o.y+dy;b2.h=o.h-dy}if(_edDrag.e[0]==="b"){b2.h=o.h+dy}
+    if(_edDrag.e==="tr"){b2.w=o.w+dx;b2.y=o.y+dy;b2.h=o.h-dy}
+    if(_edDrag.e==="bl"){b2.x=o.x+dx;b2.w=o.w-dx;b2.h=o.h+dy}
+    if(_edDrag.e==="br"){b2.w=o.w+dx;b2.h=o.h+dy}
+    if(_edDrag.e==="tl"){b2.x=o.x+dx;b2.w=o.w-dx;b2.y=o.y+dy;b2.h=o.h-dy}
+    if(b2.w<10)b2.w=10;if(b2.h<10)b2.h=10;
+  }else if(_edDrag.t==="nw"){_edNew.w=p.x-_edDrag.sx;_edNew.h=p.y-_edDrag.sy}
+  drawEditor();
+  if(_edDrag.t==="nw"&&_edNew){var cv=$("boxCanvas"),cx=cv.getContext("2d");var sx2=_edNew.x*_edScale,sy2=_edNew.y*_edScale,sw2=_edNew.w*_edScale,sh2=_edNew.h*_edScale;cx.strokeStyle="#dc2626";cx.lineWidth=2;cx.setLineDash([4,4]);cx.strokeRect(sx2,sy2,sw2,sh2);cx.setLineDash([])}
+}
+function edUp(e){
+  if(_edDrag&&_edDrag.t==="nw"&&_edNew){var bx=Math.min(_edNew.x,_edNew.x+_edNew.w),by=Math.min(_edNew.y,_edNew.y+_edNew.h),bw=Math.abs(_edNew.w),bh=Math.abs(_edNew.h);if(bw>15&&bh>15)window._editorBoxes.push({x:Math.round(bx),y:Math.round(by),w:Math.round(bw),h:Math.round(bh)})}
+  window._editorBoxes.forEach(function(b){b.x=Math.round(b.x);b.y=Math.round(b.y);b.w=Math.round(b.w);b.h=Math.round(b.h)});
+  _edDrag=null;_edNew=null;drawEditor();
+}
+function edCtx(e){e.preventDefault();var p=edXY(e);for(var i=window._editorBoxes.length-1;i>=0;i--){var b=window._editorBoxes[i];if(p.x>=b.x&&p.x<=b.x+b.w&&p.y>=b.y&&p.y<=b.y+b.h){window._editorBoxes.splice(i,1);drawEditor();return}}}
+function doSubmitMulti(jid){
+  var checks=resultArea.querySelectorAll('input[data-crop-check]:checked');
+  var choices=[];checks.forEach(function(c){choices.push(parseInt(c.dataset.cropCheck,10))});
+  if(choices.length===0){statusArea.innerHTML='<div class="status-box failed">Select at least one artwork.</div>';return}
+  fetch("/api/jobs/"+jid+"/select-multi",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({choices:choices})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){lastStatus="";stepStart=Date.now();if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+}
+function doSubmitNumbers(jid){
+  var input=$("numberInput");
+  if(!input||!input.value.trim()){statusArea.innerHTML='<div class="status-box failed">Enter at least one number.</div>';return}
+  var parts=input.value.split(/[,\s]+/).filter(function(s){return s.length>0});
+  var numbers=[];
+  for(var i=0;i<parts.length;i++){
+    var n=parseInt(parts[i],10);
+    if(isNaN(n)||n<1){statusArea.innerHTML='<div class="status-box failed">"'+esc(parts[i])+'" is not a valid number.</div>';return}
+    numbers.push(n);
+  }
+  if(numbers.length===0){statusArea.innerHTML='<div class="status-box failed">Enter at least one number.</div>';return}
+  fetch("/api/jobs/"+jid+"/select-numbers",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({numbers:numbers})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){lastStatus="";stepStart=Date.now();if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000);if(pauseTimer){clearInterval(pauseTimer);pauseTimer=null}}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+}
+
+function renderCropReview(job){
+  var cn=job.crop_names||[],count=cn.length,warnings=job.crop_warnings||[];
+  var boxes=job.detected_boxes||[];
+  var isImageMode=job.extract_mode!=="grid"&&!boxes.length;
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+' \u2014 '+count+' design(s) found</div>';
+
+  // Box editor canvas — only for box/grid modes
+  if(!isImageMode&&boxes.length){
+    html+='<div id="boxEditorWrap" style="position:relative;margin-bottom:12px;border:1px solid var(--border);border-radius:8px;overflow:hidden;max-height:500px">';
+    html+='<canvas id="boxCanvas" style="width:100%;display:block;cursor:crosshair"></canvas>';
+    html+='</div>';
+    html+='<div style="font-size:.72rem;color:var(--muted);margin-bottom:8px">Drag box edges/corners to resize. Drag body to move. Right-click to delete. Draw new box by dragging on empty space.</div>';
+  }
+
+  // Crop thumbnails
+  html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;margin-bottom:12px">';
+  for(var i=0;i<count;i++){
+    var warn=warnings[i]||null;
+    var borderStyle=warn?'border:2px solid #dc2626':'border:1px solid var(--border)';
+    html+='<div style="text-align:center;'+borderStyle+';border-radius:6px;padding:4px">';
+    html+='<img src="/api/jobs/'+job.id+'/crop/'+(i+1)+'" style="width:100%;max-height:90px;object-fit:contain;border-radius:3px">';
+    html+='<div style="font-size:.68rem;color:var(--muted);margin-top:2px">#'+(i+1)+'</div>';
+    if(warn)html+='<div style="font-size:.64rem;color:#dc2626">\u26a0 '+esc(warn)+'</div>';
+    html+='</div>';
+  }
+  html+='</div>';
+
+  // Prompt used disclosure
+  var usedPrompts=job.prompts||[];
+  if(usedPrompts.length>0){
+    var pid="pt_detect_"+Math.random().toString(36).slice(2,7);
+    html+='<div class="prompt-toggle" data-action="toggle" data-target="'+pid+'">Prompt used for extraction</div><div class="prompt-content" id="'+pid+'">'+esc(usedPrompts[0])+'</div>';
+  }
+
+  // Action buttons
+  html+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">';
+  html+='<button class="gen-btn" style="width:auto;padding:10px 20px" data-action="accept-crops" data-job="'+job.id+'">Looks right \u2014 continue</button>';
+  if(!isImageMode&&boxes.length){
+    html+='<button class="regen-btn" id="recropBtn" data-action="recrop-apply" data-job="'+job.id+'">Re-crop with adjusted boxes</button>';
+  }
+  html+='<button class="regen-btn" data-action="reextract" data-job="'+job.id+'" data-mode="auto">Extract again (fresh)</button>';
+  html+='</div>';
+
+  // Grid fallback
+  html+='<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border);font-size:.72rem;color:var(--muted)">';
+  html+='Manual grid: <input type="number" id="reCols" value="4" min="1" max="10" style="width:36px;padding:3px;border:1px solid var(--border);border-radius:4px;font-size:.72rem"> \u00d7 <input type="number" id="reRows" value="2" min="1" max="10" style="width:36px;padding:3px;border:1px solid var(--border);border-radius:4px;font-size:.72rem;margin-right:6px">';
+  html+='<button class="regen-btn" style="font-size:.72rem;padding:4px 10px" data-action="reextract" data-job="'+job.id+'" data-mode="grid">Split as grid</button></div>';
+  html+=cancelHtml(job);
+  return html;
+}
+
+// After renderCropReview sets innerHTML, we need to init the editor
+// This is called from the render function after setting resultArea.innerHTML
+function maybeInitBoxEditor(job){
+  if(job.status==="awaiting_crop_review"&&job.detected_boxes&&job.detected_boxes.length){
+    window.initBoxEditor(job.id,job.detected_boxes);
+  }
+}
+
+function renderMultiSelect(job){
+  var cn=job.crop_names||[],count=cn.length;
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
+  html+='<p style="font-size:.86rem;margin-bottom:10px">Select the artworks the client approved:</p>';
+  html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:14px">';
+  for(var i=0;i<count;i++){
+    html+='<label style="text-align:center;border:1px solid var(--border);border-radius:8px;padding:6px;cursor:pointer;display:block"><input type="checkbox" data-crop-check="'+(i+1)+'" checked style="margin-bottom:4px"><br><img src="/api/jobs/'+job.id+'/crop/'+(i+1)+'" style="width:100%;max-height:120px;object-fit:contain;border-radius:4px"><div style="font-size:.72rem;color:var(--muted);margin-top:4px">#'+(i+1)+'</div></label>';
+  }
+  html+='</div>';
+  html+='<p style="font-size:.76rem;color:var(--muted);margin-bottom:10px">\u26a0\ufe0f Regenerating takes about 2 minutes per artwork.</p>';
+  html+='<button class="gen-btn" style="width:auto;padding:12px 24px" data-action="submit-multi" data-job="'+job.id+'">Confirm selection &amp; regenerate</button>';
+  html+=cancelHtml(job);
+  return html;
+}
+
+function renderNumberSelection(job){
+  var si=job.stage_images||{};
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
+  // Show contact sheet
+  if(si.contact_sheet){
+    var url="/api/output/"+si.contact_sheet;
+    html+='<div class="stage-result"><h3>Contact sheet</h3><a href="'+url+'" target="_blank"><img src="'+url+'" style="width:100%;max-height:500px;object-fit:contain;border-radius:8px;border:1px solid var(--border)"></a>';
+    html+='<a class="dl-btn" href="'+url+'" download>Download to send to client</a></div>';
+  }
+  // Number input
+  html+='<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">';
+  html+='<p style="font-size:.88rem;font-weight:500;margin-bottom:6px">Which designs did the client choose?</p>';
+  html+='<p style="font-size:.76rem;color:var(--muted);margin-bottom:8px">Enter the numbers from the contact sheet, separated by commas. For example: 3, 7, 9</p>';
+  html+='<input type="text" id="numberInput" placeholder="e.g. 3, 7, 9" style="width:100%;padding:12px;font-size:1rem;border:2px solid var(--border);border-radius:8px;margin-bottom:6px">';
+  html+='<div id="numberPreview" style="font-size:.76rem;color:var(--muted);margin-bottom:8px"></div>';
+  html+='<button class="gen-btn" style="width:auto;padding:12px 24px" data-action="submit-numbers" data-job="'+job.id+'">Generate chosen designs</button>';
+  html+='<p style="font-size:.72rem;color:var(--muted);margin-top:6px">\u26a0\ufe0f Each design takes about 2 minutes to generate.</p>';
+  html+='</div>';
+  // Prompt disclosure
+  var prompts=job.prompts||[];
+  if(prompts.length>0){var pid="pt_cs_"+Math.random().toString(36).slice(2,7);html+='<div class="prompt-toggle" data-action="toggle" data-target="'+pid+'">Prompt used</div><div class="prompt-content" id="'+pid+'">'+esc(prompts[0])+'</div>'}
+  html+='<div class="wait-elapsed">Waiting: <span id="pauseEl">0:00</span></div>';
+  html+=cancelHtml(job);
+  return html;
+}
+
+function renderMockupResults(job){
+  var fn=job.final_names||[],si=job.stage_images||{};
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
+  // Show contact sheet
+  if(si.contact_sheet){
+    var csUrl="/api/output/"+si.contact_sheet;
+    html+='<div class="stage-result"><h3>Contact sheet</h3><a href="'+csUrl+'" target="_blank"><img src="'+csUrl+'" style="width:100%;max-height:300px;object-fit:contain;border-radius:8px;border:1px solid var(--border)"></a></div>';
+  }
+  // Show generated designs
+  if(fn.length){
+    html+='<h3 style="font-size:.82rem;font-weight:600;color:var(--muted);margin-bottom:8px">Generated designs ('+fn.length+')</h3>';
+    html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:14px">';
+    for(var i=0;i<fn.length;i++){
+      var url="/api/output/"+fn[i];
+      html+='<div style="text-align:center"><a href="'+url+'" target="_blank"><img src="'+url+'" style="width:100%;max-height:200px;object-fit:contain;border-radius:8px;border:1px solid var(--border);background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/14px 14px"></a><a class="dl-btn" href="'+url+'" download style="margin-top:4px">Download</a></div>';
+    }
+    html+='</div>';
+  }
+  // Prompts used
+  var prompts=job.prompts||[];
+  if(prompts.length>1){
+    for(var p=1;p<prompts.length;p++){
+      var pid="pt_m_"+p+"_"+Math.random().toString(36).slice(2,5);
+      html+='<div class="prompt-toggle" data-action="toggle" data-target="'+pid+'">Prompt used (design '+p+')</div><div class="prompt-content" id="'+pid+'">'+esc(prompts[p])+'</div>';
+    }
+  }
+  if(job.vault_folder){
+    html+='<div class="vault-info">Saved to:<br><code>'+esc(job.vault_folder)+'</code><br><button class="vault-btn" data-action="open-folder" data-path="'+esc(job.vault_folder)+'">Open folder</button></div>';
+  }
+  return html;
+}
+function renderArtworkResults(job){
+  var fn=job.final_names||[],af=job.artwork_files||[],errors=job.artwork_errors||[];
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
+  if(fn.length){
+    html+='<h3 style="font-size:.82rem;font-weight:600;color:var(--muted);margin-bottom:8px">Results ('+fn.length+' of '+af.length+')</h3>';
+    html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-bottom:14px">';
+    for(var i=0;i<fn.length;i++){
+      var origUrl=af[i]?"/input/"+af[i]:"";
+      var finalUrl="/api/output/"+fn[i];
+      html+='<div style="display:flex;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px;align-items:center">';
+      if(origUrl)html+='<div style="flex:1;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Original</div><img src="'+origUrl+'" style="max-height:120px;max-width:100%;object-fit:contain;border-radius:4px"></div>';
+      html+='<div style="flex:1;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Generated</div><a href="'+finalUrl+'" target="_blank"><img src="'+finalUrl+'" style="max-height:120px;max-width:100%;object-fit:contain;border-radius:4px;background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/10px 10px"></a><a class="dl-btn" href="'+finalUrl+'" download style="margin-top:4px;font-size:.72rem;padding:5px 10px">Download</a></div>';
+      html+='</div>';
+    }
+    html+='</div>';
+  }
+  if(errors.length){
+    html+='<div style="margin-bottom:10px">';
+    for(var e2=0;e2<errors.length;e2++)html+='<div style="font-size:.76rem;color:#dc2626;margin-bottom:3px">\u26a0 '+esc(errors[e2])+'</div>';
+    html+='</div>';
+  }
+  var prompts=job.prompts||[];
+  if(prompts.length){var pid="pt_ar_"+Math.random().toString(36).slice(2,5);html+='<div class="prompt-toggle" data-action="toggle" data-target="'+pid+'">Prompt used</div><div class="prompt-content" id="'+pid+'">'+esc(prompts[0])+'</div>'}
+  if(job.vault_folder){html+='<div class="vault-info">Saved to:<br><code>'+esc(job.vault_folder)+'</code><br><button class="vault-btn" data-action="open-folder" data-path="'+esc(job.vault_folder)+'">Open folder</button></div>'}
+  return html;
+}
+function fmt(s){var m=Math.floor(s/60),sec=s%60;return m>0?m+":"+String(sec).padStart(2,"0"):"0:"+String(sec).padStart(2,"0")}
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
+function addHist(job){historyItems.unshift(job);historySection.style.display="block";renderHist()}
+function renderHist(){
+  historyList.innerHTML="";
+  historyItems.forEach(function(job,i){
+    var el=job.active_time?Math.round(job.active_time):0;
+    var st=job.status==="done"?"\u2705 Done ("+fmt(el)+")":job.status==="cancelled"?"\u26d4 Cancelled":"\u274c Failed";
+    var desc=job.text?'"'+esc(job.text)+'"':job.text_image||"";
+    var si=job.stage_images||{};var did="hd_"+i;
+    var det="";if(si.stage1)det+='<img src="/api/jobs/'+job.id+'/stage/stage1.png">';if(si.stage2)det+='<img src="/api/jobs/'+job.id+'/stage/stage2.png">';if(si.final)det+='<img src="/api/jobs/'+job.id+'/stage/final.png">';
+    var div=document.createElement("div");div.className="history-item";
+    div.innerHTML='<span class="hi-label">'+st+'</span> \u2014 '+esc(job.client)+' / '+esc(job.task_id)+' \u2014 '+desc+'<div class="history-detail" id="'+did+'">'+det+'</div>';
+    div.onclick=function(){$(did).classList.toggle("open")};
+    historyList.appendChild(div);
+  });
+}
+setInterval(function(){fetch("/api/status").then(function(r){return r.json()}).then(function(s){if(!s.worker_alive&&workerAlive){workerAlive=false;workerStatus.innerHTML='<div class="worker-dead">The background worker has stopped. Close any open automation browser window and restart the server.</div>';clr();var b=$("genBtn");if(b)b.disabled=true}})},5000);
+checkStatus();
+})();
+</script>
+</body>
+</html>
