@@ -85,7 +85,7 @@ def send_text_turn(
 
         # Type prompt and submit
         page.click(PROMPT_BOX)
-        _type_multiline(page, prompt)
+        _enter_prompt(page, prompt)
         page.keyboard.press("Enter")
 
         # Wait for STOP_BUTTON to appear (turn started)
@@ -147,7 +147,7 @@ def send_turn(
 
         # --- Type prompt ---
         page.click(PROMPT_BOX)
-        _type_multiline(page, prompt)
+        _enter_prompt(page, prompt)
 
         # --- Submit ---
         page.keyboard.press("Enter")
@@ -365,7 +365,7 @@ def extract_artwork_images(
         logger.info("extract_artwork_images before-ids: %d", len(pre_existing_ids))
 
         page.click(PROMPT_BOX)
-        _type_multiline(page, prompt)
+        _enter_prompt(page, prompt)
         page.keyboard.press("Enter")
 
         # Wait for STOP_BUTTON to appear (confirms turn started)
@@ -532,8 +532,39 @@ def _wait_for_turn_complete(page: Page, quiet_ms: int = 5000, timeout: int = 900
     raise GenerationTimeoutError("Turn never completed.")
 
 
+def _enter_prompt(page: Page, prompt: str) -> None:
+    """Enter a prompt into the focused ProseMirror editor via clipboard paste.
+
+    Falls back to character-by-character typing if paste fails verification.
+    """
+    # Try paste first (much faster for long prompts)
+    try:
+        page.evaluate("text => navigator.clipboard.writeText(text)", prompt)
+        page.click(PROMPT_BOX)
+        page.keyboard.press("Control+V")
+        # Brief wait for paste to settle
+        page.wait_for_timeout(300)
+        # Verify paste succeeded by checking editor content length
+        content = page.evaluate(
+            "() => document.querySelector('#prompt-textarea')?.textContent || ''"
+        )
+        if len(content.strip()) >= len(prompt.strip()) * 0.8:
+            logger.info("_enter_prompt: paste succeeded (%d chars)", len(content))
+            return
+        else:
+            logger.info("_enter_prompt: paste produced %d chars, expected ~%d. Falling back to typing.", len(content), len(prompt))
+    except Exception as exc:
+        logger.info("_enter_prompt: paste failed (%s), falling back to typing.", exc)
+
+    # Fallback: clear whatever partial paste left and type character by character
+    page.click(PROMPT_BOX)
+    page.keyboard.press("Control+A")
+    page.keyboard.press("Backspace")
+    _type_multiline(page, prompt)
+
+
 def _type_multiline(page: Page, text: str) -> None:
-    """Type multi-line text into the focused ProseMirror editor.
+    """Type multi-line text into the focused ProseMirror editor (fallback for paste).
 
     Splits on newlines and inserts Shift+Enter between lines so that
     page.keyboard.type() does not accidentally submit the form.

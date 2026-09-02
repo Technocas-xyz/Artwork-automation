@@ -25,7 +25,9 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from config.job_options import JOB_OPTIONS, PARAMETERISED_OPTIONS
-from config.workflows import TEXT_TURN_0, TEXT_TURN_1, TEXT_TURN_2, TEXT_TURN_3, MOCKUP_REGENERATE, EXTRACT_BOXES, EXTRACT_ARTWORKS, EXTRACT_CONTACT_SHEET, EXTRACT_SINGLE, ARTWORK_REGENERATE
+from config.workflows import TEXT_TURN_0, TEXT_TURN_1, TEXT_TURN_2, TEXT_TURN_3, MOCKUP_REGENERATE, EXTRACT_BOXES, EXTRACT_ARTWORKS, EXTRACT_CONTACT_SHEET, EXTRACT_SINGLE, ARTWORK_REGENERATE, CUSTOM_RECONSTRUCT, CUSTOM_REMOVE_BACKGROUND, CUSTOM_HALO_REMOVAL, CUSTOM_BLACK_OUT, CUSTOM_HALF_TONE, CUSTOM_DETECT_OBJECTS, CUSTOM_CHANGE_COLOR, CUSTOM_ASPECT_ADVICE, CUSTOM_ASPECT_BASELINE, CUSTOM_ASPECT_REGENERATE, normalise_ratio, CUSTOM_OPERATIONS_ORDER, CUSTOM_OPERATIONS_LABELS, CUSTOM_OPERATIONS
+from src.aspect import image_info, fit_to_ratio
+from src.postprocess import black_out, half_tone, similarity, extract_features
 from src.auth import (
     APP_USERNAME, APP_PASSWORD_HASH, verify_password, sign_cookie,
     get_current_user, check_rate_limit, record_failure, record_success,
@@ -113,6 +115,12 @@ class GenerateRequest(BaseModel):
     template_regen: str = ""
     # Artwork Generation fields
     artwork_files: list[str] = []
+    # Custom Operation fields
+    custom_operations: list[str] = []
+    custom_prompts: dict[str, str] = {}  # {operation_key: edited_prompt}
+    aspect_dpi: int = 0  # operator-set DPI for Aspect Ratio Enhancement (0 = use file/300)
+    halftone_settings: dict = {}  # {lpi, angle, dot} for the local Half Tone op
+    blackout_settings: dict = {}  # {threshold} for the local Black Out op
 
 
 class SelectionRequest(BaseModel):
@@ -139,6 +147,18 @@ class MultiSelectRequest(BaseModel):
 
 class NumberSelectionRequest(BaseModel):
     numbers: list[int]
+
+
+class RatioSelectionRequest(BaseModel):
+    # Either a "W:H" ratio string, or explicit inch dimensions.
+    ratio: str | None = None
+    width: float | None = None
+    height: float | None = None
+    method: str = "pad"  # "pad" (local) or "regenerate" (ChatGPT)
+
+
+class ObjectSelectionRequest(BaseModel):
+    choices: list[dict]  # [{object: str, color: str}]
 
 
 class TextConfirmRequest(BaseModel):
@@ -208,6 +228,8 @@ def _worker() -> None:
                     _run_mockup_workflow(page, job)
                 elif job.get("workflow") == "artwork":
                     _run_artwork_workflow(page, job)
+                elif job.get("workflow") == "custom":
+                    _run_custom_workflow(page, job)
                 else:
                     _run_legacy_job(page, job)
             except _CancelledError:
@@ -406,7 +428,23 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
     colour_choice = job["choices"][-1]  # last choice for stage 2
     tpl_turn3 = job.get("template_turn3") or tpl_turn3
 
-    prompt3 = tpl_turn3.format(m=colour_choice)
+    # The colour collage is a fixed 4-wide grid, numbered left-to-right then
+    # top-to-bottom. Derive the row/position so the prompt names the exact cell
+    # and ChatGPT cannot miscount its own collage (e.g. #8 -> row 2, position 4).
+    COLOUR_GRID_COLS = 4
+    try:
+        m_int = int(colour_choice)
+    except (TypeError, ValueError):
+        m_int = 0
+    if m_int >= 1:
+        row = ((m_int - 1) // COLOUR_GRID_COLS) + 1
+        col = ((m_int - 1) % COLOUR_GRID_COLS) + 1
+    else:
+        row = col = 0
+
+    # Substitute {m}/{row}/{col}; tolerate operator-edited templates missing keys.
+    prompt3 = tpl_turn3.replace("{m}", str(colour_choice)).replace("{row}", str(row)).replace("{col}", str(col))
+    print(f"[text] Turn 3 final prompt (m={colour_choice}, row={row}, col={col}):\n{prompt3}")
     job.setdefault("prompts", []).append(prompt3)
     _track_start(job)
     images3 = send_turn(page, prompt=prompt3, image_paths=None, run_id=f"{job_id}_t3")
@@ -599,6 +637,361 @@ def _run_artwork_workflow(page: Any, job: dict[str, Any]) -> None:
     job["finished_at"] = time.time()
 
 
+def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
+    """Custom Operation workflow: apply selected operations in fixed order."""
+    job_id = job["id"]
+    client = job["client"]
+    task_id = job["task_id"]
+    artwork_file = job.get("artwork_files", [""])[0]
+    operations = job.get("custom_operations", [])
+    custom_prompts = job.get("custom_prompts", {})
+
+    from src.vault import VAULT_DIR
+    task_dir = VAULT_DIR / client / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    existing_runs = [d for d in task_dir.iterdir() if d.is_dir() and d.name.startswith("run_")]
+    run_number = len(existing_runs) + 1
+    run_dir = task_dir / f"run_{run_number}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    job["vault_folder"] = str(run_dir)
+
+    # Sort operations into fixed execution order
+    ordered_ops = [op for op in CUSTOM_OPERATIONS_ORDER if op in operations]
+    total = len(ordered_ops)
+    job["stage_label"] = f"Running {total} operation(s)"
+
+    # Default prompts for each operation
+    default_prompts = {
+        "reconstruct": CUSTOM_RECONSTRUCT,
+        "remove_background": CUSTOM_REMOVE_BACKGROUND,
+        "halo_removal": CUSTOM_HALO_REMOVAL,
+        # black_out and half_tone are deterministic LOCAL ops (src/postprocess.py) — no prompt.
+        # change_object_color is handled separately (two turns, two templates); not a single-turn default.
+    }
+
+    _track_start(job)
+    open_chat(page)
+    _track_end(job)
+
+    # The current reference image path — starts as the uploaded file, updated after each step
+    current_image_path = str(INPUT_DIR / artwork_file)
+    if not artwork_file or not Path(current_image_path).exists():
+        job["status"] = "failed"
+        job["error"] = f"Input file not found: {artwork_file!r}"
+        job["finished_at"] = time.time()
+        return
+
+    steps_done: list[dict] = []
+    errors: list[str] = []
+
+    for i, op in enumerate(ordered_ops, 1):
+        job["stage"] = i
+        label = CUSTOM_OPERATIONS_LABELS.get(op, op)
+        job["stage_label"] = f"Step {i} of {total} \u2014 {label}"
+        print(f"[custom] Step {i}/{total}: {op} | input: {current_image_path}")
+
+        if op == "change_object_color":
+            # TWO-TURN operation with TWO distinct templates/keys, kept separate end to end.
+            #   change_object_detect -> Step A (list objects, text reply)
+            #   change_object_apply  -> Step B (apply colours, {changes}, image reply)
+            # Turn A: detect objects (text reply)
+            detect_prompt = custom_prompts.get("change_object_detect", CUSTOM_DETECT_OBJECTS)
+            print(f"[custom] Turn A (detect) prompt [:200]:\n{detect_prompt[:200]}")
+            job.setdefault("prompts", []).append(detect_prompt)
+
+            try:
+                _track_start(job)
+                detected_text = send_text_turn(page, prompt=detect_prompt, image_paths=[current_image_path], run_id=f"{job_id}_detect_obj")
+                _track_end(job)
+            except Exception as exc:
+                _track_end(job)
+                errors.append(f"Step {i} ({label}) detect: {exc}")
+                break
+
+            job["detected_objects"] = detected_text
+
+            # PAUSE for operator to assign colours
+            job["awaiting_input"] = True
+            job["paused_at"] = time.time()
+            job["status"] = "awaiting_object_selection"
+            print(f"[worker] Job {job_id} awaiting object colour selection.")
+            _wait_for_resume(job_id)
+
+            # Turn B: apply colour changes
+            job["status"] = "running"
+            job["awaiting_input"] = False
+            job["stage_label"] = f"Step {i} of {total} \u2014 Applying colour changes"
+
+            object_choices = job.get("object_color_choices", [])
+            changes_text = "\n".join(f"- {c['object']} \u2192 {c['color']}" for c in object_choices)
+            print(f"[custom] Change colour changes_text:\n{changes_text}")
+            # Turn B uses its OWN template (change_object_apply), never the detection one.
+            apply_template = custom_prompts.get("change_object_apply", CUSTOM_CHANGE_COLOR)
+            if "{changes}" not in apply_template:
+                # Operator edited out the placeholder; append the changes so they are never lost.
+                apply_template = apply_template + "\n\n{changes}"
+            color_prompt = apply_template.format(changes=changes_text)
+            print(f"[custom] Turn B (apply) prompt [:200]:\n{color_prompt[:200]}")
+            job.setdefault("prompts", []).append(color_prompt)
+
+            try:
+                _track_start(job)
+                result_images = send_turn(page, prompt=color_prompt, image_paths=[current_image_path], run_id=f"{job_id}_color_{i}")
+                _track_end(job)
+            except Exception as exc:
+                _track_end(job)
+                errors.append(f"Step {i} ({label}) color: {exc}")
+                break
+
+            if result_images:
+                step_name = f"{job_id}_step{i}_{op}.png"
+                final_data = result_images[0]
+                if is_opaque_white_bg(final_data):
+                    final_data = remove_white_background(final_data)
+                (OUTPUT_DIR / step_name).write_bytes(final_data)
+                (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(final_data)
+                current_image_path = str(OUTPUT_DIR / step_name)
+                steps_done.append({"step": i, "op": op, "label": label, "file": step_name, "prompt": color_prompt})
+            else:
+                errors.append(f"Step {i} ({label}): colour change returned no image")
+                break
+
+        elif op == "aspect_ratio":
+            # Aspect Ratio Enhancement: TWO ChatGPT regenerations.
+            #   Turn A - regenerate at CURRENT ratio, background removed -> BASELINE.
+            #   Turn B - recommend target ratios (text).
+            #   PAUSE  - operator picks target ratio + method.
+            #   Turn C - regenerate at target ratio, working from the baseline.
+            # Similarity compares the RESULT against the BASELINE (both are
+            # background-free), never against the opaque original upload.
+            info = image_info(current_image_path, dpi_override=job.get("aspect_dpi") or None)
+            job["aspect_info"] = info
+            # Record the ORIGINAL upload for the results display.
+            job["aspect_original_file"] = Path(current_image_path).name
+            try:
+                job["aspect_original_features"] = extract_features(Path(current_image_path).read_bytes())
+            except Exception as exc:
+                print(f"[custom] original feature extraction failed: {exc}")
+
+            # --- Turn A: baseline (clean, current ratio, background removed) ---
+            job["stage_label"] = f"Step {i} of {total} \u2014 Cleaning artwork (baseline)"
+            baseline_prompt = CUSTOM_ASPECT_BASELINE
+            print(f"[custom] Aspect baseline prompt [:200]:\n{baseline_prompt[:200]}")
+            job.setdefault("prompts", []).append(baseline_prompt)
+            try:
+                _track_start(job)
+                baseline_images = send_turn(page, prompt=baseline_prompt, image_paths=[current_image_path], run_id=f"{job_id}_aspect_baseline")
+                _track_end(job)
+            except Exception as exc:
+                _track_end(job)
+                errors.append(f"Step {i} ({label}) baseline: {exc}")
+                break
+            if not baseline_images:
+                errors.append(f"Step {i} ({label}): baseline regeneration returned no image")
+                break
+            baseline_data = baseline_images[0]
+            if is_opaque_white_bg(baseline_data):
+                baseline_data = remove_white_background(baseline_data)
+            baseline_name = f"{job_id}_step{i}_aspect_baseline.png"
+            (OUTPUT_DIR / baseline_name).write_bytes(baseline_data)
+            (run_dir / f"{task_id}_R{run_number}_step{i}_aspect_baseline.png").write_bytes(baseline_data)
+            baseline_path = str(OUTPUT_DIR / baseline_name)
+            try:
+                job["aspect_baseline_features"] = extract_features(baseline_data)
+            except Exception as exc:
+                print(f"[custom] baseline feature extraction failed: {exc}")
+            job["aspect_baseline_file"] = baseline_name
+            # Baseline is a shown stage in its own right.
+            steps_done.append({"step": i, "op": op, "label": "Baseline (cleaned, current ratio)",
+                               "file": baseline_name, "prompt": baseline_prompt, "method": "baseline"})
+
+            # --- Turn B: recommend target ratios (text), based on the baseline ---
+            b_info = image_info(baseline_path, dpi_override=job.get("aspect_dpi") or None)
+            advice_tpl = custom_prompts.get("aspect_ratio", CUSTOM_ASPECT_ADVICE)
+            advice_prompt = advice_tpl.format(
+                width=b_info["width"], height=b_info["height"], ratio=b_info["ratio"],
+                inches_w=b_info["inches_w"], inches_h=b_info["inches_h"], dpi=b_info["dpi"],
+            )
+            print(f"[custom] Aspect advice prompt [:200]:\n{advice_prompt[:200]}")
+            job.setdefault("prompts", []).append(advice_prompt)
+            try:
+                _track_start(job)
+                advice_text = send_text_turn(page, prompt=advice_prompt, image_paths=[baseline_path], run_id=f"{job_id}_aspect_advice")
+                _track_end(job)
+            except Exception as exc:
+                _track_end(job)
+                errors.append(f"Step {i} ({label}) advice: {exc}")
+                break
+            job["aspect_recommendations"] = advice_text
+
+            # --- PAUSE for the operator to pick a target ratio + method ---
+            job["awaiting_input"] = True
+            job["paused_at"] = time.time()
+            job["status"] = "awaiting_ratio_selection"
+            print(f"[worker] Job {job_id} awaiting aspect ratio selection.")
+            _wait_for_resume(job_id)
+
+            job["status"] = "running"
+            job["awaiting_input"] = False
+
+            target = job.get("aspect_target")  # {"w": float, "h": float}
+            method = (job.get("aspect_method") or "pad").lower()
+            if not target or target.get("w", 0) <= 0 or target.get("h", 0) <= 0:
+                errors.append(f"Step {i} ({label}): no valid target ratio selected")
+                break
+
+            tw, th = float(target["w"]), float(target["h"])
+            baseline_bytes = Path(baseline_path).read_bytes()
+            step_name = f"{job_id}_step{i}_{op}.png"
+
+            if method == "regenerate":
+                # --- Turn C: regenerate at the target ratio, FROM the baseline ---
+                job["stage_label"] = f"Step {i} of {total} \u2014 Regenerating at target ratio"
+                dpi = (b_info.get("dpi") if b_info else None) or 300
+                ratio_str = normalise_ratio(tw, th)
+                if tw >= th:
+                    in_w = round(max(b_info.get("inches_w", 0), b_info.get("inches_h", 0)) or tw, 2)
+                    in_h = round(in_w * (th / tw), 2)
+                else:
+                    in_h = round(max(b_info.get("inches_w", 0), b_info.get("inches_h", 0)) or th, 2)
+                    in_w = round(in_h * (tw / th), 2)
+                regen_prompt = CUSTOM_ASPECT_REGENERATE.format(
+                    ratio=ratio_str, inches_w=in_w, inches_h=in_h, dpi=dpi,
+                )
+                print(f"[custom] Aspect target prompt [:200]:\n{regen_prompt[:200]}")
+                job.setdefault("prompts", []).append(regen_prompt)
+                try:
+                    _track_start(job)
+                    regen_images = send_turn(page, prompt=regen_prompt, image_paths=[baseline_path], run_id=f"{job_id}_aspect_target")
+                    _track_end(job)
+                except Exception as exc:
+                    _track_end(job)
+                    errors.append(f"Step {i} ({label}) regenerate: {exc}")
+                    break
+                if not regen_images:
+                    errors.append(f"Step {i} ({label}): regeneration returned no image")
+                    break
+                gen_data = regen_images[0]
+                if is_opaque_white_bg(gen_data):
+                    gen_data = remove_white_background(gen_data)
+                (OUTPUT_DIR / step_name).write_bytes(gen_data)
+                (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(gen_data)
+                # Similarity: RESULT vs BASELINE (both background-free) — like for like.
+                try:
+                    sim = similarity(baseline_bytes, gen_data)
+                except Exception as exc:
+                    print(f"[custom] similarity failed: {exc}")
+                    sim = None
+                job["aspect_similarity"] = sim
+                steps_done.append({"step": i, "op": op, "label": "Final (target ratio)",
+                                   "file": step_name, "prompt": regen_prompt, "method": "regenerate",
+                                   "compare_against": "baseline", "similarity": sim})
+                current_image_path = str(OUTPUT_DIR / step_name)
+            else:
+                # PAD the BASELINE locally — pixels preserved exactly, no comparison.
+                job["stage_label"] = f"Step {i} of {total} \u2014 Padding baseline to target ratio"
+                try:
+                    padded = fit_to_ratio(baseline_bytes, tw, th)
+                except Exception as exc:
+                    errors.append(f"Step {i} ({label}): padding failed: {exc}")
+                    break
+                (OUTPUT_DIR / step_name).write_bytes(padded)
+                (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(padded)
+                current_image_path = str(OUTPUT_DIR / step_name)
+                steps_done.append({"step": i, "op": op, "label": "Final (target ratio)",
+                                   "file": step_name, "method": "pad"})
+
+        elif op in ("black_out", "half_tone"):
+            # DETERMINISTIC LOCAL operations — no ChatGPT turn, no prompt, instant.
+            # The model would redraw the artwork and lose the exact silhouette;
+            # these transform the actual pixels instead.
+            job["stage_label"] = f"Step {i} of {total} \u2014 {label} (local)"
+            try:
+                src_bytes = Path(current_image_path).read_bytes()
+                if op == "black_out":
+                    # No opaque-background guard: Black Out drops black pixels and
+                    # works fine on artwork that still has a (non-black) background.
+                    bo = job.get("blackout_settings") or {}
+                    result_bytes = black_out(src_bytes, threshold=int(bo.get("threshold", 40)))
+                else:
+                    # Half Tone needs transparency to work against — an opaque
+                    # background gives nothing to reproduce. Fail clearly.
+                    if is_opaque_white_bg(src_bytes):
+                        errors.append(f"Step {i} ({label}): Input has an opaque background - run Remove Background first")
+                        break
+                    ht = job.get("halftone_settings") or {}
+                    result_bytes = half_tone(
+                        src_bytes,
+                        lpi=float(ht.get("lpi", 40)),
+                        angle=float(ht.get("angle", 22.5)),
+                        dpi=float(ht.get("dpi", 300)),
+                        dot=str(ht.get("dot", "round")),
+                    )
+            except Exception as exc:
+                errors.append(f"Step {i} ({label}): {exc}")
+                break
+
+            step_name = f"{job_id}_step{i}_{op}.png"
+            (OUTPUT_DIR / step_name).write_bytes(result_bytes)
+            (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(result_bytes)
+            current_image_path = str(OUTPUT_DIR / step_name)
+            steps_done.append({"step": i, "op": op, "label": label, "file": step_name})
+
+        else:
+            # Single-turn operation
+            prompt = custom_prompts.get(op, default_prompts.get(op, ""))
+            job.setdefault("prompts", []).append(prompt)
+
+            try:
+                _track_start(job)
+                result_images = send_turn(page, prompt=prompt, image_paths=[current_image_path], run_id=f"{job_id}_{op}_{i}")
+                _track_end(job)
+            except Exception as exc:
+                _track_end(job)
+                errors.append(f"Step {i} ({label}): {exc}")
+                break
+
+            if result_images:
+                step_name = f"{job_id}_step{i}_{op}.png"
+                final_data = result_images[0]
+                if op in ("remove_background", "halo_removal") and is_opaque_white_bg(final_data):
+                    final_data = remove_white_background(final_data)
+                (OUTPUT_DIR / step_name).write_bytes(final_data)
+                (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(final_data)
+                current_image_path = str(OUTPUT_DIR / step_name)
+                steps_done.append({"step": i, "op": op, "label": label, "file": step_name, "prompt": prompt})
+            else:
+                errors.append(f"Step {i} ({label}): no image returned")
+                break
+
+    # Save final
+    if steps_done:
+        last_file = steps_done[-1]["file"]
+        final_name = f"{job_id}_final.png"
+        import shutil
+        shutil.copy2(str(OUTPUT_DIR / last_file), str(OUTPUT_DIR / final_name))
+        (run_dir / f"{task_id}_R{run_number}_final.png").write_bytes((OUTPUT_DIR / last_file).read_bytes())
+        job["final_names"] = [final_name]
+
+    job["custom_steps_done"] = steps_done
+    job["artwork_errors"] = errors
+
+    if errors and not steps_done:
+        job["status"] = "failed"
+        job["error"] = "; ".join(errors)
+    elif errors:
+        job["status"] = "done_with_errors"
+    elif len(steps_done) < total:
+        # Some operations produced no output without raising an error
+        job["status"] = "failed"
+        job["error"] = f"Only {len(steps_done)} of {total} operations produced output. Check the server logs."
+    else:
+        job["status"] = "done"
+
+    job["awaiting_input"] = False
+    job["finished_at"] = time.time()
+
+
 _worker_thread = threading.Thread(target=_worker, daemon=True)
 _worker_thread.start()
 
@@ -620,7 +1013,7 @@ def _unique_filename(directory: Path, name: str) -> str:
 
 def _any_job_blocking() -> str | None:
     for jid, j in jobs.items():
-        if j.get("status") in ("awaiting_selection", "awaiting_text_confirmation", "awaiting_crop_review", "awaiting_multi_selection", "awaiting_number_selection", "running"):
+        if j.get("status") in ("awaiting_selection", "awaiting_text_confirmation", "awaiting_crop_review", "awaiting_multi_selection", "awaiting_number_selection", "awaiting_object_selection", "awaiting_ratio_selection", "running"):
             return jid
     return None
 
@@ -711,7 +1104,32 @@ def list_options():
 
 @app.get("/api/templates")
 def get_templates():
+    # NOTE: custom operations are served via /api/custom-operations with their templates embedded.
+    # TODO: Migrate text/extraction/artwork templates to the same single-sourced pattern.
     return {"turn1": TEXT_TURN_1, "turn2": TEXT_TURN_2, "turn3": TEXT_TURN_3, "extract": EXTRACT_CONTACT_SHEET, "regen": EXTRACT_SINGLE, "artwork_regen": ARTWORK_REGENERATE, "artwork": ARTWORK_REGENERATE}
+
+
+@app.get("/api/custom-operations")
+def get_custom_operations():
+    """Serve the single-sourced custom operations list with embedded templates."""
+    return CUSTOM_OPERATIONS
+
+
+@app.get("/api/artwork-info")
+def artwork_info(file: str, dpi: int | None = None):
+    """Return pixel dimensions, ratio and print size for an uploaded file.
+
+    Lets the UI show the numbers the moment a file is uploaded. `dpi` optionally
+    overrides the DPI used for the inch calculation (recalculates live)."""
+    # Guard against path traversal — only files inside INPUT_DIR by basename.
+    safe = Path(file).name
+    path = INPUT_DIR / safe
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found.")
+    try:
+        return image_info(path, dpi_override=dpi if (dpi and dpi > 0) else None)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read image: {exc}")
 
 
 @app.post("/api/generate")
@@ -742,6 +1160,11 @@ def create_job(req: GenerateRequest):
     elif req.workflow == "artwork":
         if not req.artwork_files:
             raise HTTPException(status_code=400, detail="Upload at least one artwork file.")
+    elif req.workflow == "custom":
+        if not req.artwork_files:
+            raise HTTPException(status_code=400, detail="Upload an artwork file.")
+        if not req.custom_operations:
+            raise HTTPException(status_code=400, detail="Select at least one operation.")
     else:
         if not req.files:
             raise HTTPException(status_code=400, detail="Select at least one image.")
@@ -774,6 +1197,14 @@ def create_job(req: GenerateRequest):
         "crop_names": [], "crop_count": 0, "crop_warnings": [],
         "selected_crops": [], "final_names": [], "chosen_numbers": [],
         "artwork_files": req.artwork_files, "artwork_errors": [],
+        "custom_operations": req.custom_operations, "custom_prompts": req.custom_prompts,
+        "aspect_dpi": req.aspect_dpi, "aspect_info": None, "aspect_recommendations": "",
+        "aspect_target": None, "aspect_method": "pad", "aspect_similarity": None,
+        "aspect_original_file": "", "aspect_original_features": None,
+        "aspect_baseline_file": "", "aspect_baseline_features": None,
+        "halftone_settings": req.halftone_settings,
+        "blackout_settings": req.blackout_settings,
+        "custom_steps_done": [], "detected_objects": "",
         "_reextract": False, "_reextract_mode": "", "_reextract_cols": 4, "_reextract_rows": 2,
         "_recrop_boxes": None,
         "_step_start": None,
@@ -845,7 +1276,7 @@ def cancel_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found.")
 
     old_status = job["status"]
-    if old_status not in ("running", "awaiting_selection", "awaiting_text_confirmation", "awaiting_crop_review", "awaiting_multi_selection", "awaiting_number_selection", "queued"):
+    if old_status not in ("running", "awaiting_selection", "awaiting_text_confirmation", "awaiting_crop_review", "awaiting_multi_selection", "awaiting_number_selection", "awaiting_object_selection", "awaiting_ratio_selection", "queued"):
         raise HTTPException(status_code=400, detail="This job cannot be cancelled.")
 
     # Immediately mark as cancelled on the authoritative record
@@ -857,7 +1288,7 @@ def cancel_job(job_id: str):
     _cancel_flag[job_id] = True
 
     # Signal the resume event to unblock the worker if it's waiting
-    if old_status in ("awaiting_selection", "awaiting_text_confirmation", "awaiting_crop_review", "awaiting_multi_selection", "awaiting_number_selection"):
+    if old_status in ("awaiting_selection", "awaiting_text_confirmation", "awaiting_crop_review", "awaiting_multi_selection", "awaiting_number_selection", "awaiting_object_selection", "awaiting_ratio_selection"):
         _resume_event.set()
 
     print(f"[cancel] Job {job_id}: {old_status} -> cancelled")
@@ -955,6 +1386,67 @@ def select_numbers(job_id: str, req: NumberSelectionRequest):
     job["chosen_numbers"] = req.numbers
     _resume_event.set()
     return {"ok": True, "numbers": req.numbers}
+
+
+@app.post("/api/jobs/{job_id}/select-objects")
+def select_objects(job_id: str, req: ObjectSelectionRequest):
+    """Operator selects which objects to recolour and their target colours."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("status") != "awaiting_object_selection":
+        raise HTTPException(status_code=400, detail="This job is not waiting for object selection.")
+    if not req.choices:
+        raise HTTPException(status_code=400, detail="Select at least one object to recolour.")
+    job["object_color_choices"] = req.choices
+    _resume_event.set()
+    return {"ok": True}
+
+
+def _parse_ratio(req: "RatioSelectionRequest") -> tuple[float, float]:
+    """Resolve the request into (w, h) ratio components. Raises ValueError on bad input."""
+    if req.width is not None and req.height is not None:
+        w, h = float(req.width), float(req.height)
+        if w <= 0 or h <= 0:
+            raise ValueError("Width and height must be positive.")
+        return w, h
+    if req.ratio:
+        parts = req.ratio.replace("x", ":").replace("X", ":").split(":")
+        if len(parts) != 2:
+            raise ValueError("Ratio must be in the form W:H, e.g. 4:5.")
+        try:
+            w, h = float(parts[0]), float(parts[1])
+        except ValueError:
+            raise ValueError("Ratio must contain numbers, e.g. 4:5.")
+        if w <= 0 or h <= 0:
+            raise ValueError("Ratio values must be positive.")
+        return w, h
+    raise ValueError("Provide a ratio (e.g. 4:5) or width and height in inches.")
+
+
+@app.post("/api/jobs/{job_id}/select-ratio")
+def select_ratio(job_id: str, req: RatioSelectionRequest):
+    """Operator picks the target aspect ratio; padding is applied locally by the worker."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("status") != "awaiting_ratio_selection":
+        raise HTTPException(status_code=400, detail="This job is not waiting for ratio selection.")
+    try:
+        w, h = _parse_ratio(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # Guard the ratio to a sane range (between 1:4 and 4:1).
+    ratio_val = w / h
+    if ratio_val < 0.25 or ratio_val > 4.0:
+        raise HTTPException(status_code=400, detail="Ratio must be between 1:4 and 4:1.")
+    method = (req.method or "pad").lower()
+    if method not in ("pad", "regenerate"):
+        raise HTTPException(status_code=400, detail="Method must be 'pad' or 'regenerate'.")
+    job["aspect_target"] = {"w": w, "h": h}
+    job["aspect_method"] = method
+    _resume_event.set()
+    return {"ok": True, "target": {"w": w, "h": h}, "method": method}
 
 
 @app.get("/api/jobs/{job_id}/crop/{index}")

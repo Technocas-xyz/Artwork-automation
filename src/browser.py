@@ -61,6 +61,10 @@ def launch_context(account: str) -> BrowserContext:
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
         )
+        context.grant_permissions(
+            ["clipboard-read", "clipboard-write"],
+            origin="https://chatgpt.com",
+        )
         return context
     except Exception as exc:
         msg = str(exc).lower()
