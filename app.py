@@ -9,7 +9,9 @@ Supports multi-turn workflows (Text workflow with operator decisions).
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import threading
 import traceback
 import time
@@ -39,6 +41,8 @@ from src.generator import generate, open_chat, send_turn, send_text_turn, get_la
 from src.postprocess import is_opaque_white_bg, remove_white_background
 from src.prompt_builder import build_prompt
 from src.vault import save_to_vault
+from src import nextcloud as nc
+from src.nc_live import watcher as nc_watcher
 
 # ---------------------------------------------------------------------------
 # App & state
@@ -167,6 +171,12 @@ class TextConfirmRequest(BaseModel):
 
 class OpenFolderRequest(BaseModel):
     path: str
+
+
+class NextcloudImportRequest(BaseModel):
+    # Vault paths to pull into ./input, and which workflow they are headed for.
+    paths: list[str] = []
+    target: str = "artwork"
 
 
 # ---------------------------------------------------------------------------
@@ -1600,6 +1610,223 @@ def session_confirm():
     job_queue.put("__session_check__")
     _session_result.wait(timeout=10)
     return {"logged_in": _session_logged_in}
+
+# ---------------------------------------------------------------------------
+# Nextcloud vault (Leads 2.0)
+# ---------------------------------------------------------------------------
+#
+# The operator's source artwork lives in Nextcloud, not on this box. These
+# routes let them browse a customer's folder, watch it live, and send a file
+# straight into one of the workflows. Nothing writes back: an import copies the
+# file into ./input, the customer's folder is left exactly as it was.
+
+MAX_IMPORT_BYTES = max(1, int(os.environ.get("NEXTCLOUD_MAX_IMPORT_MB", "80") or 80)) * 1024 * 1024
+CHANGES_WAIT_SECONDS = 25.0
+
+# Content hash -> file already sitting in ./input. Re-sending the same artwork
+# (the usual case when an operator retries a job) reuses the copy instead of
+# growing a pile of name_2.png, name_3.png.
+_nc_imports: dict[str, str] = {}
+_nc_import_lock = threading.Lock()
+
+# AW-<CLIENT>-<NNNN> out of a vault filename, e.g. AW-JBR05-0004-OUT.jpg.
+_ARTWORK_CODE = re.compile(r"(AW-[A-Za-z0-9]+-\d{4})", re.IGNORECASE)
+
+WORKFLOW_TARGETS = {
+    "artwork": {"label": "Artwork Generation", "multiple": True},
+    "mockup": {"label": "Artwork Extraction", "multiple": False},
+    "custom": {"label": "Custom Operation", "multiple": False},
+    "text": {"label": "Text (as text image)", "multiple": False},
+}
+
+
+def _nc_error(exc: nc.NextcloudError) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=str(exc))
+
+
+def _decorate(entry: nc.Entry, cfg: nc.NextcloudConfig) -> dict:
+    """A listing row the UI can render without knowing the vault's layout."""
+    item = entry.as_dict()
+    ext = Path(entry.name).suffix.lower()
+    customer = nc.customer_folder(entry.path, cfg)
+    item.update({
+        "ext": ext,
+        "customer": customer,
+        "customer_label": nc.display_name(customer),
+        # Only these four reach the generator; everything else is shown but
+        # cannot be sent, with the reason on the row.
+        "importable": (not entry.is_dir) and ext in ALLOWED_EXTENSIONS,
+        "reason": "" if entry.is_dir or ext in ALLOWED_EXTENSIONS
+                  else f"{ext or 'This file type'} is not supported — use .png .jpg .jpeg .webp",
+    })
+    return item
+
+
+@app.get("/api/nextcloud/status")
+def nextcloud_status():
+    """Connectivity plus live-watcher health, for the header indicator."""
+    info = nc.test_connection()
+    snap = nc_watcher.snapshot(since=nc_watcher.revision)
+    info.update({
+        "watching": snap["watching"], "stale": snap["stale"],
+        "revision": snap["revision"], "poll_seconds": snap["poll_seconds"],
+        "watch_error": snap["error"],
+        "last_poll_ago": round(time.time() - snap["last_poll_at"], 1) if snap["last_poll_at"] else None,
+        "targets": [{"key": k, **v} for k, v in WORKFLOW_TARGETS.items()],
+    })
+    return info
+
+
+@app.get("/api/nextcloud/customers")
+def nextcloud_customers(q: str = "", refresh: bool = False):
+    """Every customer folder under the root, for the dropdown."""
+    try:
+        items = nc_watcher.customers(refresh=refresh)
+    except nc.NextcloudError as exc:
+        raise _nc_error(exc)
+    needle = q.strip().lower()
+    if needle:
+        items = [c for c in items if needle in c["label"].lower() or needle in c["folder"].lower()]
+    return {"count": len(items), "customers": items}
+
+
+@app.get("/api/nextcloud/browse")
+def nextcloud_browse(path: str = ""):
+    """One folder: its sub-folders and its files, plus breadcrumbs back to the root."""
+    cfg = nc.get_config()
+    try:
+        target = nc.safe_rel(path, cfg)
+        entries = nc.list_folder(target)
+    except nc.NextcloudError as exc:
+        raise _nc_error(exc)
+
+    folders = sorted((_decorate(e, cfg) for e in entries if e.is_dir),
+                     key=lambda f: f["name"].lower())
+    # Newest first: the file an operator wants is nearly always the one that
+    # just arrived.
+    files = sorted((_decorate(e, cfg) for e in entries if not e.is_dir),
+                   key=lambda f: f["modified_ms"], reverse=True)
+
+    rest = target[len(cfg.root):].strip("/")
+    crumbs = [{"label": cfg.root, "path": cfg.root}]
+    walked = cfg.root
+    for part in [p for p in rest.split("/") if p]:
+        walked = f"{walked}/{part}"
+        crumbs.append({"label": nc.display_name(part) if walked.count("/") == cfg.root.count("/") + 1 else part,
+                       "path": walked})
+
+    customer = nc.customer_folder(target, cfg)
+    parent = target.rsplit("/", 1)[0] if target != cfg.root and "/" in target else ""
+    return {
+        "path": target, "parent": parent, "is_root": target == cfg.root,
+        "breadcrumbs": crumbs, "folders": folders, "files": files,
+        "customer": customer, "customer_label": nc.display_name(customer),
+        "revision": nc_watcher.revision,
+    }
+
+
+@app.get("/api/nextcloud/thumb")
+def nextcloud_thumb(path: str, w: int = 320, h: int = 320):
+    """Proxy Nextcloud's thumbnail so the browser never sees the credentials."""
+    try:
+        data, ctype = nc.preview(path, width=max(32, min(1024, w)), height=max(32, min(1024, h)))
+    except nc.NextcloudError as exc:
+        raise _nc_error(exc)
+    return Response(content=data, media_type=ctype or "image/png",
+                    headers={"Cache-Control": "private, max-age=300"})
+
+
+@app.get("/api/nextcloud/changes")
+def nextcloud_changes(since: int = 0, wait: bool = True, limit: int = 40):
+    """Long-poll the change feed.
+
+    The request parks on the watcher's condition variable and returns the
+    instant a file lands, so the browser learns about it without a UI timer and
+    without hammering the server between arrivals. It always returns within
+    CHANGES_WAIT_SECONDS so proxies and sleeping laptops cannot leave it hanging.
+    """
+    # Park only when the client is exactly up to date. A `since` *ahead* of the
+    # revision means the client is talking to a restarted process (the counter
+    # resets); returning at once lets it resync instead of sitting out a full
+    # timeout on every poll.
+    if wait and nc_watcher.started and since == nc_watcher.revision:
+        nc_watcher.wait_for_change(since, CHANGES_WAIT_SECONDS)
+    return nc_watcher.snapshot(since=since, limit=max(1, min(200, limit)))
+
+
+@app.post("/api/nextcloud/import")
+def nextcloud_import(req: NextcloudImportRequest):
+    """Copy the chosen vault files into ./input and say which workflow they suit."""
+    target = (req.target or "artwork").strip()
+    if target not in WORKFLOW_TARGETS:
+        raise HTTPException(status_code=400, detail=f"Unknown workflow target {target!r}.")
+    paths = [p for p in (req.paths or []) if str(p).strip()]
+    if not paths:
+        raise HTTPException(status_code=400, detail="Select at least one file.")
+    if not WORKFLOW_TARGETS[target]["multiple"] and len(paths) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{WORKFLOW_TARGETS[target]['label']} takes one file at a time.")
+
+    cfg = nc.get_config()
+    imported: list[dict] = []
+    skipped: list[dict] = []
+    for raw in paths:
+        try:
+            rel = nc.safe_rel(raw, cfg)
+        except nc.NextcloudError as exc:
+            skipped.append({"path": raw, "reason": str(exc)})
+            continue
+        name = Path(rel).name
+        ext = Path(name).suffix.lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            skipped.append({"path": rel, "reason": "Only .png .jpg .jpeg .webp can be sent to a workflow."})
+            continue
+        try:
+            data, _ = nc.download_file(rel, max_bytes=MAX_IMPORT_BYTES)
+        except nc.NextcloudError as exc:
+            skipped.append({"path": rel, "reason": str(exc)})
+            continue
+
+        digest = hashlib.sha256(data).hexdigest()
+        with _nc_import_lock:
+            existing = _nc_imports.get(digest)
+            if existing and (INPUT_DIR / existing).exists():
+                local = existing
+            else:
+                local = _unique_filename(INPUT_DIR, name)
+                (INPUT_DIR / local).write_bytes(data)
+                _nc_imports[digest] = local
+
+        customer = nc.customer_folder(rel, cfg)
+        code = _ARTWORK_CODE.search(name)
+        imported.append({
+            "name": local, "nc_path": rel, "nc_name": name,
+            "customer": customer, "customer_label": nc.display_name(customer),
+            "size_kb": round(len(data) / 1024, 1),
+            "artwork_code": code.group(1).upper() if code else "",
+        })
+
+    if not imported:
+        detail = skipped[0]["reason"] if skipped else "Nothing could be imported."
+        raise HTTPException(status_code=400, detail=detail)
+
+    return {
+        "target": target,
+        "target_label": WORKFLOW_TARGETS[target]["label"],
+        "files": imported,
+        "skipped": skipped,
+        # Prefills for the job form, so the operator does not retype what the
+        # vault path already says.
+        "client": imported[0]["customer_label"],
+        "task_id": imported[0]["artwork_code"],
+    }
+
+
+# The watcher runs whether or not anyone is looking at the Nextcloud tab, so a
+# file that lands while the operator is mid-job is already in the feed when
+# they switch to it.
+nc_watcher.start()
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
