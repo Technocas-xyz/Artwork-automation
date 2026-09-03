@@ -388,6 +388,49 @@ def download_file(rel_path: str, max_bytes: int = 0) -> tuple[bytes, str]:
     return b"".join(chunks), content_type
 
 
+def ensure_folder(rel_path: str) -> str:
+    """MKCOL every ancestor of `rel_path` under the root so a PUT won't 409.
+
+    The configured root and each existing customer folder are already there, so
+    this normally creates only the final leaf (e.g. `AI Artwork`). MKCOL on an
+    existing collection answers 405 — treated as success.
+    """
+    cfg = get_config()
+    target = safe_rel(rel_path, cfg)
+    rest = target[len(cfg.root):].strip("/")
+    walked = cfg.root
+    for part in [p for p in rest.split("/") if p]:
+        walked = f"{walked}/{part}"
+        res = _request(cfg, "MKCOL", dav_url(cfg, walked),
+                       headers={"Content-Type": "application/xml"})
+        # 201 created, 405 already exists — both fine. Anything else is a real error.
+        if res.status_code not in (201, 405):
+            raise NextcloudError(
+                f"Could not create folder {walked!r} (status {res.status_code}).")
+    return target
+
+
+def upload_file(rel_path: str, data: bytes, content_type: str | None = None,
+                overwrite: bool = False) -> dict:
+    """PUT `data` to `rel_path`. Without `overwrite`, an existing name 412s.
+
+    `If-None-Match: *` makes the "don't clobber" check atomic on the server, so
+    two saves racing for the same name cannot both think they won.
+    """
+    cfg = get_config()
+    target = safe_rel(rel_path, cfg)
+    headers = {"Content-Type": content_type or "application/octet-stream"}
+    if not overwrite:
+        headers["If-None-Match"] = "*"
+    res = _request(cfg, "PUT", dav_url(cfg, target), headers=headers, body=data)
+    if res.status_code == 412:
+        raise NextcloudError("A file with that name already exists.", 412)
+    if res.status_code not in (200, 201, 204):
+        raise NextcloudError(f"Upload failed with status {res.status_code}.")
+    return {"path": target, "status": res.status_code,
+            "etag": (res.headers.get("ETag") or "").strip('"')}
+
+
 def preview(rel_path: str, width: int = 320, height: int = 320) -> tuple[bytes, str]:
     """Nextcloud's generated thumbnail, falling back to the original file.
 

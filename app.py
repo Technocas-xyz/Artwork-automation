@@ -10,6 +10,7 @@ Supports multi-turn workflows (Text workflow with operator decisions).
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import os
 import re
 import threading
@@ -83,6 +84,13 @@ OUTPUT_DIR = Path("./output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+# Broader than ALLOWED_EXTENSIONS: these are shown in the per-customer artwork
+# grid (Nextcloud renders previews for them) even though only the four above can
+# be sent into a workflow.
+VAULT_IMAGE_EXTENSIONS = ALLOWED_EXTENSIONS | {
+    ".gif", ".bmp", ".tif", ".tiff", ".heic", ".avif"}
+# Where "Save to Artwork Vault" puts generated files inside each customer folder.
+VAULT_SAVE_SUBFOLDER = "AI Artwork"
 
 _worker_alive: bool = True
 _worker_error: str = ""
@@ -177,6 +185,16 @@ class NextcloudImportRequest(BaseModel):
     # Vault paths to pull into ./input, and which workflow they are headed for.
     paths: list[str] = []
     target: str = "artwork"
+
+
+class NextcloudSaveRequest(BaseModel):
+    # Save a generated output file back into the vault, under the chosen
+    # customer folder. `name` is a file in ./output; `customer` is the vault
+    # customer folder (path or bare name); `filename` overrides the saved name.
+    name: str = ""
+    customer: str = ""
+    filename: str = ""
+    overwrite: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1821,6 +1839,98 @@ def nextcloud_import(req: NextcloudImportRequest):
         "client": imported[0]["customer_label"],
         "task_id": imported[0]["artwork_code"],
     }
+
+
+@app.get("/api/nextcloud/artworks")
+def nextcloud_artworks(customer: str = "", limit: int = 500):
+    """Every image under one customer folder, flattened, newest first.
+
+    The tab shows a customer's artwork as one grid rather than making the
+    operator open each order folder — one WebDAV SEARCH (Depth: infinity) walks
+    the whole subtree, then we keep the image types and sort newest-first.
+    """
+    cfg = nc.get_config()
+    if not str(customer or "").strip():
+        raise HTTPException(status_code=400, detail="Select a customer first.")
+    try:
+        root = nc.safe_rel(customer, cfg)
+        entries = nc.search_modified_since(0, limit=max(1, min(2000, limit)), rel_root=root)
+    except nc.NextcloudError as exc:
+        raise _nc_error(exc)
+
+    files = [
+        _decorate(e, cfg) for e in entries
+        if not e.is_dir and Path(e.name).suffix.lower() in VAULT_IMAGE_EXTENSIONS
+    ]
+    files.sort(key=lambda f: f["modified_ms"], reverse=True)
+    return {
+        "customer": nc.customer_folder(root, cfg),
+        "customer_label": nc.display_name(nc.customer_folder(root, cfg)),
+        "path": root, "count": len(files), "files": files,
+        "revision": nc_watcher.revision,
+    }
+
+
+@app.post("/api/nextcloud/save-to-vault")
+def nextcloud_save_to_vault(req: NextcloudSaveRequest):
+    """Copy a generated output file into `<customer>/AI Artwork/` in the vault."""
+    cfg = nc.get_config()
+
+    # The output filename must resolve inside ./output and nowhere else.
+    name = Path(str(req.name or "").strip()).name
+    if not name:
+        raise HTTPException(status_code=400, detail="No output file given.")
+    src = OUTPUT_DIR / name
+    if not src.exists() or not src.is_file():
+        raise HTTPException(status_code=404, detail="That generated file is no longer available.")
+
+    customer = str(req.customer or "").strip()
+    if not customer:
+        raise HTTPException(status_code=400, detail="Choose a customer folder to save into.")
+    try:
+        cust_path = nc.safe_rel(customer, cfg)
+    except nc.NextcloudError as exc:
+        raise _nc_error(exc)
+    # Must be a customer folder (one level under the root), not the root itself.
+    if cust_path == cfg.root or nc.customer_folder(cust_path, cfg) == "":
+        raise HTTPException(status_code=400, detail="Choose a customer folder, not the vault root.")
+
+    data = src.read_bytes()
+    ctype = mimetypes.guess_type(name)[0] or "image/png"
+
+    # Preferred saved name: the operator's override, else the output's own name.
+    desired = Path(str(req.filename or "").strip() or name).name
+    if not Path(desired).suffix:
+        desired += Path(name).suffix or ".png"
+
+    folder = f"{cust_path}/{VAULT_SAVE_SUBFOLDER}"
+    try:
+        nc.ensure_folder(folder)
+    except nc.NextcloudError as exc:
+        raise _nc_error(exc)
+
+    stem, suffix = Path(desired).stem, Path(desired).suffix
+    # Bump the name on collision (…_v2, _v3) unless the caller asked to overwrite.
+    for attempt in range(20):
+        candidate = desired if attempt == 0 else f"{stem}_v{attempt + 1}{suffix}"
+        try:
+            saved = nc.upload_file(f"{folder}/{candidate}", data, ctype,
+                                   overwrite=bool(req.overwrite))
+        except nc.NextcloudError as exc:
+            if exc.status == 412 and not req.overwrite:
+                continue  # name taken — try the next version
+            raise _nc_error(exc)
+        return {
+            "ok": True,
+            "path": saved["path"],
+            "name": candidate,
+            "folder": folder,
+            "customer": nc.customer_folder(cust_path, cfg),
+            "customer_label": nc.display_name(nc.customer_folder(cust_path, cfg)),
+            "size_kb": round(len(data) / 1024, 1),
+        }
+    raise HTTPException(status_code=409,
+                        detail="Too many files with that name already — rename and try again.")
 
 
 # The watcher runs whether or not anyone is looking at the Nextcloud tab, so a

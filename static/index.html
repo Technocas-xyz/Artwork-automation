@@ -65,6 +65,30 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .nc-feed-item{padding:6px 8px;border:1px solid var(--border);border-radius:7px;margin-bottom:4px;font-size:.72rem;cursor:pointer;background:var(--surface)}.nc-feed-item:hover{border-color:var(--accent)}.nc-feed-item.fresh{border-color:#10b981;background:#f0fdf4}
 .nc-feed-item .nc-fi-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nc-empty{font-size:.78rem;color:var(--muted);padding:18px 0;text-align:center}
+/* Save-to-Vault: keep Download as the primary blue, mark the vault save green. */
+.vault-save-btn{background:#059669!important}.vault-save-btn:hover{background:#047857!important}.vault-save-btn:disabled{background:#94a3b8!important;cursor:not-allowed}
+.vm-overlay{position:fixed;inset:0;background:rgba(15,23,42,.5);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}
+.vm-modal{background:var(--surface);border-radius:var(--radius);width:100%;max-width:420px;box-shadow:0 12px 40px rgba(0,0,0,.25);overflow:hidden;display:flex;flex-direction:column;max-height:90vh}
+.vm-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.vm-head h3{font-size:.95rem;font-weight:700}.vm-head .vm-x{cursor:pointer;font-size:1.2rem;color:var(--muted);line-height:1;border:none;background:none}
+.vm-body{padding:16px 18px;overflow-y:auto}
+.vm-body label{display:block;font-size:.76rem;font-weight:600;color:var(--muted);margin-bottom:3px;margin-top:10px}
+.vm-body label:first-child{margin-top:0}
+.vm-body input,.vm-body select{width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font-size:.86rem;font-family:inherit;background:var(--surface)}
+.vm-body select{max-height:200px}
+.vm-hint{font-size:.72rem;color:var(--muted);margin-top:4px}
+.vm-preview{display:flex;gap:10px;align-items:center;margin-bottom:6px}
+.vm-preview img{width:56px;height:56px;object-fit:contain;border-radius:6px;border:1px solid var(--border);background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/10px 10px}
+.vm-foot{padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end;align-items:center}
+.vm-btn{padding:9px 16px;font-size:.84rem;font-weight:700;border:none;border-radius:8px;cursor:pointer}
+.vm-btn.primary{background:#059669;color:#fff}.vm-btn.primary:hover{background:#047857}.vm-btn.primary:disabled{background:#94a3b8;cursor:not-allowed}
+.vm-btn.ghost{background:var(--surface);border:1px solid var(--border);color:var(--text)}
+.vm-err{color:#dc2626;font-size:.78rem;margin-right:auto}
+.vm-ok{color:#059669;font-size:.78rem;margin-right:auto;font-weight:600}
+.toast-wrap{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:1100;display:flex;flex-direction:column;gap:8px;align-items:center}
+.toast{padding:10px 18px;border-radius:8px;font-size:.82rem;font-weight:600;color:#fff;box-shadow:0 6px 20px rgba(0,0,0,.2);animation:toastIn .2s ease}
+.toast.ok{background:#059669}.toast.err{background:#dc2626}
+@keyframes toastIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 </style>
 </head>
 <body>
@@ -105,6 +129,7 @@ resultArea.addEventListener("click",function(e){
   else if(a==="pick-ratio"){window.setRatioInputs(t.dataset.ratio)}
   else if(a==="toggle"){var tgt=$(t.dataset.target);if(tgt){tgt.classList.toggle("open");t.classList.toggle("open")}}
   else if(a==="open-folder") fetch("/api/open-folder",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:t.dataset.path})});
+  else if(a==="save-vault") openVaultSave(t.dataset.vaultName,t.dataset.vaultClient||"",t.dataset.vaultTask||"");
   }catch(err){console.error("[delegation]",err)}
 });
 
@@ -1046,6 +1071,106 @@ function _geomLine(feat){
   h+='</div>';
   return h;
 }
+// A "Save to Artwork Vault" button for a generated output file. `name` is the
+// file in ./output; client/task prefill the customer picker.
+function vaultBtn(name,client,task){
+  return '<button class="dl-btn vault-save-btn" data-action="save-vault" data-vault-name="'+esc(name)
+    +'" data-vault-client="'+esc(client||"")+'" data-vault-task="'+esc(task||"")+'">☁ Save to Vault</button>';
+}
+
+// --- Save to Artwork Vault -------------------------------------------------
+// A small overlay that lets the operator drop a generated output file into a
+// customer's folder in the Nextcloud vault (Design Studio's Artwork Vault).
+// It works from any workflow's results, so it loads the customer list on demand
+// rather than assuming the Nextcloud tab was opened first.
+function toast(msg,kind){
+  var wrap=$("toastWrap");
+  if(!wrap){wrap=document.createElement("div");wrap.id="toastWrap";wrap.className="toast-wrap";document.body.appendChild(wrap)}
+  var t=document.createElement("div");t.className="toast "+(kind==="err"?"err":"ok");t.textContent=msg;
+  wrap.appendChild(t);
+  setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t)},kind==="err"?5000:3200);
+}
+// Best guess at which customer folder a workflow's client name belongs to.
+function vaultMatchCustomer(client){
+  if(!client)return null;
+  var q=String(client).trim().toLowerCase();
+  var hit=ncCustomers.filter(function(c){return c.label.toLowerCase()===q||c.folder.toLowerCase()===q})[0];
+  if(hit)return hit;
+  return ncCustomers.filter(function(c){return c.label.toLowerCase().indexOf(q)>=0||c.folder.toLowerCase().indexOf(q)>=0})[0]||null;
+}
+function openVaultSave(name,client,task){
+  if(!name){toast("Nothing to save.","err");return}
+  // Ensure the customer list is available (other tabs never load it).
+  if(!ncCustomers.length){
+    fetch("/api/nextcloud/customers").then(function(r){return r.ok?r.json():null}).then(function(d){
+      if(d){ncCustomers=d.customers||[];ncCustomerSet={};ncCustomers.forEach(function(c){ncCustomerSet[c.folder]=true})}
+      vaultRenderModal(name,client,task);
+    }).catch(function(){vaultRenderModal(name,client,task)});
+  }else{
+    vaultRenderModal(name,client,task);
+  }
+}
+function vaultCloseModal(){var o=$("vaultModal");if(o&&o.parentNode)o.parentNode.removeChild(o)}
+function vaultRenderModal(name,client,task){
+  vaultCloseModal();
+  var pre=vaultMatchCustomer(client);
+  var suggestName=(task?String(task).replace(/[\/:*?"<>|]+/g,"_")+"_":"")+name;
+  var ov=document.createElement("div");
+  ov.className="vm-overlay";ov.id="vaultModal";
+  ov.innerHTML=
+    '<div class="vm-modal" role="dialog" aria-modal="true">'
+    +'<div class="vm-head"><h3>☁ Save to Artwork Vault</h3><button class="vm-x" id="vmX" title="Close">×</button></div>'
+    +'<div class="vm-body">'
+      +'<div class="vm-preview"><img src="/api/output/'+esc(name)+'" alt=""><div class="vm-hint">Saving into the chosen customer’s <b>AI Artwork</b> folder in the vault.</div></div>'
+      +'<label>Customer</label>'
+      +'<input type="text" id="vmFilter" placeholder="Filter customers…" autocomplete="off">'
+      +'<select id="vmCustomer" size="1"></select>'
+      +'<div class="vm-hint" id="vmCustHint"></div>'
+      +'<label>Save as</label>'
+      +'<input type="text" id="vmName" value="'+esc(suggestName)+'" autocomplete="off">'
+      +'<div class="vm-hint">A name that already exists is kept safe — the copy is saved as …_v2, _v3, and so on.</div>'
+    +'</div>'
+    +'<div class="vm-foot"><span id="vmMsg"></span>'
+      +'<button class="vm-btn ghost" id="vmCancel">Cancel</button>'
+      +'<button class="vm-btn primary" id="vmSave">Save to Vault</button></div>'
+    +'</div>';
+  document.body.appendChild(ov);
+  var filterEl=$("vmFilter"),selEl=$("vmCustomer");
+  function paint(){
+    var q=filterEl.value.trim().toLowerCase();
+    var list=ncCustomers.filter(function(c){return !q||c.label.toLowerCase().indexOf(q)>=0||c.folder.toLowerCase().indexOf(q)>=0});
+    var shown=list.slice(0,NC_OPTION_CAP);
+    var cur=selEl.value;
+    var h='<option value="">'+(ncCustomers.length?"Select a customer…":"No customer folders found")+'</option>';
+    for(var i=0;i<shown.length;i++)h+='<option value="'+esc(shown[i].path)+'">'+esc(shown[i].label)+'</option>';
+    selEl.innerHTML=h;
+    if(cur)selEl.value=cur;
+    $("vmCustHint").textContent=ncCustomers.length?(list.length+" of "+ncCustomers.length+" customers"+(list.length>NC_OPTION_CAP?" — showing first "+NC_OPTION_CAP:"")):"Open the Nextcloud tab once to load customers.";
+  }
+  paint();
+  if(pre){selEl.value=pre.path;if(!selEl.value){filterEl.value=pre.label;paint();selEl.value=pre.path}}
+  filterEl.oninput=paint;
+  $("vmX").onclick=vaultCloseModal;$("vmCancel").onclick=vaultCloseModal;
+  ov.addEventListener("click",function(e){if(e.target===ov)vaultCloseModal()});
+  document.addEventListener("keydown",function esc2(e){if(e.key==="Escape"){vaultCloseModal();document.removeEventListener("keydown",esc2)}});
+  $("vmSave").onclick=function(){vaultDoSave(name,selEl.value,$("vmName").value)};
+  setTimeout(function(){filterEl.focus()},30);
+}
+function vaultDoSave(name,customer,filename){
+  var msg=$("vmMsg"),btn=$("vmSave");
+  if(!customer){msg.className="vm-err";msg.textContent="Choose a customer first.";return}
+  msg.className="vm-hint";msg.textContent="Saving…";btn.disabled=true;
+  fetch("/api/nextcloud/save-to-vault",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({name:name,customer:customer,filename:filename||""})})
+    .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||"Save failed");return d})})
+    .then(function(d){
+      vaultCloseModal();
+      toast("Saved "+(d.name||name)+" to "+(d.customer_label||d.customer||"vault"),"ok");
+      // If that customer's grid is open in the Nextcloud tab, refresh it.
+      if(ncPath&&(d.customer===ncCustomerFolder||(d.folder&&d.folder.indexOf(ncPath)===0)))ncReloadArtworks();
+    })
+    .catch(function(e){msg.className="vm-err";msg.textContent=e.message;btn.disabled=false});
+}
 function renderCustomResults(job){
   var steps=job.custom_steps_done||[],errors=job.artwork_errors||[],af=job.artwork_files||[],prompts=job.prompts||[];
   var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
@@ -1058,7 +1183,7 @@ function renderCustomResults(job){
     var s=steps[i],url="/api/output/"+s.file;
     // Aspect stages carry their own clear labels (Baseline / Final); other ops keep "Step N".
     var head=(s.method==="baseline"||s.op==="aspect_ratio")?esc(s.label):'Step '+s.step+' \u2014 '+esc(s.label)+(s.method?' ('+esc(s.method)+')':'');
-    html+='<div class="stage-result"><h3>'+head+'</h3><a href="'+url+'" target="_blank"><img src="'+url+'" class="transparent-bg" style="width:100%;max-height:250px;object-fit:contain;border-radius:8px;border:1px solid var(--border)"></a><a class="dl-btn" href="'+url+'" download>Download</a>';
+    html+='<div class="stage-result"><h3>'+head+'</h3><a href="'+url+'" target="_blank"><img src="'+url+'" class="transparent-bg" style="width:100%;max-height:250px;object-fit:contain;border-radius:8px;border:1px solid var(--border)"></a><a class="dl-btn" href="'+url+'" download>Download</a>'+vaultBtn(s.file,job.client,job.task_id);
     // Per-stage geometry for the aspect flow.
     if(s.method==="baseline")html+=_geomLine(job.aspect_baseline_features);
     else if(s.op==="aspect_ratio"&&s.similarity&&s.similarity.features_generated)html+=_geomLine(s.similarity.features_generated);
@@ -1087,7 +1212,7 @@ function renderMockupResults(job){
     html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:14px">';
     for(var i=0;i<fn.length;i++){
       var url="/api/output/"+fn[i];
-      html+='<div style="text-align:center"><a href="'+url+'" target="_blank"><img src="'+url+'" style="width:100%;max-height:200px;object-fit:contain;border-radius:8px;border:1px solid var(--border);background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/14px 14px"></a><a class="dl-btn" href="'+url+'" download style="margin-top:4px">Download</a></div>';
+      html+='<div style="text-align:center"><a href="'+url+'" target="_blank"><img src="'+url+'" style="width:100%;max-height:200px;object-fit:contain;border-radius:8px;border:1px solid var(--border);background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/14px 14px"></a><a class="dl-btn" href="'+url+'" download style="margin-top:4px">Download</a>'+vaultBtn(fn[i],job.client,job.task_id)+'</div>';
     }
     html+='</div>';
   }
@@ -1115,7 +1240,7 @@ function renderArtworkResults(job){
       var finalUrl="/api/output/"+fn[i];
       html+='<div style="display:flex;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px;align-items:center">';
       if(origUrl)html+='<div style="flex:1;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Original</div><img src="'+origUrl+'" style="max-height:120px;max-width:100%;object-fit:contain;border-radius:4px"></div>';
-      html+='<div style="flex:1;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Generated</div><a href="'+finalUrl+'" target="_blank"><img src="'+finalUrl+'" style="max-height:120px;max-width:100%;object-fit:contain;border-radius:4px;background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/10px 10px"></a><a class="dl-btn" href="'+finalUrl+'" download style="margin-top:4px;font-size:.72rem;padding:5px 10px">Download</a></div>';
+      html+='<div style="flex:1;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Generated</div><a href="'+finalUrl+'" target="_blank"><img src="'+finalUrl+'" style="max-height:120px;max-width:100%;object-fit:contain;border-radius:4px;background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/10px 10px"></a><a class="dl-btn" href="'+finalUrl+'" download style="margin-top:4px;font-size:.72rem;padding:5px 10px">Download</a>'+vaultBtn(fn[i],job.client,job.task_id)+'</div>';
       html+='</div>';
     }
     html+='</div>';
@@ -1162,7 +1287,7 @@ var NC_TARGETS=[
   {key:"custom",label:"Custom Operation",multiple:false},
   {key:"text",label:"Text (as text image)",multiple:false}
 ];
-var ncPath="",ncListing=null,ncSelected={},ncCustomers=[],ncCustomerSet={},ncCustomerFilter="";
+var ncPath="",ncCustomerFolder="",ncArtworks=null,ncSelected={},ncCustomers=[],ncCustomerSet={},ncCustomerFilter="";
 var ncStatusInfo=null,ncRecent=[],ncFresh={},ncPrefill=null,ncMsg="",ncBusy=false;
 var ncRevision=0,ncBaseRevision=null,ncPollRunning=false;
 
@@ -1180,7 +1305,7 @@ function renderNextcloudCol1(){
     +'<div class="nc-feed"><div class="col-title" style="margin-bottom:6px">Just arrived</div><div id="ncFeed"></div></div>';
   $("ncFilter").value=ncCustomerFilter;
   $("ncFilter").oninput=function(){ncCustomerFilter=this.value;ncRenderCustomerSelect()};
-  $("ncSelect").onchange=function(){if(this.value)ncOpen(this.value)};
+  $("ncSelect").onchange=function(){if(this.value)ncOpen(this.value);else ncOpen("")};
   $("ncRefresh").onclick=function(){ncLoadCustomers(true);ncLoadStatus()};
   $("ncRoot").onclick=function(){ncOpen("")};
   ncRenderBanner();ncRenderFeed();
@@ -1225,7 +1350,7 @@ function ncRenderCustomerSelect(){
   var q=ncCustomerFilter.trim().toLowerCase();
   var list=ncCustomers.filter(function(c){return !q||c.label.toLowerCase().indexOf(q)>=0||c.folder.toLowerCase().indexOf(q)>=0});
   var shown=list.slice(0,NC_OPTION_CAP);
-  var cur=ncListing?ncListing.customer:"";
+  var cur=ncCustomerFolder;
   var h='<option value="">'+(ncCustomers.length?"Select a customer…":"No customer folders found")+'</option>';
   for(var i=0;i<shown.length;i++){
     h+='<option value="'+esc(shown[i].path)+'"'+(shown[i].folder===cur?" selected":"")+'>'+esc(shown[i].label)+'</option>';
@@ -1237,48 +1362,61 @@ function ncRenderCustomerSelect(){
     : "";
 }
 
-// --- column 2: folder + file browser -------------------------------------
+// --- column 2: per-customer artwork grid ---------------------------------
+// Nothing shows until a customer is chosen; then every image under that
+// customer's folder (all order sub-folders flattened) appears newest-first.
 function renderNextcloudCol2(){
   col2.innerHTML='<div class="col-title">Vault Files</div><div id="ncBrowser"></div>';
-  if(ncListing)ncRenderBrowser();else ncOpen(ncPath||"");
+  if(ncPath)ncRenderArtworks();else ncRenderPickPrompt();
   checkStatus();
 }
-function ncOpen(path){
-  ncSelected={};ncMsg="";
-  var url="/api/nextcloud/browse"+(path?"?path="+encodeURIComponent(path):"");
-  fetch(url).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()})
-    .then(function(d){ncListing=d;ncPath=d.path;ncRenderBrowser();ncRenderCustomerSelect();ncRenderBanner()})
-    .catch(function(e){ncMsg=e.message;ncRenderBanner();ncRenderBrowser()});
-}
-function ncRefreshListing(){
-  if(!ncPath)return;
-  fetch("/api/nextcloud/browse?path="+encodeURIComponent(ncPath))
-    .then(function(r){return r.ok?r.json():null})
-    .then(function(d){if(d){ncListing=d;ncRenderBrowser()}}).catch(function(){});
-}
-function ncRenderBrowser(){
+function ncRenderPickPrompt(){
   var el=$("ncBrowser");if(!el)return;
-  var d=ncListing;
-  if(!d){el.innerHTML='<div class="nc-empty">Loading…</div>';return}
-  var h='<div class="nc-crumbs">';
-  for(var i=0;i<d.breadcrumbs.length;i++){
-    h+=(i?' <span style="opacity:.45">/</span> ':'')+'<a data-nc-go="'+esc(d.breadcrumbs[i].path)+'">'+esc(d.breadcrumbs[i].label)+'</a>';
-  }
-  h+='</div>';
-  if(d.folders.length){
-    h+='<div class="nc-folders">';
-    for(var j=0;j<d.folders.length;j++){
-      var f=d.folders[j];
-      h+='<div class="nc-folder" data-nc-go="'+esc(f.path)+'">📁 '+esc(d.is_root?f.customer_label:f.name)+'</div>';
-    }
-    h+='</div>';
-  }
-  if(!d.files.length){
-    h+='<div class="nc-empty">'+(d.folders.length?"No files here — open one of the folders above.":"This folder is empty.")+'</div>';
+  el.innerHTML='<div class="nc-empty" style="padding:34px 16px;text-align:center">'
+    +'<div style="font-size:2rem;line-height:1;margin-bottom:8px">👈</div>'
+    +'<div style="font-weight:600;margin-bottom:4px">Select a customer</div>'
+    +'<div>Pick a customer on the left to see their artwork here.</div></div>';
+}
+// path = full vault path of the customer folder; folder = its bare name.
+function ncOpen(path,folder){
+  ncSelected={};ncMsg="";
+  if(!path){ncPath="";ncCustomerFolder="";ncArtworks=null;ncRenderPickPrompt();ncRenderCustomerSelect();ncRenderBanner();return}
+  ncPath=path;ncCustomerFolder=folder||ncFolderFromPath(path);ncArtworks=null;
+  ncRenderArtworks();ncRenderCustomerSelect();
+  ncLoadArtworks();
+}
+function ncFolderFromPath(path){
+  // Everything under the root is `<root>/<customer>/…`; the customer is segment 1.
+  var m=/(?:^|\/)([^/]+)$/;var parts=String(path||"").split("/");
+  // If the caller passed a customer path we take its last segment; a deeper
+  // path still resolves to the right customer via the customers list below.
+  var c=ncCustomers.filter(function(x){return x.path===path})[0];
+  return c?c.folder:(parts.length?parts[parts.length-1]:"");
+}
+function ncLoadArtworks(){
+  var forPath=ncPath;
+  fetch("/api/nextcloud/artworks?customer="+encodeURIComponent(forPath))
+    .then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()})
+    .then(function(d){
+      if(ncPath!==forPath)return;            // customer changed while loading
+      ncArtworks=d.files||[];ncCustomerFolder=d.customer||ncCustomerFolder;
+      ncRenderArtworks();ncRenderBanner();
+    })
+    .catch(function(e){if(ncPath!==forPath)return;ncArtworks=[];ncMsg=e.message;ncRenderArtworks();ncRenderBanner()});
+}
+function ncReloadArtworks(){if(ncPath)ncLoadArtworks()}
+function ncRenderArtworks(){
+  var el=$("ncBrowser");if(!el)return;
+  var label=display=ncCustomerLabel();
+  var h='<div class="nc-crumbs"><a data-nc-home="1">All customers</a> <span style="opacity:.45">/</span> <b>'+esc(label)+'</b></div>';
+  if(ncArtworks===null){h+='<div class="nc-empty">Loading '+esc(label)+"'s artwork…</div>"+ncSendBar();el.innerHTML=h;el.onclick=ncBrowserClick;return}
+  if(!ncArtworks.length){
+    h+='<div class="nc-empty">No artwork found for '+esc(label)+'.</div>';
   }else{
+    h+='<div class="nc-hint" style="margin-bottom:6px">'+ncArtworks.length+' image'+(ncArtworks.length>1?"s":"")+' · newest first</div>';
     h+='<div class="nc-grid">';
-    for(var k=0;k<d.files.length;k++){
-      var fi=d.files[k];
+    for(var k=0;k<ncArtworks.length;k++){
+      var fi=ncArtworks[k];
       h+='<div class="nc-file'+(ncSelected[fi.path]?" sel":"")+(fi.importable?"":" dead")+'" data-nc-pick="'+esc(fi.path)+'" title="'+esc(fi.reason||fi.name)+'">';
       if(ncFresh[fi.path])h+='<span class="nc-new">NEW</span>';
       if(ncSelected[fi.path])h+='<span class="nc-tick">✓</span>';
@@ -1292,6 +1430,10 @@ function ncRenderBrowser(){
   h+=ncSendBar();
   el.innerHTML=h;
   el.onclick=ncBrowserClick;
+}
+function ncCustomerLabel(){
+  var c=ncCustomers.filter(function(x){return x.folder===ncCustomerFolder||x.path===ncPath})[0];
+  return c?c.label:(ncCustomerFolder||"this customer");
 }
 function ncSendBar(){
   var n=Object.keys(ncSelected).length;
@@ -1309,8 +1451,8 @@ function ncSendBar(){
 }
 function ncUpdateSend(){var b=$("ncSend");if(b)b.outerHTML=ncSendBar()}
 function ncBrowserClick(e){
-  var go=e.target.closest("[data-nc-go]");
-  if(go){ncOpen(go.getAttribute("data-nc-go"));return}
+  var home=e.target.closest("[data-nc-home]");
+  if(home){ncOpen("");return}
   var pick=e.target.closest("[data-nc-pick]");
   if(pick){
     if(pick.classList.contains("dead"))return;
@@ -1390,7 +1532,9 @@ function ncApplyChanges(d){
     ncStatusInfo.watching=d.watching;ncStatusInfo.stale=d.stale;ncStatusInfo.watch_error=d.error;
     ncRenderBanner();
   }
-  if(prev&&ncPath&&(d.changed_dirs||[]).indexOf(ncPath)>=0)ncRefreshListing();
+  // A file landed under the open customer (in any of their order sub-folders) —
+  // refresh the flat grid so it appears without leaving the tab.
+  if(prev&&ncPath){var cd=d.changed_dirs||[];for(var ci=0;ci<cd.length;ci++){if(cd[ci]===ncPath||cd[ci].indexOf(ncPath+"/")===0){ncReloadArtworks();break}}}
 }
 function ncRenderFeed(){
   var el=$("ncFeed");if(!el)return;
@@ -1399,12 +1543,12 @@ function ncRenderFeed(){
   for(var i=0;i<Math.min(ncRecent.length,12);i++){
     var it=ncRecent[i];
     var fresh=(ncBaseRevision!==null&&it.revision>ncBaseRevision)?" fresh":"";
-    h+='<div class="nc-feed-item'+fresh+'" data-nc-feed="'+esc(it.folder)+'">'
+    h+='<div class="nc-feed-item'+fresh+'" data-nc-feed="'+esc(it.customer||"")+'">'
       +'<div class="nc-fi-name">'+esc(it.name)+'</div>'
       +'<div style="color:var(--muted)">'+esc(it.customer_label||it.customer||"")+' · '+ncFmtWhen(it.modified_ms)+'</div></div>';
   }
   el.innerHTML=h;
-  el.onclick=function(e){var t=e.target.closest("[data-nc-feed]");if(t)ncOpen(t.getAttribute("data-nc-feed"))};
+  el.onclick=function(e){var t=e.target.closest("[data-nc-feed]");if(!t)return;var folder=t.getAttribute("data-nc-feed");if(!folder)return;var c=ncCustomers.filter(function(x){return x.folder===folder})[0];ncOpen(c?c.path:folder,folder)};
 }
 
 checkStatus();
