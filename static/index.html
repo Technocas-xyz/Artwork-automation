@@ -191,31 +191,10 @@ function updateSessionUI(){
   if(isLoggedIn){el.innerHTML='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981"></span> Signed in'}
   else{el.innerHTML='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b"></span> Not signed in <button onclick="startLogin()" style="margin-left:6px;padding:4px 10px;font-size:.72rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:5px;cursor:pointer">Sign in</button>'}
 }
-// The ChatGPT sign-in browser is headed but runs on the container's virtual
-// display — it is only visible through noVNC, which docker-compose maps to
-// port 4401 on this host. Same hostname the app is served from, port 4401.
-window.vncDesktopUrl=function(){
-  return location.protocol+"//"+location.hostname+":4401/vnc.html?autoconnect=true&resize=scale&reconnect=true";
-};
 window.startLogin=function(){
-  var url=vncDesktopUrl();
-  // Open the remote desktop synchronously inside the click so the browser does
-  // not treat it as a blocked pop-up; the worker then navigates that browser
-  // to the ChatGPT login page, which shows up live in the desktop.
-  var win=window.open(url,"chatgpt_signin");
-  var el=$("sessionIndicator");
-  el.innerHTML='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b;animation:pulse 1s infinite"></span> Opening ChatGPT window…';
   fetch("/api/session/login",{method:"POST"}).then(function(r){return r.json()}).then(function(){
-    if(win){try{win.focus()}catch(e){}}
-    var e2=$("sessionIndicator");
-    e2.innerHTML='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b;animation:pulse 1s infinite"></span> Sign in to ChatGPT in the '
-      +'<a href="'+url+'" target="chatgpt_signin" style="color:var(--accent);font-weight:600;text-decoration:underline">remote desktop ↗</a>'
-      +' <span style="color:var(--muted)">(enter the VNC password if asked)</span>, then click: '
-      +'<button onclick="confirmLogin()" style="margin-left:6px;padding:4px 10px;font-size:.72rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:5px;cursor:pointer">Done</button>';
-  }).catch(function(){
-    var e3=$("sessionIndicator");
-    e3.innerHTML='<span style="color:#dc2626">Could not open the sign-in browser.</span> '
-      +'<a href="'+url+'" target="chatgpt_signin" style="color:var(--accent);font-weight:600;text-decoration:underline">Open remote desktop ↗</a>';
+    var el=$("sessionIndicator");
+    el.innerHTML='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b;animation:pulse 1s infinite"></span> Browser window opened. Log in there, then click: <button onclick="confirmLogin()" style="margin-left:6px;padding:4px 10px;font-size:.72rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:5px;cursor:pointer">Done</button>';
   });
 };
 window.confirmLogin=function(){
