@@ -42,10 +42,33 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .prompt-toggle{font-size:.72rem;color:var(--muted);cursor:pointer;margin-top:4px;user-select:none}.prompt-toggle:hover{color:var(--accent)}.prompt-content{display:none;margin-top:4px;padding:7px 9px;background:#f9fafb;border:1px solid var(--border);border-radius:6px;font-family:Consolas,Monaco,monospace;font-size:.7rem;white-space:pre-wrap;max-height:110px;overflow-y:auto;color:var(--muted)}.prompt-content.open{display:block}
 .history-section{border-top:1px solid var(--border);padding-top:12px;margin-top:12px}.history-section h3{font-size:.8rem;color:var(--muted);margin-bottom:6px}.history-item{padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:.76rem;cursor:pointer}.history-item:hover{border-color:var(--accent)}.history-item .hi-label{font-weight:600}.history-detail{display:none;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)}.history-detail.open{display:block}.history-detail img{max-width:100%;max-height:90px;border-radius:6px;margin-right:4px;margin-bottom:3px;border:1px solid var(--border)}
 .coming-soon{text-align:center;color:var(--muted);padding:40px 0;font-size:.88rem}
+/* --- Nextcloud vault browser --- */
+.nc-banner{padding:9px 11px;border-radius:8px;font-size:.76rem;margin-bottom:10px;line-height:1.35}.nc-banner.ok{background:#f0fdf4;border:1px solid #bbf7d0;color:#166534}.nc-banner.warn{background:#fffbeb;border:1px solid #fde68a;color:#92400e}.nc-banner.bad{background:#fee2e2;border:1px solid #fecaca;color:#991b1b}
+.nc-live{display:inline-flex;align-items:center;gap:5px;font-weight:600}.nc-dot{width:8px;height:8px;border-radius:50%;background:#10b981;animation:pulse 1.6s ease-in-out infinite;flex:none}.nc-dot.off{background:#f59e0b;animation:none}.nc-dot.bad{background:#dc2626;animation:none}
+.nc-filter{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:.82rem;margin-bottom:6px}
+.nc-select{width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:8px;font-size:.84rem;background:var(--surface)}
+.nc-hint{font-size:.7rem;color:var(--muted);margin-top:4px}
+.nc-crumbs{font-size:.76rem;color:var(--muted);margin-bottom:8px;line-height:1.6;word-break:break-word}.nc-crumbs a{color:var(--accent);text-decoration:none;cursor:pointer}.nc-crumbs a:hover{text-decoration:underline}
+.nc-folders{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.nc-folder{padding:7px 11px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:.78rem;cursor:pointer;transition:.15s}.nc-folder:hover{border-color:var(--accent);background:#eff6ff}
+.nc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px}
+.nc-file{position:relative;border:2px solid var(--border);border-radius:8px;padding:5px;background:var(--surface);cursor:pointer;text-align:center;transition:.15s}.nc-file:hover{border-color:var(--accent)}.nc-file.sel{border-color:var(--accent);background:#eff6ff}.nc-file.dead{opacity:.5;cursor:not-allowed}.nc-file.dead:hover{border-color:var(--border)}
+.nc-file img{width:100%;height:78px;object-fit:contain;border-radius:4px;background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/12px 12px}
+.nc-file .nc-name{font-size:.64rem;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nc-file .nc-meta{font-size:.6rem;color:var(--muted)}
+.nc-new{position:absolute;top:3px;left:3px;background:#10b981;color:#fff;font-size:.55rem;font-weight:700;padding:1px 5px;border-radius:4px;letter-spacing:.03em}
+.nc-tick{position:absolute;top:3px;right:5px;font-size:.8rem;font-weight:700;color:var(--accent)}
+.nc-send{position:sticky;bottom:0;background:var(--surface);border-top:1px solid var(--border);padding:10px 0 2px;margin-top:14px}
+.nc-send-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.nc-send-btn{flex:1 1 45%;padding:9px 10px;font-size:.76rem;font-weight:700;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer}.nc-send-btn:hover{background:var(--accent-hover)}.nc-send-btn:disabled{background:#cbd5e1;cursor:not-allowed}
+.nc-feed{margin-top:14px;border-top:1px solid var(--border);padding-top:10px}
+.nc-feed-item{padding:6px 8px;border:1px solid var(--border);border-radius:7px;margin-bottom:4px;font-size:.72rem;cursor:pointer;background:var(--surface)}.nc-feed-item:hover{border-color:var(--accent)}.nc-feed-item.fresh{border-color:#10b981;background:#f0fdf4}
+.nc-feed-item .nc-fi-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nc-empty{font-size:.78rem;color:var(--muted);padding:18px 0;text-align:center}
 </style>
 </head>
 <body>
-<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="text">Text</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
+<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="text">Text</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button><button class="wf-tab" data-wf="nextcloud">Nextcloud</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
 <div class="columns">
 <div class="col" id="col1"></div>
 <div class="col" id="col2"></div>
@@ -86,9 +109,14 @@ resultArea.addEventListener("click",function(e){
 });
 
 fetch("/api/templates").then(function(r){return r.json()}).then(function(d){DT=d;renderCols()}).catch(function(e){console.error("[templates] fetch failed, using defaults:",e);DT={turn1:"",turn2:"",turn3:"",extract:"",regen:"",artwork:""};renderCols()});
-document.querySelectorAll(".wf-tab").forEach(function(t){t.addEventListener("click",function(){if(t.disabled)return;document.querySelectorAll(".wf-tab").forEach(function(x){x.classList.remove("active")});t.classList.add("active");currentWorkflow=t.dataset.wf;renderCols()})});
+function switchWorkflow(wf){document.querySelectorAll(".wf-tab").forEach(function(x){x.classList.toggle("active",x.dataset.wf===wf)});currentWorkflow=wf;renderCols()}
+document.querySelectorAll(".wf-tab").forEach(function(t){t.addEventListener("click",function(){if(t.disabled)return;switchWorkflow(t.dataset.wf)})});
 
-function renderCols(){if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else if(currentWorkflow==="custom"){textImageFile="";mockupImageFile="";renderCustomCol1();renderCustomCol2()}else{mockupImageFile="";artworkFiles=[];renderCol1();renderCol2()}
+function renderCols(){
+  if(currentWorkflow==="nextcloud"){renderNextcloudCol1();renderNextcloudCol2();ncStartPolling();return}
+  ncStopPolling();
+  if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else if(currentWorkflow==="custom"){textImageFile="";mockupImageFile="";renderCustomCol1();renderCustomCol2()}else{mockupImageFile="";artworkFiles=[];renderCol1();renderCol2()}
+  applyNcPrefill();
   updBtn();
 }
 function renderCol1(){
@@ -99,6 +127,7 @@ function renderCol1(){
   dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)upImg(e.dataTransfer.files[0])};
   fi.onchange=function(){if(fi.files.length)upImg(fi.files[0]);fi.value=""};
   dt.oninput=function(){if(dt.value.trim()){textImageFile="";$("dzPrev").innerHTML=""}updBtn()};
+  if(textImageFile)$("dzPrev").innerHTML='<img src="/input/'+textImageFile+'">';
 }
 function upImg(file){
   $("dzErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
@@ -284,6 +313,7 @@ function renderMockupCol1(){
   dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
   dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)upMockup(e.dataTransfer.files[0])};
   fi.onchange=function(){if(fi.files.length)upMockup(fi.files[0]);fi.value=""};
+  if(mockupImageFile)$("mdzPrev").innerHTML='<img src="/input/'+mockupImageFile+'" style="max-height:180px">';
 }
 function upMockup(file){
   $("mdzErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
@@ -1121,6 +1151,262 @@ setInterval(function(){fetch("/api/status").then(function(r){if(r.status===401){
 // Auth: load user info and handle 401 globally
 fetch("/api/auth/me").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(d){if(d){var ui=$("userInfo");if(ui)ui.innerHTML='<span>'+d.username+'</span><a href="#" onclick="doLogout();return false" style="color:var(--accent);text-decoration:none;font-weight:600">Sign out</a>'}});
 window.doLogout=function(){fetch("/api/auth/logout",{method:"POST"}).then(function(){window.location.href="/login"})};
+
+// === NEXTCLOUD VAULT BROWSER =============================================
+// Browse Leads 2.0, watch it live, and send a file straight into a workflow.
+// The vault is read-only from here: "send" copies the file into this job's
+// input, it never moves or renames anything in Nextcloud.
+var NC_TARGETS=[
+  {key:"artwork",label:"Artwork Generation",multiple:true},
+  {key:"mockup",label:"Artwork Extraction",multiple:false},
+  {key:"custom",label:"Custom Operation",multiple:false},
+  {key:"text",label:"Text (as text image)",multiple:false}
+];
+var ncPath="",ncListing=null,ncSelected={},ncCustomers=[],ncCustomerSet={},ncCustomerFilter="";
+var ncStatusInfo=null,ncRecent=[],ncFresh={},ncPrefill=null,ncMsg="",ncBusy=false;
+var ncRevision=0,ncBaseRevision=null,ncPollRunning=false;
+
+function ncFmtSize(b){if(!b)return "0 KB";if(b>=1048576)return (b/1048576).toFixed(1)+" MB";return Math.max(1,Math.round(b/1024))+" KB"}
+function ncFmtWhen(ms){if(!ms)return "";var s=Math.round((Date.now()-ms)/1000);if(s<60)return "just now";if(s<3600)return Math.round(s/60)+"m ago";if(s<86400)return Math.round(s/3600)+"h ago";return new Date(ms).toLocaleDateString()}
+
+// --- column 1: customer picker, connection health, live feed -------------
+function renderNextcloudCol1(){
+  col1.innerHTML='<div class="col-title">Leads 2.0</div><div id="ncBanner"></div>'
+    +'<div class="field-group"><label>Customer folder</label>'
+    +'<input type="text" class="nc-filter" id="ncFilter" placeholder="Type to filter customers…" autocomplete="off">'
+    +'<select class="nc-select" id="ncSelect"><option value="">Loading…</option></select>'
+    +'<div class="nc-hint" id="ncCount"></div></div>'
+    +'<div style="display:flex;gap:6px;margin-top:2px"><div class="nc-folder" id="ncRefresh">Refresh list</div><div class="nc-folder" id="ncRoot">All customers</div></div>'
+    +'<div class="nc-feed"><div class="col-title" style="margin-bottom:6px">Just arrived</div><div id="ncFeed"></div></div>';
+  $("ncFilter").value=ncCustomerFilter;
+  $("ncFilter").oninput=function(){ncCustomerFilter=this.value;ncRenderCustomerSelect()};
+  $("ncSelect").onchange=function(){if(this.value)ncOpen(this.value)};
+  $("ncRefresh").onclick=function(){ncLoadCustomers(true);ncLoadStatus()};
+  $("ncRoot").onclick=function(){ncOpen("")};
+  ncRenderBanner();ncRenderFeed();
+  if(ncCustomers.length)ncRenderCustomerSelect();else ncLoadCustomers(false);
+  ncLoadStatus();
+}
+function ncRenderBanner(){
+  var el=$("ncBanner");if(!el)return;
+  var s=ncStatusInfo,h="";
+  if(!s)h='<div class="nc-banner warn">Checking Nextcloud…</div>';
+  else if(!s.configured)h='<div class="nc-banner bad"><b>Nextcloud is not configured.</b><br>'+esc(s.message||"")+'</div>';
+  else if(!s.ok)h='<div class="nc-banner bad"><b>Cannot reach Nextcloud.</b><br>'+esc(s.message||"")+'</div>';
+  else{
+    var cls=s.watching?(s.stale?"nc-dot bad":"nc-dot"):"nc-dot off";
+    var txt=s.watching?(s.stale?"Live feed stalled — retrying":"Live — new files appear on their own"):"Live feed off";
+    h='<div class="nc-banner ok"><span class="nc-live"><span class="'+cls+'"></span>'+esc(txt)+'</span>'
+      +'<div style="margin-top:3px;opacity:.85">'+esc(s.root||"")+' · checked every '+(s.poll_seconds||4)+'s</div>'
+      +(s.watch_error?'<div style="margin-top:3px;color:#991b1b">'+esc(s.watch_error)+'</div>':'')
+      +'</div>';
+  }
+  if(ncMsg)h+='<div class="nc-banner bad">'+esc(ncMsg)+'</div>';
+  el.innerHTML=h;
+}
+function ncLoadStatus(){
+  fetch("/api/nextcloud/status").then(function(r){return r.json()}).then(function(d){ncStatusInfo=d;if(d&&typeof d.revision==="number"&&!ncRevision)ncRevision=d.revision;ncRenderBanner()}).catch(function(){});
+}
+function ncLoadCustomers(force){
+  fetch("/api/nextcloud/customers"+(force?"?refresh=true":""))
+    .then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()})
+    .then(function(d){
+      ncCustomers=d.customers||[];ncCustomerSet={};
+      ncCustomers.forEach(function(c){ncCustomerSet[c.folder]=true});
+      ncRenderCustomerSelect();
+    })
+    .catch(function(e){ncMsg=e.message;ncRenderBanner();var sel=$("ncSelect");if(sel)sel.innerHTML='<option value="">Unavailable</option>'});
+}
+// 1 300 folders is too many to paint at once, so the filter narrows first and
+// the list is capped — the operator types a name rather than scrolling.
+var NC_OPTION_CAP=400;
+function ncRenderCustomerSelect(){
+  var sel=$("ncSelect");if(!sel)return;
+  var q=ncCustomerFilter.trim().toLowerCase();
+  var list=ncCustomers.filter(function(c){return !q||c.label.toLowerCase().indexOf(q)>=0||c.folder.toLowerCase().indexOf(q)>=0});
+  var shown=list.slice(0,NC_OPTION_CAP);
+  var cur=ncListing?ncListing.customer:"";
+  var h='<option value="">'+(ncCustomers.length?"Select a customer…":"No customer folders found")+'</option>';
+  for(var i=0;i<shown.length;i++){
+    h+='<option value="'+esc(shown[i].path)+'"'+(shown[i].folder===cur?" selected":"")+'>'+esc(shown[i].label)+'</option>';
+  }
+  sel.innerHTML=h;
+  var c=$("ncCount");
+  if(c)c.textContent=ncCustomers.length
+    ? list.length+" of "+ncCustomers.length+" customers"+(list.length>NC_OPTION_CAP?" — showing first "+NC_OPTION_CAP+", keep typing":"")
+    : "";
+}
+
+// --- column 2: folder + file browser -------------------------------------
+function renderNextcloudCol2(){
+  col2.innerHTML='<div class="col-title">Vault Files</div><div id="ncBrowser"></div>';
+  if(ncListing)ncRenderBrowser();else ncOpen(ncPath||"");
+  checkStatus();
+}
+function ncOpen(path){
+  ncSelected={};ncMsg="";
+  var url="/api/nextcloud/browse"+(path?"?path="+encodeURIComponent(path):"");
+  fetch(url).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()})
+    .then(function(d){ncListing=d;ncPath=d.path;ncRenderBrowser();ncRenderCustomerSelect();ncRenderBanner()})
+    .catch(function(e){ncMsg=e.message;ncRenderBanner();ncRenderBrowser()});
+}
+function ncRefreshListing(){
+  if(!ncPath)return;
+  fetch("/api/nextcloud/browse?path="+encodeURIComponent(ncPath))
+    .then(function(r){return r.ok?r.json():null})
+    .then(function(d){if(d){ncListing=d;ncRenderBrowser()}}).catch(function(){});
+}
+function ncRenderBrowser(){
+  var el=$("ncBrowser");if(!el)return;
+  var d=ncListing;
+  if(!d){el.innerHTML='<div class="nc-empty">Loading…</div>';return}
+  var h='<div class="nc-crumbs">';
+  for(var i=0;i<d.breadcrumbs.length;i++){
+    h+=(i?' <span style="opacity:.45">/</span> ':'')+'<a data-nc-go="'+esc(d.breadcrumbs[i].path)+'">'+esc(d.breadcrumbs[i].label)+'</a>';
+  }
+  h+='</div>';
+  if(d.folders.length){
+    h+='<div class="nc-folders">';
+    for(var j=0;j<d.folders.length;j++){
+      var f=d.folders[j];
+      h+='<div class="nc-folder" data-nc-go="'+esc(f.path)+'">📁 '+esc(d.is_root?f.customer_label:f.name)+'</div>';
+    }
+    h+='</div>';
+  }
+  if(!d.files.length){
+    h+='<div class="nc-empty">'+(d.folders.length?"No files here — open one of the folders above.":"This folder is empty.")+'</div>';
+  }else{
+    h+='<div class="nc-grid">';
+    for(var k=0;k<d.files.length;k++){
+      var fi=d.files[k];
+      h+='<div class="nc-file'+(ncSelected[fi.path]?" sel":"")+(fi.importable?"":" dead")+'" data-nc-pick="'+esc(fi.path)+'" title="'+esc(fi.reason||fi.name)+'">';
+      if(ncFresh[fi.path])h+='<span class="nc-new">NEW</span>';
+      if(ncSelected[fi.path])h+='<span class="nc-tick">✓</span>';
+      h+='<img loading="lazy" src="/api/nextcloud/thumb?path='+encodeURIComponent(fi.path)+'&w=200&h=200" onerror="this.style.visibility=\'hidden\'">';
+      h+='<div class="nc-name">'+esc(fi.name)+'</div>';
+      h+='<div class="nc-meta">'+ncFmtSize(fi.size)+' · '+ncFmtWhen(fi.modified_ms)+'</div>';
+      h+='</div>';
+    }
+    h+='</div>';
+  }
+  h+=ncSendBar();
+  el.innerHTML=h;
+  el.onclick=ncBrowserClick;
+}
+function ncSendBar(){
+  var n=Object.keys(ncSelected).length;
+  var h='<div class="nc-send" id="ncSend"><div style="font-size:.78rem;font-weight:600">'
+    +(n?n+" file"+(n>1?"s":"")+" selected":"Select a file to send it to a workflow")+'</div><div class="nc-send-row">';
+  for(var i=0;i<NC_TARGETS.length;i++){
+    var t=NC_TARGETS[i],ok=n>0&&(t.multiple||n===1)&&!ncBusy;
+    h+='<button class="nc-send-btn" data-nc-send="'+t.key+'"'+(ok?"":" disabled")+'>'+(ncBusy?"Sending…":"→ "+esc(t.label))+'</button>';
+  }
+  h+='</div>';
+  if(n>1)h+='<div class="nc-hint">Artwork Extraction, Custom Operation and Text take one file at a time.</div>';
+  h+='<div class="nc-hint">Selected files are copied into this job. Nothing in Nextcloud is moved or changed.</div>';
+  if(ncMsg)h+='<div class="blocker-msg">'+esc(ncMsg)+'</div>';
+  return h+'</div>';
+}
+function ncUpdateSend(){var b=$("ncSend");if(b)b.outerHTML=ncSendBar()}
+function ncBrowserClick(e){
+  var go=e.target.closest("[data-nc-go]");
+  if(go){ncOpen(go.getAttribute("data-nc-go"));return}
+  var pick=e.target.closest("[data-nc-pick]");
+  if(pick){
+    if(pick.classList.contains("dead"))return;
+    var path=pick.getAttribute("data-nc-pick");
+    if(ncSelected[path])delete ncSelected[path];else ncSelected[path]=true;
+    // Toggle in place: a full re-render would reload every thumbnail.
+    pick.classList.toggle("sel",!!ncSelected[path]);
+    var tick=pick.querySelector(".nc-tick");
+    if(ncSelected[path]&&!tick){var sp=document.createElement("span");sp.className="nc-tick";sp.textContent="✓";pick.appendChild(sp)}
+    else if(!ncSelected[path]&&tick)tick.remove();
+    ncMsg="";ncUpdateSend();return;
+  }
+  var send=e.target.closest("[data-nc-send]");
+  if(send&&!send.disabled)ncSend(send.getAttribute("data-nc-send"));
+}
+function ncSend(target){
+  var paths=Object.keys(ncSelected);
+  if(!paths.length||ncBusy)return;
+  ncBusy=true;ncMsg="";ncUpdateSend();
+  fetch("/api/nextcloud/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({paths:paths,target:target})})
+    .then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()})
+    .then(function(d){
+      ncBusy=false;
+      var names=d.files.map(function(f){return f.name});
+      if(target==="artwork"){names.forEach(function(n){if(artworkFiles.indexOf(n)<0)artworkFiles.push(n)})}
+      else if(target==="mockup")mockupImageFile=names[0];
+      else if(target==="custom")customFile=names[0];
+      else if(target==="text")textImageFile=names[0];
+      // The vault path already says who the customer is and which artwork
+      // number this is — no reason to make the operator retype it.
+      ncPrefill={client:d.client||"",task_id:d.task_id||""};
+      ncSelected={};
+      if(d.skipped&&d.skipped.length)console.warn("[nextcloud] skipped:",d.skipped);
+      switchWorkflow(target);
+    })
+    .catch(function(e){ncBusy=false;ncMsg=e.message;ncUpdateSend()});
+}
+function applyNcPrefill(){
+  if(!ncPrefill)return;
+  var map={text:["cn","ti"],mockup:["mcn","mti"],artwork:["acn","ati"],custom:["ccn","cti"]};
+  var ids=map[currentWorkflow];if(!ids)return;
+  var cn=$(ids[0]),ti=$(ids[1]);
+  if(!cn&&!ti)return;
+  if(cn&&!cn.value.trim()&&ncPrefill.client)cn.value=ncPrefill.client;
+  if(ti&&!ti.value.trim()&&ncPrefill.task_id)ti.value=ncPrefill.task_id;
+  ncPrefill=null;
+  updBtn();updMockupBtn();updArtworkBtn();updCustomBtn();
+}
+
+// --- live feed ------------------------------------------------------------
+// Long-poll: the request parks on the server until a file lands, so the grid
+// updates within a poll interval of the upload without a UI timer.
+function ncStartPolling(){if(ncPollRunning)return;ncPollRunning=true;ncPollTick()}
+function ncStopPolling(){ncPollRunning=false}
+function ncPollTick(){
+  if(!ncPollRunning)return;
+  fetch("/api/nextcloud/changes?since="+ncRevision+"&wait=true")
+    .then(function(r){if(r.status===401){window.location.href="/login";return null}if(!r.ok)throw new Error("changes "+r.status);return r.json()})
+    .then(function(d){if(d)ncApplyChanges(d);if(ncPollRunning)setTimeout(ncPollTick,250)})
+    .catch(function(){if(ncPollRunning)setTimeout(ncPollTick,5000)});
+}
+function ncApplyChanges(d){
+  var prev=ncRevision;
+  ncRevision=d.revision||0;
+  // Everything already in the vault is history, not an arrival. A revision that
+  // went backwards means the server restarted, so the baseline is re-taken.
+  if(ncBaseRevision===null||ncRevision<ncBaseRevision)ncBaseRevision=ncRevision;
+  ncRecent=d.recent||[];
+  var unknown=false;
+  ncRecent.forEach(function(it){
+    if(it.revision>ncBaseRevision)ncFresh[it.path]=true;
+    if(it.customer&&ncCustomers.length&&!ncCustomerSet[it.customer])unknown=true;
+  });
+  if(unknown)ncLoadCustomers(true);                     // a new customer folder appeared
+  ncRenderFeed();
+  if(ncStatusInfo&&ncStatusInfo.ok){
+    ncStatusInfo.watching=d.watching;ncStatusInfo.stale=d.stale;ncStatusInfo.watch_error=d.error;
+    ncRenderBanner();
+  }
+  if(prev&&ncPath&&(d.changed_dirs||[]).indexOf(ncPath)>=0)ncRefreshListing();
+}
+function ncRenderFeed(){
+  var el=$("ncFeed");if(!el)return;
+  if(!ncRecent.length){el.innerHTML='<div class="nc-hint">Nothing yet. Anything dropped into Leads 2.0 shows up here within seconds.</div>';return}
+  var h="";
+  for(var i=0;i<Math.min(ncRecent.length,12);i++){
+    var it=ncRecent[i];
+    var fresh=(ncBaseRevision!==null&&it.revision>ncBaseRevision)?" fresh":"";
+    h+='<div class="nc-feed-item'+fresh+'" data-nc-feed="'+esc(it.folder)+'">'
+      +'<div class="nc-fi-name">'+esc(it.name)+'</div>'
+      +'<div style="color:var(--muted)">'+esc(it.customer_label||it.customer||"")+' · '+ncFmtWhen(it.modified_ms)+'</div></div>';
+  }
+  el.innerHTML=h;
+  el.onclick=function(e){var t=e.target.closest("[data-nc-feed]");if(t)ncOpen(t.getAttribute("data-nc-feed"))};
+}
+
 checkStatus();
 })();
 </script>
