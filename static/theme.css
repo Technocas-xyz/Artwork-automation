@@ -1,0 +1,468 @@
+/* ==========================================================================
+   theme.css — VISUAL-ONLY product restyle.
+   Loaded AFTER the inline <style> block so these rules override it.
+   Revert the entire theme by removing the single <link> tag in index.html.
+   No JS, ids, data-* attributes, or markup were changed to apply this.
+   ========================================================================== */
+
+:root{
+  --accent:#7c3aed;            /* purple primary */
+  --accent-hover:#6d28d9;
+  --accent-soft:#f3effe;       /* light purple fill */
+  --accent-ring:rgba(124,58,237,.28);
+  --bg:#f6f6f8;                /* very light warm grey page */
+  --surface:#ffffff;
+  --border:#e7e7ee;            /* hairline */
+  --text:#1f2230;
+  --muted:#7a7f8c;
+  --radius:12px;
+  --shadow:0 1px 2px rgba(16,18,32,.04),0 4px 14px rgba(16,18,32,.04);
+  --danger:#dc2626;
+  --danger-soft:#fdecec;
+}
+
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-size:14px;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ---- Global motion: nothing snaps ---- */
+.wf-tab,.gen-btn,.choice-btn,.regen-btn,.cancel-btn,.dl-btn,.vault-btn,
+.browse-btn,.text-confirm-btn,.drop-zone,.history-item,.stage-result img,
+.field-group input,.field-group textarea,.edit-body textarea,
+.text-input-large,input,select,textarea{
+  transition:all .15s ease-out;
+}
+
+/* ==========================================================================
+   HEADER
+   ========================================================================== */
+header{
+  padding:0 28px;
+  min-height:64px;
+  gap:28px;
+  box-shadow:var(--shadow);
+  border-bottom:1px solid var(--border);
+}
+header h1{
+  font-size:20px;
+  font-weight:500;
+  letter-spacing:-.01em;
+}
+#userInfo,#sessionIndicator{
+  font-size:13px;
+  align-self:center;
+}
+
+/* Numbered step-style workflow tabs (counter added purely in CSS) */
+.wf-tabs{counter-reset:wf;gap:8px;align-items:center}
+.wf-tab{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:8px 16px 8px 10px;
+  font-size:13px;
+  font-weight:500;
+  border:1px solid var(--border);
+  border-radius:999px;
+  background:var(--surface);
+  color:var(--text);
+}
+.wf-tab::before{
+  counter-increment:wf;
+  content:counter(wf);
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:20px;height:20px;
+  border-radius:50%;
+  background:#eeeef3;
+  color:var(--muted);
+  font-size:11px;
+  font-weight:500;
+  flex:0 0 auto;
+}
+.wf-tab:hover{border-color:#d9d9e4;background:#fafafc}
+.wf-tab.active{
+  border-color:var(--accent);
+  background:var(--accent);
+  color:#fff;
+}
+.wf-tab.active::before{background:rgba(255,255,255,.25);color:#fff}
+.wf-tab:disabled{opacity:.45}
+
+/* ==========================================================================
+   COLUMNS AS CARDS
+   ========================================================================== */
+.columns{
+  gap:20px;
+  padding:22px;
+  background:var(--bg);
+}
+.col{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-right:1px solid var(--border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  padding:22px;
+}
+.col:last-child{border-right:1px solid var(--border)}
+
+.col-title{
+  font-size:11px;
+  font-weight:500;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  color:var(--muted);
+  margin-bottom:16px;
+}
+
+/* ==========================================================================
+   TYPOGRAPHY
+   ========================================================================== */
+.field-group label{
+  font-size:13px;
+  font-weight:500;
+  text-transform:none;
+  color:var(--text);
+}
+.stage-result h3,.job-header{font-size:13px;font-weight:500;color:var(--muted)}
+.or-divider{font-weight:400;font-size:13px}
+
+/* ==========================================================================
+   CONTROLS
+   ========================================================================== */
+.field-group input,.field-group textarea,.text-confirm-area textarea,
+.edit-body textarea,.text-input-large{
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:var(--surface);
+}
+.field-group input,.field-group textarea{padding:10px 12px;font-size:14px}
+.field-group input:focus,.field-group textarea:focus,
+.text-confirm-area textarea:focus,.edit-body textarea:focus,
+.text-input-large:focus,input:focus,select:focus,textarea:focus{
+  outline:none;
+  border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-ring);
+}
+.text-input-large{font-weight:500;border-width:1px}
+
+/* Primary buttons */
+.gen-btn,.text-confirm-btn,.dl-btn,.vault-btn,.browse-btn{
+  background:var(--accent);
+  border-radius:8px;
+  font-weight:500;
+}
+.gen-btn{font-size:14px;font-weight:500;padding:13px;box-shadow:var(--shadow)}
+.gen-btn:hover,.text-confirm-btn:hover,.dl-btn:hover,
+.vault-btn:hover,.browse-btn:hover{background:var(--accent-hover)}
+.gen-btn:disabled{background:#c4c4d0}
+
+/* Secondary buttons (ratio picks, number choices) */
+.choice-btn{
+  border:1px solid var(--border);
+  border-radius:10px;
+  background:var(--surface);
+  font-weight:500;
+}
+.choice-btn:hover{border-color:var(--accent);background:var(--accent-soft)}
+
+/* Danger buttons */
+.cancel-btn{
+  background:var(--danger-soft);
+  color:var(--danger);
+  font-weight:500;
+}
+.cancel-btn:hover{background:#fbdcdc}
+.regen-btn{border:1px solid var(--danger);border-radius:10px;font-weight:500}
+.regen-btn:hover{background:var(--danger-soft)}
+
+/* Drop zone + operation cards: whole card is the click target */
+.drop-zone{border:1.5px dashed var(--border);border-radius:var(--radius);padding:20px}
+.drop-zone.dragover{border-color:var(--accent);background:var(--accent-soft)}
+.drop-zone .browse-btn{border-radius:8px;font-weight:500}
+
+/* ==========================================================================
+   RESULTS PANEL
+   ========================================================================== */
+/* Status messages: coloured left border + tint, not a solid block */
+.status-box{
+  border-radius:8px;
+  border-left-width:3px;
+  font-size:14px;
+}
+.status-box.done{background:#f0fdf7;border:1px solid #cdeede;border-left:3px solid #16a34a;color:#137a43}
+.status-box.failed{background:var(--danger-soft);border:1px solid #f4cccc;border-left:3px solid var(--danger);color:#b02020}
+.status-box.awaiting{background:var(--accent-soft);border:1px solid #e2d7fb;border-left:3px solid var(--accent);color:#5b21b6}
+
+/* Progress box in the calmer palette */
+.progress-box{background:#fbfaff;border:1px solid #e6e0fa;border-left:3px solid var(--accent);border-radius:8px}
+.progress-label{color:#5b21b6}
+.progress-step.active{background:var(--accent)}
+.progress-elapsed,.progress-hint{color:#6b6f7c}
+
+/* Images: white frame, hairline border, subtle hover scale */
+.stage-result img{border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow)}
+.stage-result img:hover{transform:scale(1.012)}
+
+/* Similarity bars: rounded ends, lighter track (targets the inline markup) */
+.stage-result div[style*="background:#eee"]{background:#eef0f4 !important;border-radius:999px !important}
+.stage-result div[style*="background:#eee"] > div{border-radius:999px !important}
+
+/* Vault info card */
+.vault-info{background:#f0fdf7;border:1px solid #cdeede;border-radius:var(--radius)}
+
+/* History */
+.history-item{border:1px solid var(--border);border-radius:10px}
+.history-item:hover{border-color:var(--accent);background:var(--accent-soft)}
+
+/* Prompt/edit disclosures pick up the purple accent on hover */
+.edit-toggle:hover,.prompt-toggle:hover{color:var(--accent)}
+
+/* ==========================================================================
+   EMPTY STATE for the idle results panel.
+   #resultArea is empty when idle; :empty lets us show a centred muted line
+   without any JS. Hidden as soon as content is rendered into it.
+   ========================================================================== */
+#resultArea:empty::before{
+  content:"Results will appear here once a job runs.";
+  display:block;
+  text-align:center;
+  color:var(--muted);
+  font-size:13px;
+  padding:48px 12px;
+}
+
+
+/* ==========================================================================
+   PRODUCT SHELL (added by shell.js): sidebar + main area + top bar.
+   All of this styles NEW markup only; the existing header/columns are moved
+   into .app-main unchanged.
+   ========================================================================== */
+
+.app-shell{
+  display:flex;
+  height:100vh;
+  width:100%;
+  overflow:hidden;
+  background:var(--bg);
+}
+
+/* ---- Sidebar ---- */
+.app-sidebar{
+  width:240px;
+  flex:0 0 240px;
+  background:var(--surface);
+  border-right:1px solid var(--border);
+  height:100vh;
+  display:flex;
+  flex-direction:column;
+  padding:16px 14px;
+  overflow-y:auto;
+}
+.sb-brand{display:flex;align-items:center;gap:10px;padding:4px 6px 14px}
+.sb-logo{
+  width:28px;height:28px;border-radius:8px;
+  background:linear-gradient(135deg,#8b5cf6,#7c3aed);
+  color:#fff;font-weight:600;font-size:15px;
+  display:flex;align-items:center;justify-content:center;
+}
+.sb-brand-name{font-size:15px;font-weight:500;color:var(--text)}
+
+.sb-newproject{
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  width:100%;margin:0 0 16px;padding:10px 12px;
+  background:var(--accent);color:#fff;border:none;border-radius:8px;
+  font-size:13px;font-weight:500;cursor:pointer;box-shadow:var(--shadow);
+  transition:all .15s ease-out;
+}
+.sb-newproject:hover{background:var(--accent-hover)}
+.sb-newproject .ti{font-size:16px}
+
+.sb-nav{display:flex;flex-direction:column;gap:2px;flex:1}
+.sb-section{
+  font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.08em;
+  color:var(--muted);padding:14px 10px 6px;
+}
+.sb-item{
+  display:flex;align-items:center;gap:10px;
+  height:40px;padding:0 12px;border-radius:8px;
+  background:none;border:none;cursor:pointer;text-align:left;text-decoration:none;
+  font-size:13px;font-weight:400;color:var(--text);width:100%;
+  transition:all .15s ease-out;
+}
+.sb-item .ti{font-size:18px;color:var(--muted);transition:color .15s ease-out}
+.sb-item:hover{background:#f5f5f9}
+.sb-item.active{background:var(--accent-soft);color:var(--accent);font-weight:500}
+.sb-item.active .ti{color:var(--accent)}
+
+.sb-help{
+  margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;
+  background:#fbfaff;
+}
+.sb-help-title{font-size:13px;font-weight:500;margin-bottom:2px}
+.sb-help-body{font-size:12px;color:var(--muted);line-height:1.4;margin-bottom:6px}
+.sb-help-link{font-size:13px;color:var(--accent);text-decoration:none;font-weight:500}
+.sb-help-link:hover{text-decoration:underline}
+
+/* ---- Main area ---- */
+.app-main{
+  flex:1;
+  display:flex;
+  flex-direction:column;
+  height:100vh;
+  overflow:hidden;
+  min-width:0;
+}
+
+/* Top bar */
+.app-topbar{
+  display:flex;align-items:center;gap:24px;
+  padding:16px 24px;
+  background:var(--surface);
+  border-bottom:1px solid var(--border);
+  flex:0 0 auto;
+}
+.app-title-wrap{min-width:0}
+.app-page-title{font-size:20px;font-weight:500;letter-spacing:-.01em;line-height:1.2}
+.app-page-desc{font-size:13px;color:var(--muted);margin-top:2px}
+
+/* Numbered breadcrumb */
+.app-breadcrumb{display:flex;align-items:center;gap:6px;margin-left:8px;flex-wrap:wrap}
+.bc-step{
+  display:inline-flex;align-items:center;gap:8px;
+  background:none;border:none;cursor:pointer;padding:4px 6px;border-radius:8px;
+  transition:all .15s ease-out;
+}
+.bc-step:hover{background:#f5f5f9}
+.bc-num{
+  width:22px;height:22px;border-radius:50%;
+  display:inline-flex;align-items:center;justify-content:center;
+  font-size:11px;font-weight:500;
+  background:#eeeef3;color:var(--muted);
+  transition:all .15s ease-out;
+}
+.bc-label{font-size:13px;color:var(--muted);transition:color .15s ease-out}
+.bc-step.done .bc-num{background:var(--accent-soft);color:var(--accent)}
+.bc-step.done .bc-label{color:var(--text)}
+.bc-step.current .bc-num{background:var(--accent);color:#fff}
+.bc-step.current .bc-label{color:var(--accent);font-weight:500}
+.bc-step.upcoming .bc-num{background:#eeeef3;color:var(--muted)}
+.bc-chevron{color:#c9c9d4;display:inline-flex;align-items:center;font-size:16px}
+
+/* User slot on the far right of the top bar */
+.app-user-slot{margin-left:auto;display:flex;align-items:center;gap:10px}
+.app-avatar{
+  width:30px;height:30px;border-radius:50%;
+  background:linear-gradient(135deg,#8b5cf6,#7c3aed);color:#fff;
+  display:inline-flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:500;flex:0 0 auto;
+}
+
+/* Hide the ORIGINAL header (kept in the DOM as the source of truth for
+   tab state and event listeners; its content is mirrored into the shell). */
+.app-main > header{
+  position:absolute;
+  width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);
+  padding:0;margin:-1px;border:0;
+}
+
+/* The existing three-column grid now sits below the top bar and fills the
+   remaining height. It keeps its own internal grid/sceoll behaviour. */
+.app-main > .columns{
+  flex:1;
+  min-height:0;
+}
+
+
+/* ==========================================================================
+   AGENT STATUS pill + job attribution badge (added by shell.js)
+   ========================================================================== */
+.agent-pill{
+  display:inline-flex;align-items:center;gap:7px;
+  padding:6px 12px;border-radius:999px;font-size:12px;font-weight:500;
+  border:1px solid var(--border);transition:all .15s ease-out;white-space:nowrap;
+}
+.agent-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+.agent-pill-on{background:#f0fdf7;border-color:#cdeede;color:#137a43}
+.agent-pill-on .agent-dot{background:#16a34a;box-shadow:0 0 0 3px rgba(22,163,74,.15)}
+.agent-pill-off{background:#fdf6e3;border-color:#f0c36d;color:#8a6d3b}
+.agent-pill-off .agent-dot{background:#d97706}
+.agent-badge{
+  margin-top:8px;font-size:12px;color:var(--muted);
+  display:inline-flex;align-items:center;gap:6px;
+}
+.agent-badge::before{content:"\1F5A5";}
+
+
+/* ==========================================================================
+   AGENT DOWNLOAD button, setup modal, and no-agent banner (added by shell.js)
+   ========================================================================== */
+.agent-dl-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:7px 13px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;
+  background:var(--surface);color:var(--text);border:1px solid var(--border);
+  transition:all .15s ease-out;white-space:nowrap;
+}
+.agent-dl-btn .ti{font-size:16px}
+.agent-dl-btn:hover{background:#f5f5f9;border-color:#d9d9e4}
+.agent-dl-btn.agent-dl-prominent{
+  background:var(--accent);color:#fff;border-color:var(--accent);
+  box-shadow:0 2px 8px rgba(124,58,237,.28);
+}
+.agent-dl-btn.agent-dl-prominent:hover{background:var(--accent-hover)}
+
+/* No-agent banner above the columns */
+.agent-banner{
+  display:flex;align-items:center;justify-content:space-between;gap:16px;
+  margin:0 22px;padding:12px 16px;border-radius:10px;
+  background:#fdf6e3;border:1px solid #f0c36d;color:#8a6d3b;font-size:14px;font-weight:500;
+}
+.agent-banner-btn{
+  background:var(--accent);color:#fff;border:none;border-radius:8px;
+  padding:8px 16px;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s ease-out;
+}
+.agent-banner-btn:hover{background:var(--accent-hover)}
+
+/* Setup modal */
+.agent-modal-backdrop{
+  position:fixed;inset:0;background:rgba(20,20,30,.45);
+  display:flex;align-items:center;justify-content:center;z-index:1000;
+}
+.agent-modal{
+  background:var(--surface);border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.25);
+  width:min(520px,92vw);padding:26px 28px;position:relative;
+}
+.agent-modal h2{font-size:18px;font-weight:500;margin-bottom:4px}
+.agent-modal-sub{font-size:13px;color:var(--muted);margin-bottom:16px}
+.agent-modal-close{
+  position:absolute;top:14px;right:16px;background:none;border:none;
+  font-size:24px;line-height:1;color:var(--muted);cursor:pointer;
+}
+.agent-modal-close:hover{color:var(--text)}
+.agent-steps{margin:0 0 18px 18px;padding:0;font-size:14px;line-height:1.9}
+.agent-steps li{margin-bottom:6px}
+.agent-dl-link{
+  display:inline-block;margin-top:4px;padding:8px 16px;border-radius:8px;
+  background:var(--accent);color:#fff;text-decoration:none;font-size:13px;font-weight:500;
+  transition:all .15s ease-out;
+}
+.agent-dl-link:hover{background:var(--accent-hover)}
+.agent-token-row{border-top:1px solid var(--border);padding-top:14px}
+.agent-token-row label{display:block;font-size:13px;font-weight:500;margin-bottom:6px}
+.agent-token-box{display:flex;align-items:center;gap:8px}
+.agent-token-box code{
+  flex:1;background:#f6f6f8;border:1px solid var(--border);border-radius:8px;
+  padding:9px 11px;font-size:12px;word-break:break-all;color:var(--text);
+}
+.agent-copy-btn{
+  background:var(--accent);color:#fff;border:none;border-radius:8px;
+  padding:9px 14px;font-size:13px;font-weight:500;cursor:pointer;flex:0 0 auto;
+  transition:all .15s ease-out;
+}
+.agent-copy-btn:hover{background:var(--accent-hover)}
+.agent-token-hint{font-size:12px;color:var(--muted);margin-top:8px}

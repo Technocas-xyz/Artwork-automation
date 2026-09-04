@@ -11,11 +11,9 @@ from __future__ import annotations
 
 import os
 import threading
-import traceback
 import time
 import uuid
 from pathlib import Path
-from queue import Queue
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
@@ -25,20 +23,22 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from config.job_options import JOB_OPTIONS, PARAMETERISED_OPTIONS
-from config.workflows import TEXT_TURN_0, TEXT_TURN_1, TEXT_TURN_2, TEXT_TURN_3, MOCKUP_REGENERATE, EXTRACT_BOXES, EXTRACT_ARTWORKS, EXTRACT_CONTACT_SHEET, EXTRACT_SINGLE, ARTWORK_REGENERATE, CUSTOM_RECONSTRUCT, CUSTOM_REMOVE_BACKGROUND, CUSTOM_HALO_REMOVAL, CUSTOM_BLACK_OUT, CUSTOM_HALF_TONE, CUSTOM_DETECT_OBJECTS, CUSTOM_CHANGE_COLOR, CUSTOM_ASPECT_ADVICE, CUSTOM_ASPECT_BASELINE, CUSTOM_ASPECT_REGENERATE, normalise_ratio, CUSTOM_OPERATIONS_ORDER, CUSTOM_OPERATIONS_LABELS, CUSTOM_OPERATIONS
-from src.aspect import image_info, fit_to_ratio
-from src.postprocess import black_out, half_tone, similarity, extract_features
+from config.workflows import TEXT_TURN_1, TEXT_TURN_2, TEXT_TURN_3, EXTRACT_CONTACT_SHEET, EXTRACT_SINGLE, ARTWORK_REGENERATE, CUSTOM_OPERATIONS
+from src.aspect import image_info
 from src.auth import (
     APP_USERNAME, APP_PASSWORD_HASH, verify_password, sign_cookie,
     get_current_user, check_rate_limit, record_failure, record_success,
     COOKIE_NAME, PUBLIC_PATHS, PUBLIC_PREFIXES,
 )
-from src.browser import launch_context, is_logged_in
-from src.extract import crop_boxes, grid_split, validate_crops, ExtractionError
-from src.generator import generate, open_chat, send_turn, send_text_turn, get_last_text_reply, get_boxes, extract_artwork_images
-from src.postprocess import is_opaque_white_bg, remove_white_background
-from src.prompt_builder import build_prompt
-from src.vault import save_to_vault
+from src.agent_tokens import token_name, get_or_create_for_name
+
+# ---------------------------------------------------------------------------
+# ARCHITECTURE NOTE
+# The Playwright browser work does NOT run here any more. A client-side agent
+# (agent.py) on the designer's PC polls this server, claims queued jobs, runs
+# the workflows against a real logged-in Chrome, and posts progress/results
+# back. The server owns the jobs table and the operator-facing web UI only.
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # App & state
@@ -53,6 +53,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         # Allow public paths
         if path in PUBLIC_PATHS or any(path.startswith(p) for p in PUBLIC_PREFIXES):
+            return await call_next(request)
+        # Agent endpoints authenticate with a bearer token, not the operator
+        # cookie. The token is validated inside each agent endpoint.
+        if path.startswith("/api/agent/"):
             return await call_next(request)
         # Allow login page
         if path == "/login":
@@ -71,24 +75,54 @@ class AuthMiddleware(BaseHTTPMiddleware):
 app.add_middleware(AuthMiddleware)
 
 jobs: dict[str, dict[str, Any]] = {}
-job_queue: Queue[str] = Queue()
+_jobs_lock = threading.Lock()
 
 INPUT_DIR = Path("./input")
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR = Path("./output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOADS_DIR = Path("./downloads")
+DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+# The agent is now a one-dir build shipped as a ZIP (one-file cannot extract
+# the large bundled Chromium at runtime). Kept .exe as a fallback name.
+AGENT_ZIP_NAME = "ArtworkAgent.zip"
+AGENT_EXE_NAME = "ArtworkAgent.exe"
 
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
-_worker_alive: bool = True
-_worker_error: str = ""
+# ---------------------------------------------------------------------------
+# Agent presence: agents register and then poll. We consider the system able to
+# generate when some agent has polled within AGENT_ONLINE_WINDOW seconds.
+# ---------------------------------------------------------------------------
+AGENT_ONLINE_WINDOW = 30.0          # seconds since last poll to count as "connected"
+AGENT_PROGRESS_TIMEOUT = 300.0      # 5 min without progress -> release the job
+agents: dict[str, dict[str, Any]] = {}   # agent_id -> {name, registered_at, last_seen, logged_in}
 
-# Session state (updated by the worker thread)
-_session_logged_in: bool = False
-_session_account: str = "acct1"
-_session_check_time: float = 0.0
-_session_action: str = ""  # "", "check", "login"
-_session_result: threading.Event = threading.Event()
+
+def _online_agent() -> dict | None:
+    """Return the most recently seen agent still within the online window."""
+    now = time.time()
+    best = None
+    for a in agents.values():
+        if now - a.get("last_seen", 0) <= AGENT_ONLINE_WINDOW:
+            if best is None or a["last_seen"] > best["last_seen"]:
+                best = a
+    return best
+
+
+def _requeue_stale_jobs() -> None:
+    """Release jobs whose claiming agent stopped sending progress."""
+    now = time.time()
+    with _jobs_lock:
+        for j in jobs.values():
+            if j.get("status") == "running" and j.get("claimed_by"):
+                last = j.get("last_progress_at") or j.get("claimed_at") or 0
+                if now - last > AGENT_PROGRESS_TIMEOUT and not j.get("awaiting_input"):
+                    print(f"[server] Releasing stale job {j['id']} (agent silent > {AGENT_PROGRESS_TIMEOUT}s)")
+                    j["status"] = "queued"
+                    j["claimed_by"] = None
+                    j["claimed_at"] = None
+                    j["stage_label"] = "Requeued — waiting for an agent"
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -169,831 +203,33 @@ class OpenFolderRequest(BaseModel):
     path: str
 
 
+# --- Agent-facing request models ---
+class AgentRegisterRequest(BaseModel):
+    agent_name: str = "designer"
+    logged_in: bool = False
+
+
+class AgentProgressRequest(BaseModel):
+    stage: int | None = None
+    stage_label: str | None = None
+    active_time: float | None = None
+    logged_in: bool | None = None
+    # The agent posts the full job dict so the operator UI reflects live state.
+    job: dict | None = None
+
+
+class AgentErrorRequest(BaseModel):
+    message: str
+    step: int | None = None
+    session_expired: bool = False
+
+
 # ---------------------------------------------------------------------------
-# Background worker
+
 # ---------------------------------------------------------------------------
-
-_resume_event = threading.Event()
-# Signal for cancel: worker checks this after resuming
-_cancel_flag: dict[str, bool] = {}
-
-
-def _worker() -> None:
-    global _worker_alive, _worker_error, _session_logged_in, _session_check_time
-
-    try:
-        context = launch_context("acct1")
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto("https://chatgpt.com", wait_until="domcontentloaded")
-        _session_logged_in = is_logged_in(page)
-        if not _session_logged_in:
-            print("[worker] WARNING: Not logged in. Use the Sign In button in the UI.")
-        else:
-            print("[worker] Session OK — logged in.")
-    except Exception as exc:
-        _worker_alive = False
-        _worker_error = str(exc)
-        print(f"[worker] FATAL: {exc}")
-        traceback.print_exc()
-        return
-
-    while True:
-        try:
-            job_id: str = job_queue.get()
-
-            # Handle session actions
-            if job_id == "__session_check__":
-                _session_logged_in = is_logged_in(page)
-                _session_check_time = time.time()
-                _session_result.set()
-                continue
-            elif job_id == "__session_login__":
-                page.goto("https://chatgpt.com", wait_until="domcontentloaded")
-                try:
-                    page.bring_to_front()
-                except Exception:
-                    pass
-                _session_result.set()
-                continue
-
-            job = jobs.get(job_id)
-            if job is None:
-                continue
-            job["status"] = "running"
-            job["started_at"] = time.time()
-            try:
-                if job.get("workflow") == "text":
-                    _run_text_workflow(page, job)
-                elif job.get("workflow") == "mockup":
-                    _run_mockup_workflow(page, job)
-                elif job.get("workflow") == "artwork":
-                    _run_artwork_workflow(page, job)
-                elif job.get("workflow") == "custom":
-                    _run_custom_workflow(page, job)
-                else:
-                    _run_legacy_job(page, job)
-            except _CancelledError:
-                if job["status"] != "cancelled":
-                    job["status"] = "cancelled"
-                    job["finished_at"] = time.time()
-            except Exception as exc:
-                job["status"] = "failed"
-                job["error"] = str(exc)
-                job["finished_at"] = time.time()
-        except Exception as exc:
-            _worker_alive = False
-            _worker_error = f"Worker crashed: {exc}"
-            print(f"[worker] FATAL: {exc}")
-            traceback.print_exc()
-            return
-
-
-class _CancelledError(Exception):
-    pass
-
-
-def _wait_for_resume(job_id: str) -> None:
-    """Block until resume event. Raises _CancelledError if job was cancelled."""
-    _resume_event.clear()
-    _resume_event.wait()
-    if _cancel_flag.get(job_id):
-        raise _CancelledError()
-
-
-def _track_start(job: dict) -> None:
-    """Mark the start of an active processing step."""
-    job["_step_start"] = time.time()
-
-
-def _track_end(job: dict) -> None:
-    """Accumulate active processing time from the last _track_start."""
-    start = job.get("_step_start")
-    if start:
-        job["active_time"] = job.get("active_time", 0.0) + (time.time() - start)
-        job["_step_start"] = None
-
-
-def _run_legacy_job(page: Any, job: dict[str, Any]) -> None:
-    try:
-        prompt = build_prompt(options=job["options"], params=job["params"], custom_note=job["custom_note"])
-        image_paths = [str(INPUT_DIR / f) for f in job["files"]]
-        images = generate(page=page, image_paths=image_paths, prompt=prompt, run_id=job["id"])
-        originals = list(images)
-        processed = [remove_white_background(d) if is_opaque_white_bg(d) else d for d in images]
-        output_names = []
-        for idx, data in enumerate(processed, 1):
-            name = f"{job['id']}_V{idx}.png"
-            (OUTPUT_DIR / name).write_bytes(data)
-            output_names.append(name)
-        job["images"] = output_names
-        vault_paths = []
-        if job.get("client") and job.get("task_id"):
-            vault_paths = save_to_vault(images=processed, originals=originals, client=job["client"], task_id=job["task_id"])
-        job["vault_folder"] = str(vault_paths[0].parent) if vault_paths else None
-        job["status"] = "done"
-        job["finished_at"] = time.time()
-    except Exception:
-        job["finished_at"] = time.time()
-        raise
-
-
-def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
-    job_id = job["id"]
-    client = job["client"]
-    task_id = job["task_id"]
-    text = job["text"]
-    text_image = job.get("text_image", "")
-
-    tpl_turn1 = job.get("template_turn1") or TEXT_TURN_1
-    tpl_turn2 = job.get("template_turn2") or TEXT_TURN_2
-    tpl_turn3 = job.get("template_turn3") or TEXT_TURN_3
-
-    from src.vault import VAULT_DIR
-    task_dir = VAULT_DIR / client / task_id
-    task_dir.mkdir(parents=True, exist_ok=True)
-    existing_runs = [d for d in task_dir.iterdir() if d.is_dir() and d.name.startswith("run_")]
-    run_number = len(existing_runs) + 1
-    run_dir = task_dir / f"run_{run_number}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    job["vault_folder"] = str(run_dir)
-
-    _track_start(job)
-    open_chat(page)
-    _track_end(job)
-
-    # --- TURN 0 (optional): Extract text from image ---
-    if text_image and not text:
-        job["stage"] = 0
-        job["stage_label"] = "Reading text from image"
-        prompt0 = TEXT_TURN_0
-        extracted_text = send_text_turn(page, prompt=prompt0, image_paths=[str(INPUT_DIR / text_image)], run_id=f"{job_id}_t0")
-        job.setdefault("prompts", []).append(prompt0)
-        job["extracted_text"] = extracted_text
-        job["status"] = "awaiting_text_confirmation"
-        job["awaiting_input"] = True
-        job["paused_at"] = time.time()
-        _wait_for_resume(job_id)
-        text = job["confirmed_text"]
-        job["text"] = text
-        job["status"] = "running"
-        job["awaiting_input"] = False
-
-    # --- TURN 1: Style variations (with regenerate loop) ---
-    job["stage"] = 1
-    job["stage_label"] = "Generating style variations"
-    attempt = 1
-
-    while True:
-        prompt1 = tpl_turn1.format(text=text)
-        job.setdefault("prompts", []).append(prompt1)
-        _track_start(job)
-        images1 = send_turn(page, prompt=prompt1, image_paths=None, run_id=f"{job_id}_t1_{attempt}")
-        _track_end(job)
-
-        if images1:
-            suffix = f"_attempt{attempt}" if attempt > 1 else ""
-            stage1_output = f"{job_id}_stage1{suffix}.png"
-            (OUTPUT_DIR / stage1_output).write_bytes(images1[0])
-            job.setdefault("stage_images", {})["stage1"] = stage1_output
-            job["images"] = [stage1_output]
-            vault_name = f"{task_id}_R{run_number}_stage1_styles{suffix}.png"
-            (run_dir / vault_name).write_bytes(images1[0])
-
-        job["stage"] = 1
-        job["awaiting_input"] = True
-        job["paused_at"] = time.time()
-        job["template_turn2"] = job.get("template_turn2") or TEXT_TURN_2
-        job["status"] = "awaiting_selection"
-        _wait_for_resume(job_id)
-
-        if job.get("_regenerate"):
-            job["_regenerate"] = False
-            tpl_turn1 = job.get("_regen_template") or tpl_turn1
-            job["_regen_template"] = None
-            attempt += 1
-            job["status"] = "running"
-            job["awaiting_input"] = False
-            job["stage_label"] = f"Regenerating style variations (attempt {attempt})"
-            continue
-        break
-
-    # --- TURN 2: Colour variations (with regenerate loop) ---
-    job["status"] = "running"
-    job["awaiting_input"] = False
-    job["stage"] = 2
-    job["stage_label"] = "Generating colour variations"
-    style_choice = job["choices"][-1]  # last choice for stage 1
-    tpl_turn2 = job.get("template_turn2") or tpl_turn2
-    attempt = 1
-
-    while True:
-        prompt2 = tpl_turn2.format(n=style_choice)
-        job.setdefault("prompts", []).append(prompt2)
-        _track_start(job)
-        images2 = send_turn(page, prompt=prompt2, image_paths=None, run_id=f"{job_id}_t2_{attempt}")
-        _track_end(job)
-
-        if images2:
-            suffix = f"_attempt{attempt}" if attempt > 1 else ""
-            stage2_output = f"{job_id}_stage2{suffix}.png"
-            (OUTPUT_DIR / stage2_output).write_bytes(images2[0])
-            job.setdefault("stage_images", {})["stage2"] = stage2_output
-            job["images"] = [stage2_output]
-            vault_name = f"{task_id}_R{run_number}_stage2_colours{suffix}.png"
-            (run_dir / vault_name).write_bytes(images2[0])
-
-        job["stage"] = 2
-        job["awaiting_input"] = True
-        job["paused_at"] = time.time()
-        job["template_turn3"] = job.get("template_turn3") or TEXT_TURN_3
-        job["status"] = "awaiting_selection"
-        _wait_for_resume(job_id)
-
-        if job.get("_regenerate"):
-            job["_regenerate"] = False
-            tpl_turn2 = job.get("_regen_template") or tpl_turn2
-            job["_regen_template"] = None
-            attempt += 1
-            job["status"] = "running"
-            job["awaiting_input"] = False
-            job["stage_label"] = f"Regenerating colour variations (attempt {attempt})"
-            continue
-        break
-
-    # --- TURN 3: Final artwork ---
-    job["status"] = "running"
-    job["awaiting_input"] = False
-    job["stage"] = 3
-    job["stage_label"] = "Generating final artwork"
-    colour_choice = job["choices"][-1]  # last choice for stage 2
-    tpl_turn3 = job.get("template_turn3") or tpl_turn3
-
-    # The colour collage is a fixed 4-wide grid, numbered left-to-right then
-    # top-to-bottom. Derive the row/position so the prompt names the exact cell
-    # and ChatGPT cannot miscount its own collage (e.g. #8 -> row 2, position 4).
-    COLOUR_GRID_COLS = 4
-    try:
-        m_int = int(colour_choice)
-    except (TypeError, ValueError):
-        m_int = 0
-    if m_int >= 1:
-        row = ((m_int - 1) // COLOUR_GRID_COLS) + 1
-        col = ((m_int - 1) % COLOUR_GRID_COLS) + 1
-    else:
-        row = col = 0
-
-    # Substitute {m}/{row}/{col}; tolerate operator-edited templates missing keys.
-    prompt3 = tpl_turn3.replace("{m}", str(colour_choice)).replace("{row}", str(row)).replace("{col}", str(col))
-    print(f"[text] Turn 3 final prompt (m={colour_choice}, row={row}, col={col}):\n{prompt3}")
-    job.setdefault("prompts", []).append(prompt3)
-    _track_start(job)
-    images3 = send_turn(page, prompt=prompt3, image_paths=None, run_id=f"{job_id}_t3")
-    _track_end(job)
-
-    if images3:
-        final_data = images3[0]
-        original_data = final_data
-        if is_opaque_white_bg(final_data):
-            final_data = remove_white_background(final_data)
-        final_output = f"{job_id}_final.png"
-        (OUTPUT_DIR / final_output).write_bytes(final_data)
-        job.setdefault("stage_images", {})["final"] = final_output
-        job["images"] = [final_output]
-        (run_dir / f"{task_id}_R{run_number}_final.png").write_bytes(final_data)
-        (run_dir / f"{task_id}_R{run_number}_final_original.png").write_bytes(original_data)
-
-    job["status"] = "done"
-    job["awaiting_input"] = False
-    job["finished_at"] = time.time()
-
-
-def _run_mockup_workflow(page: Any, job: dict[str, Any]) -> None:
-    """Mockup workflow: contact sheet → operator picks numbers → generate chosen designs."""
-    job_id = job["id"]
-    client = job["client"]
-    task_id = job["task_id"]
-    mockup_image = job.get("mockup_image", "")
-
-    from src.vault import VAULT_DIR
-    task_dir = VAULT_DIR / client / task_id
-    task_dir.mkdir(parents=True, exist_ok=True)
-    existing_runs = [d for d in task_dir.iterdir() if d.is_dir() and d.name.startswith("run_")]
-    run_number = len(existing_runs) + 1
-    run_dir = task_dir / f"run_{run_number}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    job["vault_folder"] = str(run_dir)
-
-    image_path = INPUT_DIR / mockup_image
-
-    # --- TURN 1: Contact sheet ---
-    job["stage"] = 1
-    job["stage_label"] = "Generating numbered contact sheet..."
-
-    _track_start(job)
-    open_chat(page)
-
-    extract_tpl = job.get("template_extract") or EXTRACT_CONTACT_SHEET
-    job.setdefault("prompts", []).append(extract_tpl)
-
-    images1 = send_turn(page, prompt=extract_tpl, image_paths=[str(image_path)], run_id=f"{job_id}_contact")
-    _track_end(job)
-
-    if images1:
-        contact_output = f"{job_id}_contact_sheet.png"
-        (OUTPUT_DIR / contact_output).write_bytes(images1[0])
-        job.setdefault("stage_images", {})["contact_sheet"] = contact_output
-        # Save to vault
-        (run_dir / f"{task_id}_R{run_number}_contact_sheet.png").write_bytes(images1[0])
-
-    # PAUSE: operator picks numbers
-    job["stage"] = 1
-    job["stage_label"] = "Send contact sheet to client"
-    job["awaiting_input"] = True
-    job["paused_at"] = time.time()
-    job["status"] = "awaiting_number_selection"
-    print(f"[worker] Job {job_id} awaiting number selection.")
-
-    _wait_for_resume(job_id)
-
-    # --- TURNS: Generate each chosen design ---
-    job["status"] = "running"
-    job["awaiting_input"] = False
-    job["stage"] = 2
-    chosen_numbers: list[int] = job.get("chosen_numbers", [])
-    total = len(chosen_numbers)
-    job["stage_label"] = f"Generating {total} design(s)"
-
-    regen_tpl = job.get("template_regen") or EXTRACT_SINGLE
-    final_names: list[str] = []
-
-    for i, n in enumerate(chosen_numbers, 1):
-        job["stage_label"] = f"Generating design {i} of {total} (#{n})"
-        prompt = regen_tpl.format(n=n)
-        job.setdefault("prompts", []).append(prompt)
-
-        try:
-            _track_start(job)
-            result_images = send_turn(page, prompt=prompt, image_paths=None, run_id=f"{job_id}_design_{n}")
-            _track_end(job)
-
-            if result_images:
-                final_data = result_images[0]
-                original_data = final_data
-                if is_opaque_white_bg(final_data):
-                    final_data = remove_white_background(final_data)
-
-                final_name = f"{job_id}_design_{n}.png"
-                (OUTPUT_DIR / final_name).write_bytes(final_data)
-                final_names.append(final_name)
-
-                (run_dir / f"{task_id}_R{run_number}_design_{n}.png").write_bytes(final_data)
-                (run_dir / f"{task_id}_R{run_number}_design_{n}_original.png").write_bytes(original_data)
-        except Exception as exc:
-            _track_end(job)
-            print(f"[worker] Generation failed for design #{n}: {exc}")
-
-    job.setdefault("stage_images", {})["finals"] = final_names
-    job["final_names"] = final_names
-    job["status"] = "done"
-    job["awaiting_input"] = False
-    job["finished_at"] = time.time()
-
-
-def _run_artwork_workflow(page: Any, job: dict[str, Any]) -> None:
-    """Artwork Generation workflow: clean up client-supplied artwork files for DTF printing."""
-    job_id = job["id"]
-    client = job["client"]
-    task_id = job["task_id"]
-    artwork_files: list[str] = job.get("artwork_files", [])
-
-    from src.vault import VAULT_DIR
-    task_dir = VAULT_DIR / client / task_id
-    task_dir.mkdir(parents=True, exist_ok=True)
-    existing_runs = [d for d in task_dir.iterdir() if d.is_dir() and d.name.startswith("run_")]
-    run_number = len(existing_runs) + 1
-    run_dir = task_dir / f"run_{run_number}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    job["vault_folder"] = str(run_dir)
-
-    regen_tpl = job.get("template_regen") or ARTWORK_REGENERATE
-    total = len(artwork_files)
-    job["stage"] = 1
-    job["stage_label"] = f"Regenerating {total} artwork(s)"
-
-    _track_start(job)
-    open_chat(page)
-    _track_end(job)
-
-    final_names: list[str] = []
-    errors: list[str] = []
-
-    for i, filename in enumerate(artwork_files, 1):
-        job["stage_label"] = f"Regenerating {i} of {total}"
-        file_path = str(INPUT_DIR / filename)
-
-        try:
-            _track_start(job)
-            result_images = send_turn(
-                page,
-                prompt=regen_tpl,
-                image_paths=[file_path],
-                run_id=f"{job_id}_art_{i}",
-            )
-            _track_end(job)
-
-            if result_images:
-                final_data = result_images[0]
-                original_data = final_data
-                if is_opaque_white_bg(final_data):
-                    final_data = remove_white_background(final_data)
-
-                final_name = f"{job_id}_final_{i}.png"
-                (OUTPUT_DIR / final_name).write_bytes(final_data)
-                final_names.append(final_name)
-
-                (run_dir / f"{task_id}_R{run_number}_final_{i}.png").write_bytes(final_data)
-                (run_dir / f"{task_id}_R{run_number}_final_{i}_original.png").write_bytes(original_data)
-            else:
-                errors.append(f"File {i} ({filename}): no image returned")
-        except Exception as exc:
-            _track_end(job)
-            errors.append(f"File {i} ({filename}): {exc}")
-            print(f"[worker] Artwork regen failed for {filename}: {exc}")
-
-    job["final_names"] = final_names
-    job["artwork_files"] = artwork_files
-    job["artwork_errors"] = errors
-    job.setdefault("prompts", []).append(regen_tpl)
-
-    if errors and not final_names:
-        job["status"] = "failed"
-        job["error"] = "; ".join(errors)
-    elif errors:
-        job["status"] = "done_with_errors"
-    else:
-        job["status"] = "done"
-
-    job["awaiting_input"] = False
-    job["finished_at"] = time.time()
-
-
-def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
-    """Custom Operation workflow: apply selected operations in fixed order."""
-    job_id = job["id"]
-    client = job["client"]
-    task_id = job["task_id"]
-    artwork_file = job.get("artwork_files", [""])[0]
-    operations = job.get("custom_operations", [])
-    custom_prompts = job.get("custom_prompts", {})
-
-    from src.vault import VAULT_DIR
-    task_dir = VAULT_DIR / client / task_id
-    task_dir.mkdir(parents=True, exist_ok=True)
-    existing_runs = [d for d in task_dir.iterdir() if d.is_dir() and d.name.startswith("run_")]
-    run_number = len(existing_runs) + 1
-    run_dir = task_dir / f"run_{run_number}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    job["vault_folder"] = str(run_dir)
-
-    # Sort operations into fixed execution order
-    ordered_ops = [op for op in CUSTOM_OPERATIONS_ORDER if op in operations]
-    total = len(ordered_ops)
-    job["stage_label"] = f"Running {total} operation(s)"
-
-    # Default prompts for each operation
-    default_prompts = {
-        "reconstruct": CUSTOM_RECONSTRUCT,
-        "remove_background": CUSTOM_REMOVE_BACKGROUND,
-        "halo_removal": CUSTOM_HALO_REMOVAL,
-        # black_out and half_tone are deterministic LOCAL ops (src/postprocess.py) — no prompt.
-        # change_object_color is handled separately (two turns, two templates); not a single-turn default.
-    }
-
-    _track_start(job)
-    open_chat(page)
-    _track_end(job)
-
-    # The current reference image path — starts as the uploaded file, updated after each step
-    current_image_path = str(INPUT_DIR / artwork_file)
-    if not artwork_file or not Path(current_image_path).exists():
-        job["status"] = "failed"
-        job["error"] = f"Input file not found: {artwork_file!r}"
-        job["finished_at"] = time.time()
-        return
-
-    steps_done: list[dict] = []
-    errors: list[str] = []
-
-    for i, op in enumerate(ordered_ops, 1):
-        job["stage"] = i
-        label = CUSTOM_OPERATIONS_LABELS.get(op, op)
-        job["stage_label"] = f"Step {i} of {total} \u2014 {label}"
-        print(f"[custom] Step {i}/{total}: {op} | input: {current_image_path}")
-
-        if op == "change_object_color":
-            # TWO-TURN operation with TWO distinct templates/keys, kept separate end to end.
-            #   change_object_detect -> Step A (list objects, text reply)
-            #   change_object_apply  -> Step B (apply colours, {changes}, image reply)
-            # Turn A: detect objects (text reply)
-            detect_prompt = custom_prompts.get("change_object_detect", CUSTOM_DETECT_OBJECTS)
-            print(f"[custom] Turn A (detect) prompt [:200]:\n{detect_prompt[:200]}")
-            job.setdefault("prompts", []).append(detect_prompt)
-
-            try:
-                _track_start(job)
-                detected_text = send_text_turn(page, prompt=detect_prompt, image_paths=[current_image_path], run_id=f"{job_id}_detect_obj")
-                _track_end(job)
-            except Exception as exc:
-                _track_end(job)
-                errors.append(f"Step {i} ({label}) detect: {exc}")
-                break
-
-            job["detected_objects"] = detected_text
-
-            # PAUSE for operator to assign colours
-            job["awaiting_input"] = True
-            job["paused_at"] = time.time()
-            job["status"] = "awaiting_object_selection"
-            print(f"[worker] Job {job_id} awaiting object colour selection.")
-            _wait_for_resume(job_id)
-
-            # Turn B: apply colour changes
-            job["status"] = "running"
-            job["awaiting_input"] = False
-            job["stage_label"] = f"Step {i} of {total} \u2014 Applying colour changes"
-
-            object_choices = job.get("object_color_choices", [])
-            changes_text = "\n".join(f"- {c['object']} \u2192 {c['color']}" for c in object_choices)
-            print(f"[custom] Change colour changes_text:\n{changes_text}")
-            # Turn B uses its OWN template (change_object_apply), never the detection one.
-            apply_template = custom_prompts.get("change_object_apply", CUSTOM_CHANGE_COLOR)
-            if "{changes}" not in apply_template:
-                # Operator edited out the placeholder; append the changes so they are never lost.
-                apply_template = apply_template + "\n\n{changes}"
-            color_prompt = apply_template.format(changes=changes_text)
-            print(f"[custom] Turn B (apply) prompt [:200]:\n{color_prompt[:200]}")
-            job.setdefault("prompts", []).append(color_prompt)
-
-            try:
-                _track_start(job)
-                result_images = send_turn(page, prompt=color_prompt, image_paths=[current_image_path], run_id=f"{job_id}_color_{i}")
-                _track_end(job)
-            except Exception as exc:
-                _track_end(job)
-                errors.append(f"Step {i} ({label}) color: {exc}")
-                break
-
-            if result_images:
-                step_name = f"{job_id}_step{i}_{op}.png"
-                final_data = result_images[0]
-                if is_opaque_white_bg(final_data):
-                    final_data = remove_white_background(final_data)
-                (OUTPUT_DIR / step_name).write_bytes(final_data)
-                (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(final_data)
-                current_image_path = str(OUTPUT_DIR / step_name)
-                steps_done.append({"step": i, "op": op, "label": label, "file": step_name, "prompt": color_prompt})
-            else:
-                errors.append(f"Step {i} ({label}): colour change returned no image")
-                break
-
-        elif op == "aspect_ratio":
-            # Aspect Ratio Enhancement: TWO ChatGPT regenerations.
-            #   Turn A - regenerate at CURRENT ratio, background removed -> BASELINE.
-            #   Turn B - recommend target ratios (text).
-            #   PAUSE  - operator picks target ratio + method.
-            #   Turn C - regenerate at target ratio, working from the baseline.
-            # Similarity compares the RESULT against the BASELINE (both are
-            # background-free), never against the opaque original upload.
-            info = image_info(current_image_path, dpi_override=job.get("aspect_dpi") or None)
-            job["aspect_info"] = info
-            # Record the ORIGINAL upload for the results display.
-            job["aspect_original_file"] = Path(current_image_path).name
-            try:
-                job["aspect_original_features"] = extract_features(Path(current_image_path).read_bytes())
-            except Exception as exc:
-                print(f"[custom] original feature extraction failed: {exc}")
-
-            # --- Turn A: baseline (clean, current ratio, background removed) ---
-            job["stage_label"] = f"Step {i} of {total} \u2014 Cleaning artwork (baseline)"
-            baseline_prompt = CUSTOM_ASPECT_BASELINE
-            print(f"[custom] Aspect baseline prompt [:200]:\n{baseline_prompt[:200]}")
-            job.setdefault("prompts", []).append(baseline_prompt)
-            try:
-                _track_start(job)
-                baseline_images = send_turn(page, prompt=baseline_prompt, image_paths=[current_image_path], run_id=f"{job_id}_aspect_baseline")
-                _track_end(job)
-            except Exception as exc:
-                _track_end(job)
-                errors.append(f"Step {i} ({label}) baseline: {exc}")
-                break
-            if not baseline_images:
-                errors.append(f"Step {i} ({label}): baseline regeneration returned no image")
-                break
-            baseline_data = baseline_images[0]
-            if is_opaque_white_bg(baseline_data):
-                baseline_data = remove_white_background(baseline_data)
-            baseline_name = f"{job_id}_step{i}_aspect_baseline.png"
-            (OUTPUT_DIR / baseline_name).write_bytes(baseline_data)
-            (run_dir / f"{task_id}_R{run_number}_step{i}_aspect_baseline.png").write_bytes(baseline_data)
-            baseline_path = str(OUTPUT_DIR / baseline_name)
-            try:
-                job["aspect_baseline_features"] = extract_features(baseline_data)
-            except Exception as exc:
-                print(f"[custom] baseline feature extraction failed: {exc}")
-            job["aspect_baseline_file"] = baseline_name
-            # Baseline is a shown stage in its own right.
-            steps_done.append({"step": i, "op": op, "label": "Baseline (cleaned, current ratio)",
-                               "file": baseline_name, "prompt": baseline_prompt, "method": "baseline"})
-
-            # --- Turn B: recommend target ratios (text), based on the baseline ---
-            b_info = image_info(baseline_path, dpi_override=job.get("aspect_dpi") or None)
-            advice_tpl = custom_prompts.get("aspect_ratio", CUSTOM_ASPECT_ADVICE)
-            advice_prompt = advice_tpl.format(
-                width=b_info["width"], height=b_info["height"], ratio=b_info["ratio"],
-                inches_w=b_info["inches_w"], inches_h=b_info["inches_h"], dpi=b_info["dpi"],
-            )
-            print(f"[custom] Aspect advice prompt [:200]:\n{advice_prompt[:200]}")
-            job.setdefault("prompts", []).append(advice_prompt)
-            try:
-                _track_start(job)
-                advice_text = send_text_turn(page, prompt=advice_prompt, image_paths=[baseline_path], run_id=f"{job_id}_aspect_advice")
-                _track_end(job)
-            except Exception as exc:
-                _track_end(job)
-                errors.append(f"Step {i} ({label}) advice: {exc}")
-                break
-            job["aspect_recommendations"] = advice_text
-
-            # --- PAUSE for the operator to pick a target ratio + method ---
-            job["awaiting_input"] = True
-            job["paused_at"] = time.time()
-            job["status"] = "awaiting_ratio_selection"
-            print(f"[worker] Job {job_id} awaiting aspect ratio selection.")
-            _wait_for_resume(job_id)
-
-            job["status"] = "running"
-            job["awaiting_input"] = False
-
-            target = job.get("aspect_target")  # {"w": float, "h": float}
-            method = (job.get("aspect_method") or "pad").lower()
-            if not target or target.get("w", 0) <= 0 or target.get("h", 0) <= 0:
-                errors.append(f"Step {i} ({label}): no valid target ratio selected")
-                break
-
-            tw, th = float(target["w"]), float(target["h"])
-            baseline_bytes = Path(baseline_path).read_bytes()
-            step_name = f"{job_id}_step{i}_{op}.png"
-
-            if method == "regenerate":
-                # --- Turn C: regenerate at the target ratio, FROM the baseline ---
-                job["stage_label"] = f"Step {i} of {total} \u2014 Regenerating at target ratio"
-                dpi = (b_info.get("dpi") if b_info else None) or 300
-                ratio_str = normalise_ratio(tw, th)
-                if tw >= th:
-                    in_w = round(max(b_info.get("inches_w", 0), b_info.get("inches_h", 0)) or tw, 2)
-                    in_h = round(in_w * (th / tw), 2)
-                else:
-                    in_h = round(max(b_info.get("inches_w", 0), b_info.get("inches_h", 0)) or th, 2)
-                    in_w = round(in_h * (tw / th), 2)
-                regen_prompt = CUSTOM_ASPECT_REGENERATE.format(
-                    ratio=ratio_str, inches_w=in_w, inches_h=in_h, dpi=dpi,
-                )
-                print(f"[custom] Aspect target prompt [:200]:\n{regen_prompt[:200]}")
-                job.setdefault("prompts", []).append(regen_prompt)
-                try:
-                    _track_start(job)
-                    regen_images = send_turn(page, prompt=regen_prompt, image_paths=[baseline_path], run_id=f"{job_id}_aspect_target")
-                    _track_end(job)
-                except Exception as exc:
-                    _track_end(job)
-                    errors.append(f"Step {i} ({label}) regenerate: {exc}")
-                    break
-                if not regen_images:
-                    errors.append(f"Step {i} ({label}): regeneration returned no image")
-                    break
-                gen_data = regen_images[0]
-                if is_opaque_white_bg(gen_data):
-                    gen_data = remove_white_background(gen_data)
-                (OUTPUT_DIR / step_name).write_bytes(gen_data)
-                (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(gen_data)
-                # Similarity: RESULT vs BASELINE (both background-free) — like for like.
-                try:
-                    sim = similarity(baseline_bytes, gen_data)
-                except Exception as exc:
-                    print(f"[custom] similarity failed: {exc}")
-                    sim = None
-                job["aspect_similarity"] = sim
-                steps_done.append({"step": i, "op": op, "label": "Final (target ratio)",
-                                   "file": step_name, "prompt": regen_prompt, "method": "regenerate",
-                                   "compare_against": "baseline", "similarity": sim})
-                current_image_path = str(OUTPUT_DIR / step_name)
-            else:
-                # PAD the BASELINE locally — pixels preserved exactly, no comparison.
-                job["stage_label"] = f"Step {i} of {total} \u2014 Padding baseline to target ratio"
-                try:
-                    padded = fit_to_ratio(baseline_bytes, tw, th)
-                except Exception as exc:
-                    errors.append(f"Step {i} ({label}): padding failed: {exc}")
-                    break
-                (OUTPUT_DIR / step_name).write_bytes(padded)
-                (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(padded)
-                current_image_path = str(OUTPUT_DIR / step_name)
-                steps_done.append({"step": i, "op": op, "label": "Final (target ratio)",
-                                   "file": step_name, "method": "pad"})
-
-        elif op in ("black_out", "half_tone"):
-            # DETERMINISTIC LOCAL operations — no ChatGPT turn, no prompt, instant.
-            # The model would redraw the artwork and lose the exact silhouette;
-            # these transform the actual pixels instead.
-            job["stage_label"] = f"Step {i} of {total} \u2014 {label} (local)"
-            try:
-                src_bytes = Path(current_image_path).read_bytes()
-                if op == "black_out":
-                    # No opaque-background guard: Black Out drops black pixels and
-                    # works fine on artwork that still has a (non-black) background.
-                    bo = job.get("blackout_settings") or {}
-                    result_bytes = black_out(src_bytes, threshold=int(bo.get("threshold", 40)))
-                else:
-                    # Half Tone needs transparency to work against — an opaque
-                    # background gives nothing to reproduce. Fail clearly.
-                    if is_opaque_white_bg(src_bytes):
-                        errors.append(f"Step {i} ({label}): Input has an opaque background - run Remove Background first")
-                        break
-                    ht = job.get("halftone_settings") or {}
-                    result_bytes = half_tone(
-                        src_bytes,
-                        lpi=float(ht.get("lpi", 40)),
-                        angle=float(ht.get("angle", 22.5)),
-                        dpi=float(ht.get("dpi", 300)),
-                        dot=str(ht.get("dot", "round")),
-                    )
-            except Exception as exc:
-                errors.append(f"Step {i} ({label}): {exc}")
-                break
-
-            step_name = f"{job_id}_step{i}_{op}.png"
-            (OUTPUT_DIR / step_name).write_bytes(result_bytes)
-            (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(result_bytes)
-            current_image_path = str(OUTPUT_DIR / step_name)
-            steps_done.append({"step": i, "op": op, "label": label, "file": step_name})
-
-        else:
-            # Single-turn operation
-            prompt = custom_prompts.get(op, default_prompts.get(op, ""))
-            job.setdefault("prompts", []).append(prompt)
-
-            try:
-                _track_start(job)
-                result_images = send_turn(page, prompt=prompt, image_paths=[current_image_path], run_id=f"{job_id}_{op}_{i}")
-                _track_end(job)
-            except Exception as exc:
-                _track_end(job)
-                errors.append(f"Step {i} ({label}): {exc}")
-                break
-
-            if result_images:
-                step_name = f"{job_id}_step{i}_{op}.png"
-                final_data = result_images[0]
-                if op in ("remove_background", "halo_removal") and is_opaque_white_bg(final_data):
-                    final_data = remove_white_background(final_data)
-                (OUTPUT_DIR / step_name).write_bytes(final_data)
-                (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(final_data)
-                current_image_path = str(OUTPUT_DIR / step_name)
-                steps_done.append({"step": i, "op": op, "label": label, "file": step_name, "prompt": prompt})
-            else:
-                errors.append(f"Step {i} ({label}): no image returned")
-                break
-
-    # Save final
-    if steps_done:
-        last_file = steps_done[-1]["file"]
-        final_name = f"{job_id}_final.png"
-        import shutil
-        shutil.copy2(str(OUTPUT_DIR / last_file), str(OUTPUT_DIR / final_name))
-        (run_dir / f"{task_id}_R{run_number}_final.png").write_bytes((OUTPUT_DIR / last_file).read_bytes())
-        job["final_names"] = [final_name]
-
-    job["custom_steps_done"] = steps_done
-    job["artwork_errors"] = errors
-
-    if errors and not steps_done:
-        job["status"] = "failed"
-        job["error"] = "; ".join(errors)
-    elif errors:
-        job["status"] = "done_with_errors"
-    elif len(steps_done) < total:
-        # Some operations produced no output without raising an error
-        job["status"] = "failed"
-        job["error"] = f"Only {len(steps_done)} of {total} operations produced output. Check the server logs."
-    else:
-        job["status"] = "done"
-
-    job["awaiting_input"] = False
-    job["finished_at"] = time.time()
-
-
-_worker_thread = threading.Thread(target=_worker, daemon=True)
-_worker_thread.start()
+# Job orchestration moved to agent.py (runs on the designer PC). See below for
+# the agent API endpoints the client polls.
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1135,8 +371,8 @@ def artwork_info(file: str, dpi: int | None = None):
 @app.post("/api/generate")
 def create_job(req: GenerateRequest):
     print(f"[create_job] workflow={req.workflow!r} mockup_image={req.mockup_image!r} files={req.files} artwork_files={req.artwork_files}")
-    if not _worker_alive:
-        raise HTTPException(status_code=503, detail=f"Worker is not running: {_worker_error}")
+    if _online_agent() is None:
+        raise HTTPException(status_code=503, detail="No agent running. Start the agent on your PC to generate.")
     if not req.client.strip():
         raise HTTPException(status_code=400, detail="Client name is required.")
     if not req.task_id.strip():
@@ -1208,8 +444,9 @@ def create_job(req: GenerateRequest):
         "_reextract": False, "_reextract_mode": "", "_reextract_cols": 4, "_reextract_rows": 2,
         "_recrop_boxes": None,
         "_step_start": None,
+        # Agent claim tracking
+        "claimed_by": None, "claimed_by_name": "", "claimed_at": None, "last_progress_at": None,
     }
-    job_queue.put(job_id)
     return {"job_id": job_id}
 
 
@@ -1239,7 +476,8 @@ def submit_selection(job_id: str, req: SelectionRequest):
 
     job["choices"].append(req.choice)
     job["_regenerate"] = False
-    _resume_event.set()
+    job["status"] = "running"
+    job["awaiting_input"] = False
     return {"ok": True, "choice": req.choice}
 
 
@@ -1264,7 +502,8 @@ def regenerate_stage(job_id: str, req: RegenerateRequest):
         job["_regen_template"] = None
 
     job["_regenerate"] = True
-    _resume_event.set()
+    job["status"] = "running"
+    job["awaiting_input"] = False
     return {"ok": True}
 
 
@@ -1284,13 +523,8 @@ def cancel_job(job_id: str):
     job["finished_at"] = time.time()
     job["awaiting_input"] = False
 
-    # Set the cancel flag so the worker exits cleanly when it resumes
-    _cancel_flag[job_id] = True
-
-    # Signal the resume event to unblock the worker if it's waiting
-    if old_status in ("awaiting_selection", "awaiting_text_confirmation", "awaiting_crop_review", "awaiting_multi_selection", "awaiting_number_selection", "awaiting_object_selection", "awaiting_ratio_selection"):
-        _resume_event.set()
-
+    # The agent detects the "cancelled" status on its next poll (progress or
+    # paused-input) and aborts the job cleanly. No local event to signal.
     print(f"[cancel] Job {job_id}: {old_status} -> cancelled")
     return {"ok": True}
 
@@ -1305,7 +539,8 @@ def confirm_text(job_id: str, req: TextConfirmRequest):
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
     job["confirmed_text"] = req.text.strip()
-    _resume_event.set()
+    job["status"] = "running"
+    job["awaiting_input"] = False
     return {"ok": True}
 
 
@@ -1321,7 +556,6 @@ def handle_crops(job_id: str, req: CropActionRequest):
     if req.action == "accept":
         job["_reextract"] = False
         job["_recrop_boxes"] = None
-        _resume_event.set()
     elif req.action == "reextract":
         job["_reextract"] = True
         job["_reextract_mode"] = req.mode
@@ -1329,7 +563,6 @@ def handle_crops(job_id: str, req: CropActionRequest):
         job["_reextract_rows"] = req.rows
         job["_reextract_padding"] = req.padding
         job["_recrop_boxes"] = None
-        _resume_event.set()
     elif req.action == "recrop":
         # Operator manually adjusted boxes — recrop locally without ChatGPT
         if not req.boxes:
@@ -1338,16 +571,16 @@ def handle_crops(job_id: str, req: CropActionRequest):
         job["_reextract_mode"] = "manual_boxes"
         job["_recrop_boxes"] = req.boxes
         job["_reextract_padding"] = req.padding
-        _resume_event.set()
     elif req.action == "redetect":
         # Re-run ChatGPT detection in a fresh chat
         job["_reextract"] = True
         job["_reextract_mode"] = "auto"
         job["_reextract_padding"] = req.padding
         job["_recrop_boxes"] = None
-        _resume_event.set()
     else:
         raise HTTPException(status_code=400, detail="Action must be 'accept', 'reextract', 'recrop', or 'redetect'.")
+    job["status"] = "running"
+    job["awaiting_input"] = False
     return {"ok": True}
 
 
@@ -1366,7 +599,8 @@ def select_multi(job_id: str, req: MultiSelectRequest):
         if c < 1 or c > crop_count:
             raise HTTPException(status_code=400, detail=f"Choice {c} is out of range (1-{crop_count}).")
     job["selected_crops"] = req.choices
-    _resume_event.set()
+    job["status"] = "running"
+    job["awaiting_input"] = False
     return {"ok": True}
 
 
@@ -1384,7 +618,8 @@ def select_numbers(job_id: str, req: NumberSelectionRequest):
         if n < 1:
             raise HTTPException(status_code=400, detail=f"Number {n} is invalid. Must be >= 1.")
     job["chosen_numbers"] = req.numbers
-    _resume_event.set()
+    job["status"] = "running"
+    job["awaiting_input"] = False
     return {"ok": True, "numbers": req.numbers}
 
 
@@ -1399,7 +634,8 @@ def select_objects(job_id: str, req: ObjectSelectionRequest):
     if not req.choices:
         raise HTTPException(status_code=400, detail="Select at least one object to recolour.")
     job["object_color_choices"] = req.choices
-    _resume_event.set()
+    job["status"] = "running"
+    job["awaiting_input"] = False
     return {"ok": True}
 
 
@@ -1445,7 +681,8 @@ def select_ratio(job_id: str, req: RatioSelectionRequest):
         raise HTTPException(status_code=400, detail="Method must be 'pad' or 'regenerate'.")
     job["aspect_target"] = {"w": w, "h": h}
     job["aspect_method"] = method
-    _resume_event.set()
+    job["status"] = "running"
+    job["awaiting_input"] = False
     return {"ok": True, "target": {"w": w, "h": h}, "method": method}
 
 
@@ -1567,40 +804,316 @@ def open_folder(req: OpenFolderRequest):
 
 @app.get("/api/status")
 def get_status():
+    _requeue_stale_jobs()
     blocking = _any_job_blocking()
-    return {"blocking_job_id": blocking, "worker_alive": _worker_alive, "worker_error": _worker_error, "logged_in": _session_logged_in}
+    agent = _online_agent()
+    # `worker_alive`/`logged_in` keys are kept for the existing UI: they now mean
+    # "an agent is connected" and "that agent reports a logged-in ChatGPT session".
+    online = agent is not None
+    return {
+        "blocking_job_id": blocking,
+        "worker_alive": online,
+        "worker_error": "" if online else "No agent running - start the agent on your PC to generate.",
+        "logged_in": bool(agent and agent.get("logged_in")),
+        "agent_connected": online,
+        "agent_name": agent.get("name") if agent else "",
+    }
 
 
 @app.get("/api/session")
 def get_session():
-    """Check if the browser session is logged in. Uses cached result if recent."""
-    if time.time() - _session_check_time > 30:
-        # Ask worker to re-check (non-blocking if worker is busy)
-        _session_result.clear()
-        job_queue.put("__session_check__")
-        _session_result.wait(timeout=10)
-    return {"logged_in": _session_logged_in, "account": _session_account}
+    """Report the connected agent's ChatGPT session state (agent-reported)."""
+    agent = _online_agent()
+    return {"logged_in": bool(agent and agent.get("logged_in")), "account": "acct1",
+            "agent_connected": agent is not None, "agent_name": agent.get("name") if agent else ""}
 
 
 @app.post("/api/session/login")
 def session_login():
-    """Navigate the worker's browser to ChatGPT login page and bring to front."""
-    if not _worker_alive:
-        raise HTTPException(status_code=503, detail="Worker is not running.")
-    _session_result.clear()
-    job_queue.put("__session_login__")
-    _session_result.wait(timeout=15)
-    return {"ok": True}
+    """Sign-in now happens on the designer's PC: they run login.py there. The
+    server cannot drive the remote browser, so this just reports guidance."""
+    agent = _online_agent()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="No agent running. Start the agent on your PC.")
+    return {"ok": True, "message": "Run login.py on the PC where the agent runs to sign in to ChatGPT."}
 
 
 @app.post("/api/session/confirm")
 def session_confirm():
-    """Re-check login status after the operator logged in manually."""
-    _session_result.clear()
-    job_queue.put("__session_check__")
-    _session_result.wait(timeout=10)
-    return {"logged_in": _session_logged_in}
+    """Re-report the agent's session state."""
+    agent = _online_agent()
+    return {"logged_in": bool(agent and agent.get("logged_in"))}
+
+
+# ---------------------------------------------------------------------------
+# OPERATOR: agent download + token surfacing (cookie-authed by the middleware)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/my-agent-token")
+def my_agent_token(request: Request):
+    """Return (creating if needed) the stable agent token for the logged-in user,
+    so the UI can show it with a copy button. The token still originates from the
+    same store make_agent_token.py uses."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = get_or_create_for_name(user)
+    return {"token": token, "name": user, "server_url": str(request.base_url).rstrip("/")}
+
+
+@app.get("/api/download/agent")
+def download_agent():
+    """Serve the built agent. Prefers the one-dir ZIP; falls back to a lone exe.
+    Operator auth enforced by middleware."""
+    zip_path = DOWNLOADS_DIR / AGENT_ZIP_NAME
+    if zip_path.exists():
+        return FileResponse(
+            str(zip_path),
+            media_type="application/zip",
+            filename=AGENT_ZIP_NAME,
+            headers={"Content-Disposition": f'attachment; filename="{AGENT_ZIP_NAME}"'},
+        )
+    exe_path = DOWNLOADS_DIR / AGENT_EXE_NAME
+    if exe_path.exists():
+        return FileResponse(
+            str(exe_path),
+            media_type="application/vnd.microsoft.portable-executable",
+            filename=AGENT_EXE_NAME,
+            headers={"Content-Disposition": f'attachment; filename="{AGENT_EXE_NAME}"'},
+        )
+    raise HTTPException(status_code=404, detail="Agent build not found. Run build_agent.bat on a Windows machine and place ArtworkAgent.zip in downloads/.")
+
+
+# ---------------------------------------------------------------------------
+# AGENT API — polled by the designer-PC agent. Bearer-token authenticated.
+# Declared BEFORE app.mount() so the static mount does not shadow them.
+# ---------------------------------------------------------------------------
+
+def _require_agent(request: Request) -> str:
+    """Validate the agent bearer token; return the designer name or raise 401."""
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    name = token_name(token)
+    if not name:
+        raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
+    return name
+
+
+# Job fields that must never be overwritten by the agent's posted copy — the
+# server owns the operator-supplied answers and the claim bookkeeping.
+_SERVER_OWNED_FIELDS = {
+    "confirmed_text", "choices", "chosen_numbers", "selected_crops",
+    "object_color_choices", "aspect_target", "aspect_method",
+    "_regenerate", "_regen_template", "_reextract", "_reextract_mode",
+    "_reextract_cols", "_reextract_rows", "_reextract_padding", "_recrop_boxes",
+    "claimed_by", "claimed_by_name", "claimed_at", "last_progress_at",
+}
+
+
+def _merge_agent_job(job: dict, posted: dict) -> None:
+    """Merge the agent's job copy into the authoritative record.
+
+    The agent owns generation-produced fields (stage, images, results, etc.).
+    The server owns operator answers and claim bookkeeping — those are never
+    overwritten. A cancellation on the server also always wins.
+    """
+    if job.get("status") == "cancelled":
+        return
+    for k, v in posted.items():
+        if k in _SERVER_OWNED_FIELDS:
+            continue
+        job[k] = v
+
+
+@app.post("/api/agent/register")
+def agent_register(req: AgentRegisterRequest, request: Request):
+    name = _require_agent(request)
+    agent_id = uuid.uuid4().hex[:12]
+    agents[agent_id] = {
+        "id": agent_id, "name": req.agent_name or name,
+        "registered_at": time.time(), "last_seen": time.time(),
+        "logged_in": req.logged_in,
+    }
+    print(f"[server] Agent registered: {req.agent_name!r} ({agent_id})")
+    return {"agent_id": agent_id, "name": req.agent_name or name}
+
+
+@app.get("/api/agent/next-job")
+def agent_next_job(request: Request, agent_id: str, logged_in: bool = False):
+    _require_agent(request)
+    a = agents.get(agent_id)
+    if a:
+        a["last_seen"] = time.time()
+        a["logged_in"] = logged_in
+    _requeue_stale_jobs()
+    # Claim the oldest queued job atomically.
+    with _jobs_lock:
+        queued = sorted(
+            [j for j in jobs.values() if j.get("status") == "queued"],
+            key=lambda j: j.get("created_at", 0),
+        )
+        if not queued:
+            return Response(status_code=204)
+        job = queued[0]
+        job["status"] = "running"
+        job["started_at"] = time.time()
+        job["claimed_by"] = agent_id
+        job["claimed_by_name"] = a.get("name") if a else ""
+        job["claimed_at"] = time.time()
+        job["last_progress_at"] = time.time()
+    # Return the full job plus file URLs the agent needs to download.
+    input_files = []
+    for key in ("files", "artwork_files"):
+        input_files += [f for f in job.get(key, []) if f]
+    for key in ("text_image", "mockup_image"):
+        v = job.get(key)
+        if v:
+            input_files.append(v)
+    return {"job": {k: v for k, v in job.items()}, "input_files": sorted(set(input_files))}
+
+
+@app.post("/api/agent/job/{job_id}/progress")
+def agent_progress(job_id: str, req: AgentProgressRequest, request: Request):
+    _require_agent(request)
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("status") == "cancelled":
+        return {"ok": True, "cancelled": True}
+    job["last_progress_at"] = time.time()
+    if req.job is not None:
+        _merge_agent_job(job, req.job)
+    if req.stage is not None:
+        job["stage"] = req.stage
+    if req.stage_label is not None:
+        job["stage_label"] = req.stage_label
+    if req.active_time is not None:
+        job["active_time"] = req.active_time
+    a = agents.get(job.get("claimed_by"))
+    if a and req.logged_in is not None:
+        a["logged_in"] = req.logged_in
+    return {"ok": True, "cancelled": False}
+
+
+@app.post("/api/agent/job/{job_id}/result")
+async def agent_result(job_id: str, request: Request):
+    _require_agent(request)
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    form = await request.form()
+    saved = []
+    for key, value in form.multi_items():
+        if hasattr(value, "filename") and value.filename:
+            data = await value.read()
+            dest = OUTPUT_DIR / Path(value.filename).name
+            dest.write_bytes(data)
+            saved.append(dest.name)
+    job["last_progress_at"] = time.time()
+    _recompute_aspect_similarity(job)
+    return {"ok": True, "saved": saved}
+
+
+def _recompute_aspect_similarity(job: dict) -> None:
+    """Compute the Aspect Ratio similarity on the SERVER from uploaded files.
+
+    The agent produces the baseline + final images but no longer runs the cv2
+    comparison. Here (server-side, where cv2 is available) we compare the final
+    against the baseline and populate the fields the UI reads. Runs only for a
+    regenerate aspect step and only when both files are present."""
+    baseline = job.get("aspect_baseline_file")
+    if not baseline:
+        return
+    final_step = None
+    for step in job.get("custom_steps_done", []) or []:
+        if step.get("op") == "aspect_ratio" and step.get("method") == "regenerate":
+            final_step = step
+    if not final_step or not final_step.get("file"):
+        return
+    if final_step.get("similarity"):  # already computed (e.g. by an older agent)
+        return
+    b_path = OUTPUT_DIR / baseline
+    f_path = OUTPUT_DIR / final_step["file"]
+    if not (b_path.exists() and f_path.exists()):
+        return
+    try:
+        from src.compare import similarity as _similarity
+        sim = _similarity(b_path.read_bytes(), f_path.read_bytes())
+        final_step["similarity"] = sim
+        job["aspect_similarity"] = sim
+        print(f"[server] computed aspect similarity for job {job['id']}: "
+              f"shape={sim.get('shape_pct')} detail={sim.get('detail_pct')}")
+    except Exception as exc:
+        print(f"[server] aspect similarity computation failed: {exc}")
+
+
+@app.post("/api/agent/job/{job_id}/error")
+def agent_error(job_id: str, req: AgentErrorRequest, request: Request):
+    _require_agent(request)
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("status") != "cancelled":
+        job["status"] = "failed"
+        job["error"] = req.message
+        job["finished_at"] = time.time()
+        job["awaiting_input"] = False
+    if req.session_expired:
+        a = agents.get(job.get("claimed_by"))
+        if a:
+            a["logged_in"] = False
+    print(f"[server] Agent error on job {job_id}: {req.message}")
+    return {"ok": True}
+
+
+@app.get("/api/agent/job/{job_id}/paused-input")
+def agent_paused_input(job_id: str, request: Request):
+    """The agent polls this while blocked at a pause. Returns the operator's
+    answer once available, or {ready:false} while still awaiting. Also surfaces
+    a cancellation so the agent can abort."""
+    _require_agent(request)
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    job["last_progress_at"] = time.time()
+    status = job.get("status", "")
+    if status == "cancelled":
+        return {"ready": True, "cancelled": True}
+    # Still awaiting the operator's answer?
+    if status.startswith("awaiting_"):
+        return {"ready": False, "cancelled": False, "status": status}
+    # Operator has answered (status moved to running). Hand back every field the
+    # workflows read after a pause.
+    return {
+        "ready": True, "cancelled": False, "status": status,
+        "confirmed_text": job.get("confirmed_text", ""),
+        "choices": job.get("choices", []),
+        "chosen_numbers": job.get("chosen_numbers", []),
+        "selected_crops": job.get("selected_crops", []),
+        "object_color_choices": job.get("object_color_choices", []),
+        "aspect_target": job.get("aspect_target"),
+        "aspect_method": job.get("aspect_method", "pad"),
+        "template_turn2": job.get("template_turn2", ""),
+        "template_turn3": job.get("template_turn3", ""),
+        "_regenerate": job.get("_regenerate", False),
+        "_regen_template": job.get("_regen_template"),
+        "_reextract": job.get("_reextract", False),
+        "_reextract_mode": job.get("_reextract_mode", ""),
+        "_reextract_cols": job.get("_reextract_cols", 4),
+        "_reextract_rows": job.get("_reextract_rows", 2),
+        "_reextract_padding": job.get("_reextract_padding", 8),
+        "_recrop_boxes": job.get("_recrop_boxes"),
+    }
+
+
+@app.get("/api/agent/file/{name}")
+def agent_file(name: str, request: Request):
+    _require_agent(request)
+    safe = Path(name).name
+    path = INPUT_DIR / safe
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found.")
+    return FileResponse(str(path), filename=safe)
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
-app.mount("/input", StaticFiles(directory="input"), name="input")

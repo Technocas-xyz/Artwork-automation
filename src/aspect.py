@@ -75,7 +75,7 @@ def image_info(path: str | Path, dpi_override: int | None = None) -> dict:
     # measurements the moment a file is uploaded. Imported lazily to avoid a
     # heavy dependency at module import time.
     try:
-        from src.postprocess import extract_features
+        from src.compare import extract_features
         feats = extract_features(path.read_bytes())
         info.update({
             "total_pixels": feats["total_pixels"],

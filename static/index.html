@@ -43,6 +43,8 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .history-section{border-top:1px solid var(--border);padding-top:12px;margin-top:12px}.history-section h3{font-size:.8rem;color:var(--muted);margin-bottom:6px}.history-item{padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:.76rem;cursor:pointer}.history-item:hover{border-color:var(--accent)}.history-item .hi-label{font-weight:600}.history-detail{display:none;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)}.history-detail.open{display:block}.history-detail img{max-width:100%;max-height:90px;border-radius:6px;margin-right:4px;margin-bottom:3px;border:1px solid var(--border)}
 .coming-soon{text-align:center;color:var(--muted);padding:40px 0;font-size:.88rem}
 </style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.31.0/dist/tabler-icons.min.css">
+<link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
 <header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="text">Text</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
@@ -1124,5 +1126,6 @@ window.doLogout=function(){fetch("/api/auth/logout",{method:"POST"}).then(functi
 checkStatus();
 })();
 </script>
+<script src="/static/shell.js"></script>
 </body>
 </html>
