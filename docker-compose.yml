@@ -1,0 +1,16 @@
+services:
+  artwork-automation:
+    build: .
+    container_name: artwork_automation
+    restart: unless-stopped
+    env_file: .env
+    shm_size: '1gb'
+    ports:
+      - "4400:8000"   # web UI
+      - "4401:6080"   # noVNC (browser desktop, for ChatGPT sign-in)
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./logs:/app/logs
+      - ./vault:/app/vault
+      - ./profiles:/app/profiles

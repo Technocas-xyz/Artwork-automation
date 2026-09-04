@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ﻿altgraph==0.17.5
 annotated-doc==0.0.5
 annotated-types==0.8.0
@@ -39,3 +40,17 @@ typing-inspection==0.4.4
 typing_extensions==4.16.0
 urllib3==2.7.0
 uvicorn==0.52.3
+=======
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pydantic==2.10.5
+python-dotenv==1.0.1
+playwright==1.49.1
+Pillow==11.1.0
+numpy==2.2.1
+opencv-python-headless==4.11.0.86
+ImageHash==4.3.1
+scipy==1.15.1
+requests==2.32.3
+>>>>>>> 7365214c648c74237bea9f9cd1fe382a5af2a0e4
