@@ -79,12 +79,22 @@ class AgentGUI:
 
         self._events: queue.Queue = queue.Queue()
         self._stop_event = threading.Event()
-        self._worker_thread: threading.Thread | None = None
-        self._context = None
-        self._page = None
         self._agent_id = None
         self._tray = None
         self._state = "stopped"
+
+        # --- Single browser owner ---------------------------------------
+        # Playwright's sync API is thread-affine: the context/page can only be
+        # used from the thread that created them. So ONE dedicated browser
+        # thread owns the context for the whole GUI lifetime and processes
+        # commands (sign-in / start / stop) from this queue. Nothing else ever
+        # launches a context, so the profile is locked exactly once.
+        self._cmd_queue: queue.Queue = queue.Queue()
+        self._context = None          # owned by the browser thread only
+        self._page = None             # owned by the browser thread only
+        self._signed_in = False       # set True after a successful sign-in while the context stays open
+        self._browser_thread = threading.Thread(target=self._browser_loop, daemon=True)
+        self._browser_thread.start()
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -156,23 +166,8 @@ class AgentGUI:
         self._apply_config_to_agent()
         self.signin_btn.config(state="disabled")
         self.status_var.set("Opening ChatGPT — sign in, then close the browser…")
-        threading.Thread(target=self._signin_worker, daemon=True).start()
-
-    def _signin_worker(self):
-        try:
-            if self._context is None:
-                self._context, self._page = agent.open_browser_context()
-            else:
-                try:
-                    self._page.bring_to_front()
-                    self._page.goto("https://chatgpt.com", wait_until="domcontentloaded")
-                except Exception:
-                    pass
-            logged_in = agent.is_logged_in(self._page)
-            self._events.put(("signin_done", logged_in))
-        except Exception as exc:
-            traceback.print_exc()
-            self._events.put(("signin_error", str(exc)))
+        # Route to the single browser thread — never open a context on another thread.
+        self._cmd_queue.put(("signin", None))
 
     def _on_start(self):
         if not self.token_var.get().strip():
@@ -182,18 +177,78 @@ class AgentGUI:
         self._stop_event.clear()
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
-        self._worker_thread = threading.Thread(target=self._run_worker, daemon=True)
-        self._worker_thread.start()
+        # Hand the work to the single browser thread — do NOT touch the context here.
+        self._cmd_queue.put(("start", None))
 
-    def _run_worker(self):
+    def _on_stop(self):
+        # Ask the loop to stop; the context stays open (only Quit/close closes it).
+        self._stop_event.set()
+        self.stop_btn.config(state="disabled")
+        self.start_btn.config(state="normal")
+        self._set_state("stopped", "Stopped")
+
+    # -------------------------------------------------- single browser thread
+    def _browser_loop(self):
+        """Owns the ONE Playwright context/page for the GUI's whole lifetime.
+
+        All browser calls (launch, session check, sign-in, claim loop) happen
+        here, on this one thread, so Playwright's thread affinity is respected
+        and the profile is locked exactly once.
+        """
+        while True:
+            try:
+                cmd, _ = self._cmd_queue.get()
+            except Exception:
+                continue
+            if cmd == "quit":
+                self._close_context()
+                return
+            elif cmd == "signin":
+                self._do_signin()
+            elif cmd == "start":
+                self._do_start()
+
+    def _ensure_context(self):
+        """Launch the context exactly once; reuse it forever after."""
+        if self._context is None:
+            self._context, self._page = agent.open_browser_context()
+        return self._page
+
+    def _do_signin(self):
         try:
-            if self._context is None:
-                self._context, self._page = agent.open_browser_context()
-            logged_in = agent.is_logged_in(self._page)
+            first_time = self._context is None
+            page = self._ensure_context()
+            if not first_time:
+                # Context already open — just surface it and reload ChatGPT.
+                try:
+                    page.bring_to_front()
+                    page.goto("https://chatgpt.com", wait_until="domcontentloaded")
+                except Exception:
+                    pass
+            logged_in = agent.is_logged_in(page)
+            self._signed_in = bool(logged_in)
+            self._events.put(("signin_done", logged_in))
+        except Exception as exc:
+            traceback.print_exc()
+            self._events.put(("signin_error", str(exc)))
+
+    def _do_start(self):
+        try:
+            cold = self._context is None
+            page = self._ensure_context()
+            # Only check the session when starting cold (no prior sign-in on the
+            # still-open context). After a successful sign-in we trust it and
+            # proceed, so Start cannot flip green -> amber.
+            if self._signed_in and not cold:
+                logged_in = True
+            else:
+                logged_in = agent.is_logged_in(page)
+                self._signed_in = bool(logged_in)
+
             self._agent_id = agent.register(logged_in)
             self._events.put(("log", f"Registered as {self._agent_id}"))
             agent.run_loop(
-                self._page, self._agent_id, stop_event=self._stop_event,
+                page, self._agent_id, stop_event=self._stop_event,
                 on_status=lambda s, d="": self._events.put(("status", (s, d))),
                 on_log=lambda m: self._events.put(("log", m)),
             )
@@ -202,11 +257,15 @@ class AgentGUI:
             traceback.print_exc()
             self._events.put(("status", ("error", str(exc))))
 
-    def _on_stop(self):
-        self._stop_event.set()
-        self.stop_btn.config(state="disabled")
-        self.start_btn.config(state="normal")
-        self._set_state("stopped", "Stopped")
+    def _close_context(self):
+        if self._context is not None:
+            try:
+                self._context.close()
+            except Exception:
+                pass
+            self._context = None
+            self._page = None
+            self._signed_in = False
 
     # -------------------------------------------------- event pump
     def _drain_events(self):
@@ -266,6 +325,8 @@ class AgentGUI:
 
     def _tray_quit(self, *_):
         self._stop_event.set()
+        # Close the context on its owning (browser) thread.
+        self._cmd_queue.put(("quit", None))
         if self._tray:
             self._tray.stop()
         self.root.after(0, self.root.destroy)

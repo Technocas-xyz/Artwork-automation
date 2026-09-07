@@ -106,6 +106,7 @@ _HEADERS = {"Authorization": f"Bearer {AGENT_TOKEN}"}
 # so the sync thread and pause poller know which one to talk to the server about.
 _current_job_id: str | None = None
 _current_job: dict | None = None
+_current_agent_id: str | None = None  # so every progress post carries the agent id (heartbeat)
 _sync_stop = threading.Event()
 
 
@@ -130,17 +131,46 @@ class _CancelledError(Exception):
     pass
 
 
+# Only the fields the AGENT owns. We deliberately do NOT send status,
+# awaiting_input, paused_at, choices, confirmed_text, etc. — those belong to the
+# server/operator. Sending the whole dict previously let a stale sync overwrite
+# an operator's answer (status flipped back to awaiting_*) and also caused
+# stage_images JSON jitter that re-rendered the pause panel. Terminal statuses
+# are sent explicitly at the end of a job, not from the periodic sync.
+_AGENT_OWNED_FIELDS = (
+    "stage", "stage_label", "active_time",
+    "images", "stage_images", "prompts",
+    "final_names", "custom_steps_done", "artwork_errors",
+    "detected_objects", "aspect_recommendations", "aspect_info",
+    "aspect_original_file", "aspect_original_features",
+    "aspect_baseline_file", "aspect_baseline_features",
+    "aspect_similarity", "vault_folder", "crop_names", "crop_count",
+    "crop_warnings", "extracted_text",
+)
+
+
+def _agent_job_blob(job: dict, include_status: bool = False) -> dict:
+    """Build a sync payload containing ONLY agent-owned fields."""
+    blob = {k: job.get(k) for k in _AGENT_OWNED_FIELDS if k in job}
+    if include_status:
+        # Only used for the final post so the server records the terminal status.
+        blob["status"] = job.get("status")
+    return blob
+
+
 def _sync_job() -> None:
-    """Push the current local job dict to the server (progress + full state)."""
+    """Push the agent-owned fields of the current job to the server (heartbeat + progress)."""
     if not _current_job_id or _current_job is None:
         return
     try:
         payload = {
+            "agent_id": _current_agent_id,  # heartbeat: keep this agent "online" mid-job
             "stage": _current_job.get("stage"),
             "stage_label": _current_job.get("stage_label"),
             "active_time": _current_job.get("active_time"),
             "logged_in": True,
-            "job": {k: v for k, v in _current_job.items() if not k.startswith("_")},
+            # Slim blob — agent-owned fields only, never status/awaiting_input.
+            "job": _agent_job_blob(_current_job, include_status=False),
         }
         r = _post(f"/api/agent/job/{_current_job_id}/progress", json=payload)
         if r.ok and r.json().get("cancelled"):
@@ -161,6 +191,56 @@ def _sync_loop() -> None:
         _sync_stop.wait(SYNC_INTERVAL)
 
 
+# Every field the operator can answer at a pause; copied from paused-input
+# back onto the local job so the workflow (unchanged) reads them normally.
+_ANSWER_FIELDS = (
+    "confirmed_text", "choices", "chosen_numbers", "selected_crops",
+    "object_color_choices", "aspect_target", "aspect_method",
+    "template_turn2", "template_turn3",
+    "_regenerate", "_regen_template",
+    "_reextract", "_reextract_mode", "_reextract_cols",
+    "_reextract_rows", "_reextract_padding", "_recrop_boxes",
+)
+
+# Pause metadata the operator UI needs to render the prompt (agent-owned).
+_PAUSE_FIELDS = (
+    "extracted_text", "detected_objects", "aspect_recommendations",
+    "aspect_info", "aspect_original_file", "aspect_original_features",
+    "aspect_baseline_file", "aspect_baseline_features",
+    "stage_images", "images", "crop_names", "crop_count", "crop_warnings",
+    "prompts", "template_turn2", "template_turn3",
+)
+
+
+def _announce_pause(job_id: str) -> None:
+    """Tell the server this job has entered an operator pause.
+
+    The periodic sync no longer sends `status`, so without this the server would
+    still think the job is "running" and paused-input would return ready:true
+    immediately with an empty answer. We send the local awaiting_* status plus
+    the pause metadata; the server applies it only on a running -> awaiting_*
+    transition."""
+    if _current_job is None:
+        return
+    pstatus = _current_job.get("status", "")
+    if not pstatus.startswith("awaiting_"):
+        return
+    fields = {k: _current_job.get(k) for k in _PAUSE_FIELDS if k in _current_job}
+    try:
+        _post(f"/api/agent/job/{job_id}/progress", json={
+            "agent_id": _current_agent_id,
+            "stage": _current_job.get("stage"),
+            "stage_label": _current_job.get("stage_label"),
+            "active_time": _current_job.get("active_time"),
+            "logged_in": True,
+            "pause_status": pstatus,
+            "pause_fields": fields,
+        })
+        print(f"[agent] announced pause {pstatus} for job {job_id}")
+    except Exception as exc:
+        print(f"[agent] pause announce failed (will retry via poll): {exc}")
+
+
 def _wait_for_resume(job_id: str) -> None:
     """Block until the operator answers this pause on the server, then copy the
     answer back onto the local job dict. Raises _CancelledError if cancelled.
@@ -168,8 +248,8 @@ def _wait_for_resume(job_id: str) -> None:
     This mirrors the old _wait_for_resume(job_id) signature exactly, so the
     workflow bodies below are unchanged.
     """
-    # Make sure the pause state (status + any prompt/preview) is on the server.
-    _sync_job()
+    # Tell the server we are paused (the slim sync no longer carries status).
+    _announce_pause(job_id)
     while True:
         try:
             r = _get(f"/api/agent/job/{job_id}/paused-input")
@@ -186,17 +266,15 @@ def _wait_for_resume(job_id: str) -> None:
         if data.get("cancelled"):
             raise _CancelledError()
         if data.get("ready"):
-            # Copy the operator's answer fields onto the local job dict.
+            # Copy EVERY operator answer field onto the local job dict so the
+            # unchanged workflow code reads them as before.
+            copied = {}
             if _current_job is not None:
-                for k in ("confirmed_text", "choices", "chosen_numbers",
-                          "selected_crops", "object_color_choices",
-                          "aspect_target", "aspect_method",
-                          "template_turn2", "template_turn3",
-                          "_regenerate", "_regen_template",
-                          "_reextract", "_reextract_mode", "_reextract_cols",
-                          "_reextract_rows", "_reextract_padding", "_recrop_boxes"):
+                for k in _ANSWER_FIELDS:
                     if k in data:
                         _current_job[k] = data[k]
+                        copied[k] = data[k]
+            print(f"[agent] resume for job {job_id}; copied answer fields: {copied}")
             return
         time.sleep(PAUSE_POLL_INTERVAL)
 
@@ -327,6 +405,11 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
     job["awaiting_input"] = False
     job["stage"] = 2
     job["stage_label"] = "Generating colour variations"
+    # Guard: the operator's style choice must have been copied back from the
+    # server (see _wait_for_resume). An empty list here means the answer never
+    # arrived — fail clearly instead of an IndexError.
+    if not job.get("choices"):
+        raise RuntimeError("No style number was received from the operator (choices is empty) before stage 2.")
     style_choice = job["choices"][-1]  # last choice for stage 1
     tpl_turn2 = job.get("template_turn2") or tpl_turn2
     attempt = 1
@@ -370,6 +453,9 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
     job["awaiting_input"] = False
     job["stage"] = 3
     job["stage_label"] = "Generating final artwork"
+    # Guard: the operator's colour choice must have arrived from the server.
+    if not job.get("choices"):
+        raise RuntimeError("No colour number was received from the operator (choices is empty) before the final step.")
     colour_choice = job["choices"][-1]  # last choice for stage 2
     tpl_turn3 = job.get("template_turn3") or tpl_turn3
 
@@ -1056,10 +1142,13 @@ def _handle_claimed_job(page: Any, claim: dict) -> None:
         except Exception as exc:
             print(f"[agent] output upload failed: {exc}")
         try:
+            # Final post carries the TERMINAL status (done/failed/...) — the
+            # server accepts status only when it is terminal.
             _post(f"/api/agent/job/{job_id}/progress", json={
+                "agent_id": _current_agent_id,
                 "stage": job.get("stage"), "stage_label": job.get("stage_label"),
                 "active_time": job.get("active_time"), "logged_in": True,
-                "job": {k: v for k, v in job.items() if not k.startswith("_")},
+                "job": _agent_job_blob(job, include_status=True),
             })
         except Exception as exc:
             print(f"[agent] final sync failed: {exc}")
@@ -1074,6 +1163,9 @@ def open_browser_context():
     context for the "Sign in to ChatGPT" flow and for the claim loop so there is
     only ever one profile lock.
     """
+    # A SECOND launch here while one is already open would lock the profile and
+    # break the session check. This line makes any accidental re-launch obvious.
+    print("[agent] launch_persistent_context('acct1') — opening browser context")
     context = launch_context("acct1")
     page = context.pages[0] if context.pages else context.new_page()
     page.goto("https://chatgpt.com", wait_until="domcontentloaded")
@@ -1091,6 +1183,9 @@ def run_loop(page, agent_id, stop_event=None, on_status=None, on_log=None) -> No
     """The claim loop. Identical behaviour to the original; the only additions
     are an optional stop_event to allow the GUI to stop cleanly and optional
     status/log callbacks. No job or workflow logic is changed."""
+    global _current_agent_id
+    _current_agent_id = agent_id  # so the sync-thread progress posts carry it (heartbeat)
+
     def log(msg):
         print(msg)
         if on_log:

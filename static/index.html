@@ -117,6 +117,7 @@ resultArea.addEventListener("click",function(e){
   var t=e.target.closest("[data-action]");
   if(!t)return;
   var a=t.dataset.action,jid=t.dataset.job;
+  console.log("[delegation] click matched action:",a,"job:",jid,"choice:",t.dataset.choice);
   if(a==="select") doSelect(jid,parseInt(t.dataset.choice,10));
   else if(a==="regenerate") doRegenerate(jid);
   else if(a==="cancel") doCancelJob(jid);
@@ -176,7 +177,7 @@ function updBtn(){
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasInput||!hasDetails||blocked;
-  if(blk){if(!workerAlive)blk.textContent="Worker is not running. Restart the server.";else if(!isLoggedIn)blk.textContent="Sign in to ChatGPT first.";else if(activeJobId)blk.textContent="A job is waiting for the client\u2019s choice. Cancel it or complete it to start a new one.";else blk.textContent=""}
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent="A job is waiting for the client\u2019s choice. Cancel it or complete it to start a new one.";else blk.textContent=""}
 }
 function submitJob(){
   var tpl1=$("tpl1"),err=$("tplErr");
@@ -187,7 +188,13 @@ function submitJob(){
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){activeJobId=d.job_id;pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("genBtn").disabled=false});
 }
 var isLoggedIn=false;
-function checkStatus(){fetch("/api/status").then(function(r){return r.json()}).then(function(s){workerAlive=s.worker_alive;if(!workerAlive)workerStatus.innerHTML='<div class="worker-dead">The background worker has stopped. Close any open automation browser window and restart the server.</div>';else workerStatus.innerHTML="";isLoggedIn=!!s.logged_in;updateSessionUI();if(s.blocking_job_id){activeJobId=s.blocking_job_id;pollJob(s.blocking_job_id)}updBtn()})}
+function agentBannerHtml(s){
+  // No worker runs in the server any more — messaging is about the PC agent.
+  if(!s.worker_alive)return'<div class="worker-dead">No agent running. Start the agent on your PC to generate.</div>';
+  if(!s.logged_in)return'<div class="worker-dead">Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.</div>';
+  return"";
+}
+function checkStatus(){fetch("/api/status").then(function(r){return r.json()}).then(function(s){workerAlive=s.worker_alive;isLoggedIn=!!s.logged_in;workerStatus.innerHTML=agentBannerHtml(s);updateSessionUI();if(s.blocking_job_id){activeJobId=s.blocking_job_id;pollJob(s.blocking_job_id)}updBtn()})}
 function updateSessionUI(){
   var el=$("sessionIndicator");if(!el)return;
   if(isLoggedIn){el.innerHTML='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981"></span> Signed in'}
@@ -213,9 +220,19 @@ function updElapsed(){var el=$("stepEl");if(el&&stepStart)el.textContent=fmt(Mat
 function render(job){
   console.log("[render] job:",job);
   try{
-  if(!workerAlive)return;
+  // NOTE: do NOT early-return on !workerAlive. The agent heartbeat can briefly
+  // lapse mid-job; returning here skipped the lastStatus/lastStage bookkeeping,
+  // which made `changed` fire on the next poll and wiped the interactive pause
+  // panel (dead buttons). The banner communicates agent state separately.
   var imgKey=JSON.stringify(job.stage_images||{});
   var changed=job.status!==lastStatus||job.stage!==lastStage||imgKey!==lastImgKey;
+  // The awaiting_* pause panels depend only on the status transition and the
+  // stage (e.g. Text stage 1 -> stage 2 both use awaiting_selection). They do
+  // NOT depend on stage_images, which the agent re-echoes every 2s and whose
+  // JSON key order can jitter — using the full `changed` (which includes
+  // imgKey) here re-rendered the panel every poll and wiped the operator's
+  // buttons. Gate the pause panels on status+stage only.
+  var statusChanged=job.status!==lastStatus||job.stage!==lastStage;
 
   if(job.status==="running"||job.status==="queued"){
     var stage=job.stage||0,label=job.stage_label||"Working...";
@@ -235,19 +252,19 @@ function render(job){
       updElapsed();
     }
   }else if(job.status==="awaiting_selection"){
-    if(changed){clearInterval(elapsedTimer);elapsedTimer=null;pauseStart=job.paused_at?job.paused_at*1000:Date.now();statusArea.innerHTML="";resultArea.innerHTML=renderAwaiting(job);startPauseTimer()}
+    if(statusChanged){clearInterval(elapsedTimer);elapsedTimer=null;pauseStart=job.paused_at?job.paused_at*1000:Date.now();statusArea.innerHTML="";resultArea.innerHTML=renderAwaiting(job);startPauseTimer()}
   }else if(job.status==="awaiting_text_confirmation"){
-    if(changed){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Text extracted from image. Check and confirm:</div>';resultArea.innerHTML='<div class="text-confirm-area"><textarea id="extTxt">'+esc(job.extracted_text||"")+'</textarea><button class="text-confirm-btn" data-action="confirm-text" data-job="'+job.id+'">Confirm and continue</button></div>'+cancelHtml(job)}
+    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Text extracted from image. Check and confirm:</div>';resultArea.innerHTML='<div class="text-confirm-area"><textarea id="extTxt">'+esc(job.extracted_text||"")+'</textarea><button class="text-confirm-btn" data-action="confirm-text" data-job="'+job.id+'">Confirm and continue</button></div>'+cancelHtml(job)}
   }else if(job.status==="awaiting_crop_review"){
-    if(changed){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Review the extracted designs below.</div>';resultArea.innerHTML=renderCropReview(job);maybeInitBoxEditor(job);startPauseTimer()}
+    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Review the extracted designs below.</div>';resultArea.innerHTML=renderCropReview(job);maybeInitBoxEditor(job);startPauseTimer()}
   }else if(job.status==="awaiting_multi_selection"){
-    if(changed){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Select which artworks the client approved for regeneration.</div>';resultArea.innerHTML=renderMultiSelect(job);startPauseTimer()}
+    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Select which artworks the client approved for regeneration.</div>';resultArea.innerHTML=renderMultiSelect(job);startPauseTimer()}
   }else if(job.status==="awaiting_number_selection"){
-    if(changed){clearInterval(elapsedTimer);statusArea.innerHTML="";resultArea.innerHTML=renderNumberSelection(job);startPauseTimer()}
+    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML="";resultArea.innerHTML=renderNumberSelection(job);startPauseTimer()}
   }else if(job.status==="awaiting_object_selection"){
-    if(changed){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Assign colours to the objects below.</div>';resultArea.innerHTML=renderObjectSelection(job);startPauseTimer()}
+    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Assign colours to the objects below.</div>';resultArea.innerHTML=renderObjectSelection(job);startPauseTimer()}
   }else if(job.status==="awaiting_ratio_selection"){
-    if(changed){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Choose a target aspect ratio. Padding is added with transparency \u2014 the design is never cropped or stretched.</div>';resultArea.innerHTML=renderRatioSelection(job);startPauseTimer()}
+    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Choose a target aspect ratio. Padding is added with transparency \u2014 the design is never cropped or stretched.</div>';resultArea.innerHTML=renderRatioSelection(job);startPauseTimer()}
   }else if(job.status==="done"||job.status==="done_with_errors"){
     clr();var activeT=job.active_time?Math.round(job.active_time):0;
     var doneMsg=job.status==="done_with_errors"?'Done with some errors ('+fmt(activeT)+' processing time)':'All done! ('+fmt(activeT)+' processing time)';
@@ -363,7 +380,7 @@ function updMockupBtn(){
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasImg||!hasDetails||blocked;
-  if(blk){if(!workerAlive)blk.textContent="Worker is not running.";else if(!isLoggedIn)blk.textContent="Sign in to ChatGPT first.";else if(activeJobId)blk.textContent="A job is waiting for input. Cancel or complete it first.";else blk.textContent=""}
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent="A job is waiting for input. Cancel or complete it first.";else blk.textContent=""}
 }
 function submitMockupJob(){
   var cols=parseInt(($("mCols")||{}).value||"0",10);
@@ -428,7 +445,7 @@ function updArtworkBtn(){
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasFiles||!hasDetails||blocked;
-  if(blk){if(!workerAlive)blk.textContent="Worker is not running.";else if(!isLoggedIn)blk.textContent="Sign in to ChatGPT first.";else if(activeJobId)blk.textContent="A job is in progress. Cancel or complete it first.";else blk.textContent=""}
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent="A job is in progress. Cancel or complete it first.";else blk.textContent=""}
 }
 function submitArtworkJob(){
   var tpl=$("tplArtRegen");
@@ -594,7 +611,7 @@ function updCustomBtn(){
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasFile||!hasOps||!hasDetails||blocked;
-  if(blk){if(!workerAlive)blk.textContent="Worker is not running.";else if(!isLoggedIn)blk.textContent="Sign in to ChatGPT first.";else if(activeJobId)blk.textContent="A job is in progress.";else blk.textContent=""}
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent="A job is in progress.";else blk.textContent=""}
 }
 function submitCustomJob(){
   console.log("[submitCustomJob] customFile:",customFile,"customOps:",customOps);
@@ -1274,7 +1291,7 @@ function renderHist(){
     historyList.appendChild(div);
   });
 }
-setInterval(function(){fetch("/api/status").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(s){if(!s)return;if(!s.worker_alive&&workerAlive){workerAlive=false;workerStatus.innerHTML='<div class="worker-dead">The background worker has stopped. Close any open automation browser window and restart the server.</div>';clr();var b=$("genBtn");if(b)b.disabled=true}})},5000);
+setInterval(function(){fetch("/api/status").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(s){if(!s)return;var wasAlive=workerAlive;workerAlive=s.worker_alive;isLoggedIn=!!s.logged_in;workerStatus.innerHTML=agentBannerHtml(s);if(!s.worker_alive&&wasAlive){clr();var b=$("genBtn");if(b)b.disabled=true}updBtn()})},5000);
 // Auth: load user info and handle 401 globally
 fetch("/api/auth/me").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(d){if(d){var ui=$("userInfo");if(ui)ui.innerHTML='<span>'+d.username+'</span><a href="#" onclick="doLogout();return false" style="color:var(--accent);text-decoration:none;font-weight:600">Sign out</a>'}});
 window.doLogout=function(){fetch("/api/auth/logout",{method:"POST"}).then(function(){window.location.href="/login"})};

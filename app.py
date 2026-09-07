@@ -1,8 +1,9 @@
 """FastAPI web UI for artwork generation jobs.
 
 Serves a single-page operator interface and exposes JSON API routes.
-Generation runs in a dedicated background worker thread to avoid blocking
-the async event loop (Playwright sync API is not async-compatible).
+Generation runs on a client-side agent (agent.py) on the designer's PC, which
+polls this server for jobs and drives Playwright/ChatGPT there. The server no
+longer runs any browser worker itself.
 
 Supports multi-turn workflows (Text workflow with operator decisions).
 """
@@ -106,7 +107,7 @@ VAULT_SAVE_SUBFOLDER = "AI Artwork"
 # Agent presence: agents register and then poll. We consider the system able to
 # generate when some agent has polled within AGENT_ONLINE_WINDOW seconds.
 # ---------------------------------------------------------------------------
-AGENT_ONLINE_WINDOW = 30.0          # seconds since last poll to count as "connected"
+AGENT_ONLINE_WINDOW = 90.0          # seconds since last request to count as "connected"
 AGENT_PROGRESS_TIMEOUT = 300.0      # 5 min without progress -> release the job
 agents: dict[str, dict[str, Any]] = {}   # agent_id -> {name, registered_at, last_seen, logged_in}
 
@@ -120,6 +121,19 @@ def _online_agent() -> dict | None:
             if best is None or a["last_seen"] > best["last_seen"]:
                 best = a
     return best
+
+
+def _heartbeat(agent_id: str | None) -> None:
+    """Treat ANY authenticated agent request as a heartbeat.
+
+    While a job runs the agent is busy-waiting on ChatGPT and does not poll
+    next-job, so we must refresh last_seen from the progress / paused-input
+    calls too — otherwise the agent looks offline mid-job."""
+    if not agent_id:
+        return
+    a = agents.get(agent_id)
+    if a:
+        a["last_seen"] = time.time()
 
 
 def _requeue_stale_jobs() -> None:
@@ -222,12 +236,19 @@ class AgentRegisterRequest(BaseModel):
 
 
 class AgentProgressRequest(BaseModel):
+    agent_id: str | None = None  # so the server can heartbeat the right agent while a job runs
     stage: int | None = None
     stage_label: str | None = None
     active_time: float | None = None
     logged_in: bool | None = None
     # The agent posts the full job dict so the operator UI reflects live state.
     job: dict | None = None
+    # The agent announces it has entered an operator pause. The server applies
+    # this ONLY when the job is currently "running" (running -> awaiting_*), so
+    # it can't override an already-answered/terminal job. Also carries the pause
+    # metadata the operator UI needs (extracted_text, detected_objects, etc.).
+    pause_status: str | None = None
+    pause_fields: dict | None = None
 
 
 class AgentErrorRequest(BaseModel):
@@ -507,6 +528,7 @@ def submit_selection(job_id: str, req: SelectionRequest):
 
     job["choices"].append(req.choice)
     job["_regenerate"] = False
+    job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
     return {"ok": True, "choice": req.choice}
@@ -570,6 +592,7 @@ def confirm_text(job_id: str, req: TextConfirmRequest):
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
     job["confirmed_text"] = req.text.strip()
+    job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
     return {"ok": True}
@@ -610,6 +633,7 @@ def handle_crops(job_id: str, req: CropActionRequest):
         job["_recrop_boxes"] = None
     else:
         raise HTTPException(status_code=400, detail="Action must be 'accept', 'reextract', 'recrop', or 'redetect'.")
+    job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
     return {"ok": True}
@@ -630,6 +654,7 @@ def select_multi(job_id: str, req: MultiSelectRequest):
         if c < 1 or c > crop_count:
             raise HTTPException(status_code=400, detail=f"Choice {c} is out of range (1-{crop_count}).")
     job["selected_crops"] = req.choices
+    job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
     return {"ok": True}
@@ -649,6 +674,7 @@ def select_numbers(job_id: str, req: NumberSelectionRequest):
         if n < 1:
             raise HTTPException(status_code=400, detail=f"Number {n} is invalid. Must be >= 1.")
     job["chosen_numbers"] = req.numbers
+    job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
     return {"ok": True, "numbers": req.numbers}
@@ -665,6 +691,7 @@ def select_objects(job_id: str, req: ObjectSelectionRequest):
     if not req.choices:
         raise HTTPException(status_code=400, detail="Select at least one object to recolour.")
     job["object_color_choices"] = req.choices
+    job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
     return {"ok": True}
@@ -712,6 +739,7 @@ def select_ratio(job_id: str, req: RatioSelectionRequest):
         raise HTTPException(status_code=400, detail="Method must be 'pad' or 'regenerate'.")
     job["aspect_target"] = {"w": w, "h": h}
     job["aspect_method"] = method
+    job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
     return {"ok": True, "target": {"w": w, "h": h}, "method": method}
@@ -938,20 +966,45 @@ _SERVER_OWNED_FIELDS = {
     "_regenerate", "_regen_template", "_reextract", "_reextract_mode",
     "_reextract_cols", "_reextract_rows", "_reextract_padding", "_recrop_boxes",
     "claimed_by", "claimed_by_name", "claimed_at", "last_progress_at",
+    # Lifecycle fields the SERVER owns. An agent's per-2s job echo must never
+    # undo an operator's answer (the bug where choices=[4,4,4] landed but the
+    # agent's stale "awaiting_selection" overwrote the server's "running").
+    # `status` is handled specially below (terminal statuses are allowed).
+    "awaiting_input", "paused_at",
 }
+
+# Terminal statuses the agent IS allowed to set.
+_TERMINAL_STATUSES = {"done", "done_with_errors", "failed", "cancelled"}
 
 
 def _merge_agent_job(job: dict, posted: dict) -> None:
     """Merge the agent's job copy into the authoritative record.
 
-    The agent owns generation-produced fields (stage, images, results, etc.).
-    The server owns operator answers and claim bookkeeping — those are never
-    overwritten. A cancellation on the server also always wins.
+    The agent owns generation-produced fields (stage_label, images,
+    stage_images, prompts, results, errors). The server owns operator answers,
+    claim bookkeeping and the pause lifecycle — those are never overwritten.
+    A cancellation on the server always wins.
+
+    `status` is special: the agent may move the job to a TERMINAL status
+    (done / failed / ...), but must never push it back to an awaiting_* or
+    running value — that would undo an operator's answer.
     """
     if job.get("status") == "cancelled":
         return
     for k, v in posted.items():
         if k in _SERVER_OWNED_FIELDS:
+            continue
+        if k == "status":
+            server_status = job.get("status", "")
+            # Only accept terminal statuses from the agent.
+            if v in _TERMINAL_STATUSES:
+                job["status"] = v
+            elif v != server_status:
+                # e.g. agent still carrying "awaiting_selection" while the
+                # operator has already answered and the server is "running".
+                print(f"[server] Ignored agent status {v!r} for job {job.get('id')} "
+                      f"(server is {server_status!r}) — an agent sync cannot move a "
+                      f"job back to a non-terminal status.")
             continue
         job[k] = v
 
@@ -1009,18 +1062,41 @@ def agent_progress(job_id: str, req: AgentProgressRequest, request: Request):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
+    # Heartbeat: keep the agent "online" while it is busy running this job.
+    _heartbeat(req.agent_id or job.get("claimed_by"))
     if job.get("status") == "cancelled":
         return {"ok": True, "cancelled": True}
     job["last_progress_at"] = time.time()
     if req.job is not None:
         _merge_agent_job(job, req.job)
+    # Agent announces it has entered an operator pause. Apply ONLY when the job
+    # is currently "running" AND the operator hasn't already answered a pause at
+    # this stage — so a duplicate/stale announce can't re-open a resolved pause.
+    if req.pause_status and req.pause_status.startswith("awaiting_"):
+        announce_stage = req.stage if req.stage is not None else job.get("stage")
+        answered = job.setdefault("_answered_pause_stages", [])
+        if job.get("status") != "running":
+            print(f"[server] Ignored pause announcement {req.pause_status!r} for job "
+                  f"{job_id} (server status is {job.get('status')!r}, not running).")
+        elif announce_stage in answered:
+            print(f"[server] Ignored pause announcement {req.pause_status!r} for job "
+                  f"{job_id} (stage {announce_stage} was already answered).")
+        else:
+            job["status"] = req.pause_status
+            job["awaiting_input"] = True
+            job["paused_at"] = time.time()
+            # Pause metadata the operator UI needs (e.g. extracted_text,
+            # detected_objects, aspect_recommendations). These are agent-owned.
+            for k, v in (req.pause_fields or {}).items():
+                job[k] = v
+            print(f"[server] Job {job_id} entered pause: {req.pause_status} (stage {announce_stage})")
     if req.stage is not None:
         job["stage"] = req.stage
     if req.stage_label is not None:
         job["stage_label"] = req.stage_label
     if req.active_time is not None:
         job["active_time"] = req.active_time
-    a = agents.get(job.get("claimed_by"))
+    a = agents.get(req.agent_id or job.get("claimed_by"))
     if a and req.logged_in is not None:
         a["logged_in"] = req.logged_in
     return {"ok": True, "cancelled": False}
@@ -1041,6 +1117,7 @@ async def agent_result(job_id: str, request: Request):
             dest.write_bytes(data)
             saved.append(dest.name)
     job["last_progress_at"] = time.time()
+    _heartbeat(job.get("claimed_by"))
     _recompute_aspect_similarity(job)
     return {"ok": True, "saved": saved}
 
@@ -1107,6 +1184,8 @@ def agent_paused_input(job_id: str, request: Request):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     job["last_progress_at"] = time.time()
+    # Heartbeat: the agent polls this while paused at an operator prompt.
+    _heartbeat(job.get("claimed_by"))
     status = job.get("status", "")
     if status == "cancelled":
         return {"ready": True, "cancelled": True}
