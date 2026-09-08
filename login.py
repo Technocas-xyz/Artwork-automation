@@ -5,9 +5,9 @@ Usage:  python login.py acct1
 Opens a real Chrome window using a persistent profile. Log in by hand,
 then press Enter here. The session is reused by the automation.
 
-NOTE: If the server (uvicorn) is running, STOP IT FIRST.
-The server's worker holds the browser profile and login.py cannot share it.
-Use the in-app sign-in flow instead when the server is running.
+NOTE: If the agent (agent.py / ArtworkAgent.exe) is running, STOP IT FIRST.
+The agent holds the browser profile and login.py cannot share it. The server
+does not open a browser at all any more, so it can keep running.
 """
 
 import sys
@@ -18,9 +18,9 @@ profile = f"./profiles/{account}"
 
 print()
 print("=" * 60)
-print("  WARNING: Stop the server (uvicorn) before running this.")
-print("  The server holds the profile lock. If the server is")
-print("  running, use the Sign In button in the web UI instead.")
+print("  WARNING: Stop the agent before running this.")
+print("  The agent holds the profile lock. Use the agent's")
+print("  'Sign in to ChatGPT' button instead if it is running.")
 print("=" * 60)
 print()
 
