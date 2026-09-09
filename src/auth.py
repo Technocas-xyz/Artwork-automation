@@ -113,4 +113,8 @@ def get_current_user(request: Request) -> str | None:
 
 # Paths that don't require auth
 PUBLIC_PATHS = {"/login", "/api/auth/login", "/api/auth/logout"}
-PUBLIC_PREFIXES = ("/static/",)
+# /input/ serves uploaded artwork previews as <img> tags. Like /static/, these
+# are opaque, non-sensitive filenames and must not be gated by the auth
+# middleware — otherwise a missing/late cookie turns the image request into a
+# 302 -> /login and the browser renders a broken-image icon.
+PUBLIC_PREFIXES = ("/static/", "/input/")

@@ -94,11 +94,30 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 <link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
-<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
+<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
 <div class="columns">
 <div class="col" id="col1"></div>
 <div class="col" id="col2"></div>
 <div class="col" id="col3"><div class="col-title">Results</div><div id="workerStatus"></div><div id="statusArea"></div><div id="resultArea"></div><div class="history-section" id="historySection" style="display:none"><h3>Previous Runs</h3><div id="historyList"></div></div></div>
+</div>
+<div id="agentSetupOverlay" class="vm-overlay" style="display:none">
+  <div class="vm-modal" style="max-width:560px;width:100%;max-height:88vh;display:flex;flex-direction:column;background:var(--surface);border-radius:12px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+    <div class="vm-head"><h3>Agent setup</h3><button class="vm-x" onclick="closeAgentSetup()">&times;</button></div>
+    <div class="vm-body">
+      <p class="vm-hint" style="margin-top:0">Each PC needs its own token. Enter the designer or machine name for <b>this</b> PC, then copy the token into the agent's setup window. A different name gets a different token, so two machines never share one.</p>
+      <label for="asName">Designer / machine name</label>
+      <input type="text" id="asName" autocomplete="off" placeholder="e.g. Studio-PC-2 or Jane">
+      <div class="vm-hint">Change the name to switch to that PC's token.</div>
+      <div id="asTokenWrap" style="display:none;margin-top:14px">
+        <label>Server URL</label>
+        <div style="display:flex;gap:8px"><input type="text" id="asServer" readonly><button class="vm-btn ghost" onclick="copyAgentField('asServer')">Copy</button></div>
+        <label>Your token</label>
+        <div style="display:flex;gap:8px"><input type="text" id="asToken" readonly><button class="vm-btn ghost" onclick="copyAgentField('asToken')">Copy</button></div>
+      </div>
+      <div id="asExisting" style="margin-top:18px"></div>
+    </div>
+    <div class="vm-foot"><span id="asMsg"></span><button class="vm-btn ghost" onclick="closeAgentSetup()">Close</button></div>
+  </div>
 </div>
 <script>
 (function(){
@@ -1295,6 +1314,79 @@ setInterval(function(){fetch("/api/status").then(function(r){if(r.status===401){
 // Auth: load user info and handle 401 globally
 fetch("/api/auth/me").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(d){if(d){var ui=$("userInfo");if(ui)ui.innerHTML='<span>'+d.username+'</span><a href="#" onclick="doLogout();return false" style="color:var(--accent);text-decoration:none;font-weight:600">Sign out</a>'}});
 window.doLogout=function(){fetch("/api/auth/logout",{method:"POST"}).then(function(){window.location.href="/login"})};
+
+// === AGENT SETUP =========================================================
+// Tokens are per-machine, keyed on the name each PC reports. The panel asks
+// for that name BEFORE showing a token and re-fetches when the name changes,
+// so every designer/PC gets its own distinct token (two machines never share
+// one). It also lists who is already set up, with a last-seen time.
+var _asDebounce=null,_asLastName="";
+function asMsg(text,cls){var el=$("asMsg");if(!el)return;el.textContent=text||"";el.className=cls||""}
+function asFmtSeen(sec){
+  if(!sec)return "never connected";
+  var s=Math.round(Date.now()/1000-sec);
+  if(s<60)return "connected just now";
+  if(s<3600)return "seen "+Math.round(s/60)+"m ago";
+  if(s<86400)return "seen "+Math.round(s/3600)+"h ago";
+  return "seen "+Math.round(s/86400)+"d ago";
+}
+window.openAgentSetup=function(){
+  var ov=$("agentSetupOverlay");if(!ov)return;
+  ov.style.display="flex";
+  var input=$("asName");
+  var remembered="";try{remembered=localStorage.getItem("agentName")||""}catch(e){}
+  input.value=remembered;
+  input.oninput=function(){
+    if(_asDebounce)clearTimeout(_asDebounce);
+    _asDebounce=setTimeout(fetchAgentToken,400);
+  };
+  input.onkeydown=function(e){if(e.key==="Enter"){if(_asDebounce)clearTimeout(_asDebounce);fetchAgentToken()}};
+  asMsg("","");
+  loadAgentList();
+  if(remembered.trim())fetchAgentToken();else{$("asTokenWrap").style.display="none";input.focus()}
+};
+window.closeAgentSetup=function(){var ov=$("agentSetupOverlay");if(ov)ov.style.display="none"};
+function fetchAgentToken(){
+  var name=($("asName").value||"").trim();
+  if(!name){$("asTokenWrap").style.display="none";asMsg("Enter a name to get this PC's token.","vm-err");return}
+  if(name===_asLastName&&$("asTokenWrap").style.display!=="none")return;
+  asMsg("Loading token…","");
+  fetch("/api/my-agent-token?agent_name="+encodeURIComponent(name)).then(function(r){
+    if(!r.ok)return r.json().then(function(d){throw new Error(d.detail||"Failed to get token")});
+    return r.json();
+  }).then(function(d){
+    _asLastName=name;
+    try{localStorage.setItem("agentName",name)}catch(e){}
+    $("asServer").value=d.server_url||window.location.origin;
+    $("asToken").value=d.token||"";
+    $("asTokenWrap").style.display="block";
+    asMsg("Token for \u201c"+d.name+"\u201d ready. Copy it into the agent.","vm-ok");
+    loadAgentList();
+  }).catch(function(e){$("asTokenWrap").style.display="none";asMsg(e.message,"vm-err")});
+}
+window.copyAgentField=function(id){
+  var el=$(id);if(!el)return;
+  el.select();
+  var val=el.value;
+  function ok(){asMsg("Copied.","vm-ok")}
+  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(val).then(ok,function(){try{document.execCommand("copy");ok()}catch(e){}})}
+  else{try{document.execCommand("copy");ok()}catch(e){}}
+};
+function loadAgentList(){
+  fetch("/api/agent-tokens").then(function(r){return r.ok?r.json():{agents:[]}}).then(function(d){
+    var box=$("asExisting");if(!box)return;
+    var list=d.agents||[];
+    if(!list.length){box.innerHTML='<div class="vm-hint">No agents set up yet.</div>';return}
+    var h='<label style="margin-top:0">Who\u2019s set up</label><div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">';
+    for(var i=0;i<list.length;i++){
+      var a=list[i];
+      h+='<div style="display:flex;justify-content:space-between;gap:8px;padding:8px 10px;font-size:.8rem;'+(i?'border-top:1px solid var(--border)':'')+'">'
+        +'<span style="font-weight:600">'+esc(a.name||"(unnamed)")+'</span>'
+        +'<span style="color:var(--muted)">'+esc(asFmtSeen(a.last_seen))+'</span></div>';
+    }
+    box.innerHTML=h+'</div>';
+  }).catch(function(){});
+}
 
 // === NEXTCLOUD VAULT BROWSER =============================================
 // Browse Leads 2.0, watch it live, and send a file straight into a workflow.

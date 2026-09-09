@@ -34,7 +34,7 @@ from src.auth import (
     get_current_user, check_rate_limit, record_failure, record_success,
     COOKIE_NAME, PUBLIC_PATHS, PUBLIC_PREFIXES,
 )
-from src.agent_tokens import token_name, get_or_create_for_name
+from src.agent_tokens import token_name, get_or_create_for_name, touch_token, list_agents
 from src import nextcloud as nc
 from src.nc_live import watcher as nc_watcher
 
@@ -112,15 +112,34 @@ AGENT_PROGRESS_TIMEOUT = 300.0      # 5 min without progress -> release the job
 agents: dict[str, dict[str, Any]] = {}   # agent_id -> {name, registered_at, last_seen, logged_in}
 
 
-def _online_agent() -> dict | None:
-    """Return the most recently seen agent still within the online window."""
+def _online_agents() -> list[dict]:
+    """Every agent still within the online window, newest first.
+
+    Multiple designers run their own agents on their own PCs, so "is an agent
+    available" is a question about the whole fleet, not just the most recent
+    registrant. Callers that only need one representative can take the first
+    entry; callers deciding availability should look at the whole list."""
     now = time.time()
-    best = None
-    for a in agents.values():
-        if now - a.get("last_seen", 0) <= AGENT_ONLINE_WINDOW:
-            if best is None or a["last_seen"] > best["last_seen"]:
-                best = a
-    return best
+    live = [a for a in agents.values()
+            if now - a.get("last_seen", 0) <= AGENT_ONLINE_WINDOW]
+    live.sort(key=lambda a: a.get("last_seen", 0), reverse=True)
+    return live
+
+
+def _online_agent() -> dict | None:
+    """Return the most recently seen agent still within the online window.
+
+    Kept for callers that just need a single representative (e.g. a name to
+    show). Availability decisions should use _online_agents()."""
+    live = _online_agents()
+    return live[0] if live else None
+
+
+def _any_agent_logged_in(live: list[dict] | None = None) -> bool:
+    """True if ANY connected agent reports a signed-in ChatGPT session."""
+    if live is None:
+        live = _online_agents()
+    return any(a.get("logged_in") for a in live)
 
 
 def _heartbeat(agent_id: str | None) -> None:
@@ -865,43 +884,51 @@ def open_folder(req: OpenFolderRequest):
 def get_status():
     _requeue_stale_jobs()
     blocking = _any_job_blocking()
-    agent = _online_agent()
+    live = _online_agents()
     # `worker_alive`/`logged_in` keys are kept for the existing UI: they now mean
-    # "an agent is connected" and "that agent reports a logged-in ChatGPT session".
-    online = agent is not None
+    # "at least one agent is connected" and "at least one connected agent reports
+    # a signed-in ChatGPT session". With multiple designers we count the whole
+    # fleet, not just the newest registrant.
+    online = len(live) > 0
+    logged_in = _any_agent_logged_in(live)
+    # Prefer a signed-in agent's name for the header label; else the newest.
+    label_agent = next((a for a in live if a.get("logged_in")), live[0] if live else None)
     return {
         "blocking_job_id": blocking,
         "worker_alive": online,
         "worker_error": "" if online else "No agent running - start the agent on your PC to generate.",
-        "logged_in": bool(agent and agent.get("logged_in")),
+        "logged_in": logged_in,
         "agent_connected": online,
-        "agent_name": agent.get("name") if agent else "",
+        "agent_count": len(live),
+        "agent_name": label_agent.get("name") if label_agent else "",
+        "agent_names": [a.get("name", "") for a in live],
     }
 
 
 @app.get("/api/session")
 def get_session():
-    """Report the connected agent's ChatGPT session state (agent-reported)."""
-    agent = _online_agent()
-    return {"logged_in": bool(agent and agent.get("logged_in")), "account": "acct1",
-            "agent_connected": agent is not None, "agent_name": agent.get("name") if agent else ""}
+    """Report the fleet's ChatGPT session state (agent-reported). Signed-in if
+    ANY connected agent reports a session."""
+    live = _online_agents()
+    label_agent = next((a for a in live if a.get("logged_in")), live[0] if live else None)
+    return {"logged_in": _any_agent_logged_in(live), "account": "acct1",
+            "agent_connected": len(live) > 0,
+            "agent_name": label_agent.get("name") if label_agent else ""}
 
 
 @app.post("/api/session/login")
 def session_login():
     """Sign-in now happens on the designer's PC: they run login.py there. The
     server cannot drive the remote browser, so this just reports guidance."""
-    agent = _online_agent()
-    if agent is None:
+    if not _online_agents():
         raise HTTPException(status_code=503, detail="No agent running. Start the agent on your PC.")
     return {"ok": True, "message": "Run login.py on the PC where the agent runs to sign in to ChatGPT."}
 
 
 @app.post("/api/session/confirm")
 def session_confirm():
-    """Re-report the agent's session state."""
-    agent = _online_agent()
-    return {"logged_in": bool(agent and agent.get("logged_in"))}
+    """Re-report the fleet's session state."""
+    return {"logged_in": _any_agent_logged_in()}
 
 
 # ---------------------------------------------------------------------------
@@ -909,15 +936,32 @@ def session_confirm():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/my-agent-token")
-def my_agent_token(request: Request):
-    """Return (creating if needed) the stable agent token for the logged-in user,
-    so the UI can show it with a copy button. The token still originates from the
-    same store make_agent_token.py uses."""
-    user = get_current_user(request)
-    if not user:
+def my_agent_token(request: Request, agent_name: str = ""):
+    """Return (creating if needed) the stable agent token for a DESIGNER NAME.
+
+    Keyed on `agent_name` — the name each PC reports (defaults to its machine
+    name) — NOT on the website login. Every operator signs in as the same shared
+    account, so keying on the login handed everyone one token and two agents
+    collided on it. A distinct name yields a distinct token, so each PC gets its
+    own. Changing the name in the setup panel therefore surfaces a different
+    token, which is exactly what a second machine needs.
+    """
+    if not get_current_user(request):
         raise HTTPException(status_code=401, detail="Not authenticated")
-    token = get_or_create_for_name(user)
-    return {"token": token, "name": user, "server_url": str(request.base_url).rstrip("/")}
+    name = agent_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="A designer/agent name is required.")
+    token = get_or_create_for_name(name)
+    return {"token": token, "name": name, "server_url": str(request.base_url).rstrip("/")}
+
+
+@app.get("/api/agent-tokens")
+def agent_tokens(request: Request):
+    """List issued tokens (name + last-seen, no secrets) so an admin can see who
+    is set up. Cookie-authed by the middleware."""
+    if not get_current_user(request):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"agents": list_agents()}
 
 
 @app.get("/api/download/agent")
@@ -949,12 +993,18 @@ def download_agent():
 # ---------------------------------------------------------------------------
 
 def _require_agent(request: Request) -> str:
-    """Validate the agent bearer token; return the designer name or raise 401."""
+    """Validate the agent bearer token; return the designer name or raise 401.
+
+    Records the token's last-seen time so the admin setup panel can show which
+    designers are actually connected. Presence/heartbeat for job routing is
+    tracked per agent_id (below) — this touch is only for the "who's set up"
+    view and is deliberately independent of it."""
     auth = request.headers.get("authorization", "")
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     name = token_name(token)
     if not name:
         raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
+    touch_token(token)
     return name
 
 
@@ -1535,4 +1585,5 @@ def nextcloud_save_to_vault(req: NextcloudSaveRequest):
 nc_watcher.start()
 
 
+app.mount("/input", StaticFiles(directory="input"), name="input")
 app.mount("/static", StaticFiles(directory="static"), name="static")
