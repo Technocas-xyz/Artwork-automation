@@ -14,3 +14,7 @@ services:
       - ./logs:/app/logs
       - ./vault:/app/vault
       - ./profiles:/app/profiles
+      # Agent bearer tokens and the packaged agent download must outlive a
+      # rebuild, or every designer's agent loses auth and the download 404s.
+      - ./agent_tokens.json:/app/agent_tokens.json
+      - ./downloads:/app/downloads
