@@ -1,4 +1,4 @@
-﻿PROJECT_URL   = "https://chatgpt.com/g/g-p-6a7b685699308191839276f7ccd8c1fb/project"
+﻿PROJECT_URL   = "https://chatgpt.com"
 
 FILE_INPUT    = "input[data-testid='upload-photos-input']"
 PROMPT_BOX    = "#prompt-textarea"

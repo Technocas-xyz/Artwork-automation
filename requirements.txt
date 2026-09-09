@@ -10,3 +10,5 @@ opencv-python-headless==4.11.0.86
 ImageHash==4.3.1
 scipy==1.15.1
 requests==2.32.3
+pystray==0.19.5
+pyinstaller==6.22.2

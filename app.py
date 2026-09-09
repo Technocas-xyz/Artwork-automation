@@ -318,11 +318,37 @@ def _unique_filename(directory: Path, name: str) -> str:
     return candidate
 
 
-def _any_job_blocking() -> str | None:
-    for jid, j in jobs.items():
-        if j.get("status") in ("awaiting_selection", "awaiting_text_confirmation", "awaiting_crop_review", "awaiting_multi_selection", "awaiting_number_selection", "awaiting_object_selection", "awaiting_ratio_selection", "running"):
-            return jid
-    return None
+# A job in any of these statuses is actively held by an agent: it is either
+# running on that agent's browser or paused waiting for an operator answer that
+# the SAME agent will resume. An agent holds at most one such job at a time.
+_AGENT_BUSY_STATUSES = (
+    "running", "awaiting_selection", "awaiting_text_confirmation",
+    "awaiting_crop_review", "awaiting_multi_selection",
+    "awaiting_number_selection", "awaiting_object_selection",
+    "awaiting_ratio_selection",
+)
+
+
+def _busy_agent_ids() -> set[str]:
+    """agent_ids currently holding a job (running or paused awaiting an answer)."""
+    return {
+        j.get("claimed_by")
+        for j in jobs.values()
+        if j.get("status") in _AGENT_BUSY_STATUSES and j.get("claimed_by")
+    }
+
+
+def _free_agent_exists() -> bool:
+    """True if at least one ONLINE agent is not already holding a job.
+
+    This is the real "can a new job start" test now that each designer runs
+    their own agent: refuse only when every online agent is busy, never merely
+    because some job exists somewhere."""
+    busy = _busy_agent_ids()
+    for a in _online_agents():
+        if a.get("id") not in busy:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -448,9 +474,11 @@ def create_job(req: GenerateRequest):
         raise HTTPException(status_code=400, detail="Client name is required.")
     if not req.task_id.strip():
         raise HTTPException(status_code=400, detail="Job number is required.")
-    blocking = _any_job_blocking()
-    if blocking:
-        raise HTTPException(status_code=409, detail="A job is waiting for the client's choice. Cancel it or complete it to start a new one.")
+    # Per-agent limit: refuse only when every online agent is already busy, not
+    # merely because some other designer's job exists. A queued job will be
+    # picked up by whichever agent frees up next.
+    if not _free_agent_exists():
+        raise HTTPException(status_code=409, detail="All agents are busy. Wait for one to finish, or start another agent.")
 
     if req.workflow == "text":
         if not req.text.strip() and not req.text_image.strip():
@@ -883,7 +911,6 @@ def open_folder(req: OpenFolderRequest):
 @app.get("/api/status")
 def get_status():
     _requeue_stale_jobs()
-    blocking = _any_job_blocking()
     live = _online_agents()
     # `worker_alive`/`logged_in` keys are kept for the existing UI: they now mean
     # "at least one agent is connected" and "at least one connected agent reports
@@ -893,8 +920,24 @@ def get_status():
     logged_in = _any_agent_logged_in(live)
     # Prefer a signed-in agent's name for the header label; else the newest.
     label_agent = next((a for a in live if a.get("logged_in")), live[0] if live else None)
+    # Per-agent limit: a new job can start whenever SOME online agent is free.
+    # We no longer advertise a single global "blocking_job_id" — that latched
+    # every browser onto one designer's job and blocked the rest. Instead we
+    # report who is busy so the UI can show which agent is on each job without
+    # blocking anyone else.
+    busy = _busy_agent_ids()
+    active_jobs = [
+        {"job_id": j.get("id"), "status": j.get("status"),
+         "agent": j.get("claimed_by_name") or "", "agent_id": j.get("claimed_by")}
+        for j in jobs.values() if j.get("status") in _AGENT_BUSY_STATUSES
+    ]
     return {
-        "blocking_job_id": blocking,
+        # Retained for backward-compat, but always null now: the client tracks
+        # its own job locally and must not adopt another designer's job.
+        "blocking_job_id": None,
+        "free_agent": _free_agent_exists(),
+        "busy_agent_count": len(busy),
+        "active_jobs": active_jobs,
         "worker_alive": online,
         "worker_error": "" if online else "No agent running - start the agent on your PC to generate.",
         "logged_in": logged_in,
@@ -1080,8 +1123,13 @@ def agent_next_job(request: Request, agent_id: str, logged_in: bool = False):
         a["last_seen"] = time.time()
         a["logged_in"] = logged_in
     _requeue_stale_jobs()
-    # Claim the oldest queued job atomically.
+    # Claim the oldest queued job atomically. An agent holds at most one job at
+    # a time, so if this agent is already running/paused on one, it takes
+    # nothing new — the busy check and the claim happen under the same lock so
+    # two rapid polls can't both slip a job onto one agent.
     with _jobs_lock:
+        if agent_id in _busy_agent_ids():
+            return Response(status_code=204)
         queued = sorted(
             [j for j in jobs.values() if j.get("status") == "queued"],
             key=lambda j: j.get("created_at", 0),

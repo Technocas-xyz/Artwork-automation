@@ -102,18 +102,28 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 </div>
 <div id="agentSetupOverlay" class="vm-overlay" style="display:none">
   <div class="vm-modal" style="max-width:560px;width:100%;max-height:88vh;display:flex;flex-direction:column;background:var(--surface);border-radius:12px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)">
-    <div class="vm-head"><h3>Agent setup</h3><button class="vm-x" onclick="closeAgentSetup()">&times;</button></div>
+    <div class="vm-head"><h3>Run the agent on your PC</h3><button class="vm-x" onclick="closeAgentSetup()">&times;</button></div>
     <div class="vm-body">
-      <p class="vm-hint" style="margin-top:0">Each PC needs its own token. Enter the designer or machine name for <b>this</b> PC, then copy the token into the agent's setup window. A different name gets a different token, so two machines never share one.</p>
-      <label for="asName">Designer / machine name</label>
-      <input type="text" id="asName" autocomplete="off" placeholder="e.g. Studio-PC-2 or Jane">
-      <div class="vm-hint">Change the name to switch to that PC's token.</div>
-      <div id="asTokenWrap" style="display:none;margin-top:14px">
-        <label>Server URL</label>
-        <div style="display:flex;gap:8px"><input type="text" id="asServer" readonly><button class="vm-btn ghost" onclick="copyAgentField('asServer')">Copy</button></div>
-        <label>Your token</label>
-        <div style="display:flex;gap:8px"><input type="text" id="asToken" readonly><button class="vm-btn ghost" onclick="copyAgentField('asToken')">Copy</button></div>
-      </div>
+      <p class="vm-hint" style="margin-top:0">Generation runs in a real browser on your machine. Three steps, once. Each PC needs its own token.</p>
+      <ol style="margin:12px 0 0;padding-left:20px;font-size:.86rem;line-height:1.5">
+        <li style="margin-bottom:12px"><b>Download &amp; unzip</b> the agent.<br>
+          <a class="vm-btn primary" href="/api/download/agent" style="display:inline-block;margin-top:6px;text-decoration:none">Download ArtworkAgent.zip</a><br>
+          <span class="vm-hint">Unzip anywhere, then run <b>ArtworkAgent.exe</b> from the unzipped folder.</span></li>
+        <li style="margin-bottom:12px"><b>Run it</b>, then click <b>Sign in to ChatGPT</b> in its window and log in.</li>
+        <li style="margin-bottom:4px"><b>Get this PC's token</b> and paste it into the agent, then click <b>Start</b>.
+          <div style="margin-top:8px">
+            <label for="asName">Designer / machine name</label>
+            <input type="text" id="asName" autocomplete="off" placeholder="e.g. Studio-PC-2 or Jane">
+            <div class="vm-hint">A different name gets a different token, so two machines never share one. Change the name to switch to that PC's token.</div>
+            <div id="asTokenWrap" style="display:none;margin-top:12px">
+              <label>Server URL <span class="vm-hint" style="font-weight:400">(the agent pre-fills this)</span></label>
+              <div style="display:flex;gap:8px"><input type="text" id="asServer" readonly><button class="vm-btn ghost" onclick="copyAgentField('asServer')">Copy</button></div>
+              <label>Your token</label>
+              <div style="display:flex;gap:8px"><input type="text" id="asToken" readonly><button class="vm-btn ghost" onclick="copyAgentField('asToken')">Copy</button></div>
+            </div>
+          </div>
+        </li>
+      </ol>
       <div id="asExisting" style="margin-top:18px"></div>
     </div>
     <div class="vm-foot"><span id="asMsg"></span><button class="vm-btn ghost" onclick="closeAgentSetup()">Close</button></div>
@@ -124,11 +134,38 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 var activeJobId=null,pollingTimer=null,elapsedTimer=null,stepStart=null,pauseStart=null;
 var historyItems=[],textImageFile="",mockupImageFile="",workerAlive=true;
 var currentWorkflow="nextcloud";
+var lastStatusInfo=null;
 var DT={turn1:"",turn2:"",turn3:""};
 var lastStatus="",lastStage=-1,lastImgKey="";
 
 function $(id){return document.getElementById(id)}
 var col1=$("col1"),col2=$("col2"),statusArea=$("statusArea"),resultArea=$("resultArea"),workerStatus=$("workerStatus"),historySection=$("historySection"),historyList=$("historyList");
+
+// --- Reconnect this browser to its OWN in-flight job across a page reload ---
+// Only the job id THIS browser stored is ever adopted, so this never
+// reintroduces a global block: another designer's running job is not touched.
+var ACTIVE_JOB_KEY="activeJobId";
+function saveActiveJob(id){activeJobId=id;try{if(id)localStorage.setItem(ACTIVE_JOB_KEY,id);else localStorage.removeItem(ACTIVE_JOB_KEY)}catch(e){}}
+function clearActiveJob(){activeJobId=null;try{localStorage.removeItem(ACTIVE_JOB_KEY)}catch(e){}}
+var _ACTIVE_JOB_LIVE={running:1,queued:1,awaiting_selection:1,awaiting_text_confirmation:1,awaiting_crop_review:1,awaiting_multi_selection:1,awaiting_number_selection:1,awaiting_object_selection:1,awaiting_ratio_selection:1};
+function reconnectStoredJob(){
+  var id="";try{id=localStorage.getItem(ACTIVE_JOB_KEY)||""}catch(e){}
+  if(!id)return;
+  fetch("/api/jobs/"+id).then(function(r){
+    if(r.status===404){clearActiveJob();return null}
+    if(!r.ok)return null;   // transient error: keep the id, try again on next load
+    return r.json();
+  }).then(function(job){
+    if(!job)return;
+    if(_ACTIVE_JOB_LIVE[job.status]){
+      // Still in flight — reattach and render exactly as if we had started it.
+      activeJobId=id;updBtn();pollJob(id);
+    }else{
+      // done / failed / cancelled — nothing to reattach to; normal empty state.
+      clearActiveJob();updBtn();
+    }
+  }).catch(function(){});
+}
 
 // === EVENT DELEGATION on resultArea ===
 resultArea.addEventListener("click",function(e){
@@ -196,7 +233,7 @@ function updBtn(){
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasInput||!hasDetails||blocked;
-  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent="A job is waiting for the client\u2019s choice. Cancel it or complete it to start a new one.";else blk.textContent=""}
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is waiting for the client\u2019s choice. Cancel it or complete it to start a new one.");else blk.textContent=""}
 }
 function submitJob(){
   var tpl1=$("tpl1"),err=$("tplErr");
@@ -204,16 +241,33 @@ function submitJob(){
   if(err)err.textContent="";
   var body={workflow:"text",text:($("designText")||{}).value||"",text_image:textImageFile,client:$("cn").value.trim(),task_id:$("ti").value.trim(),files:[],options:[],params:{},custom_note:"",template_turn1:tpl1?tpl1.value:""};
   $("genBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";lastStage=-1;lastImgKey="";
-  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){activeJobId=d.job_id;pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("genBtn").disabled=false});
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){saveActiveJob(d.job_id);pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("genBtn").disabled=false});
 }
 var isLoggedIn=false;
 function agentBannerHtml(s){
   // No worker runs in the server any more — messaging is about the PC agent.
   if(!s.worker_alive)return'<div class="worker-dead">No agent running. Start the agent on your PC to generate.</div>';
   if(!s.logged_in)return'<div class="worker-dead">Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.</div>';
-  return"";
+  // Informational only — the per-agent limit means other designers' jobs never
+  // block this one. Just show who is on what, and flag when the whole fleet is
+  // busy so this operator knows a new job will queue.
+  var aj=(s&&s.active_jobs)||[];
+  var h="";
+  if(aj.length){
+    var lines=aj.map(function(j){return esc(j.agent||"an agent")+" \u2014 "+jobStatusLabel(j.status)}).join("<br>");
+    h+='<div class="agent-busy-note" style="font-size:.74rem;color:var(--muted);padding:6px 0">Running now:<br>'+lines+'</div>';
+  }
+  if(s&&s.free_agent===false&&s.agent_count>0){
+    h+='<div class="worker-dead" style="background:#fef3c7;color:#92400e;border-color:#fde68a">All agents are busy. A new job will start as soon as one frees up, or start another agent.</div>';
+  }
+  return h;
 }
-function checkStatus(){fetch("/api/status").then(function(r){return r.json()}).then(function(s){workerAlive=s.worker_alive;isLoggedIn=!!s.logged_in;workerStatus.innerHTML=agentBannerHtml(s);updateSessionUI();if(s.blocking_job_id){activeJobId=s.blocking_job_id;pollJob(s.blocking_job_id)}updBtn()})}
+function jobStatusLabel(st){
+  if(st==="running")return "running";
+  if(st&&st.indexOf("awaiting_")===0)return "waiting for the client\u2019s choice";
+  return st||"busy";
+}
+function checkStatus(){fetch("/api/status").then(function(r){return r.json()}).then(function(s){lastStatusInfo=s;workerAlive=s.worker_alive;isLoggedIn=!!s.logged_in;workerStatus.innerHTML=agentBannerHtml(s);updateSessionUI();updBtn()})}
 function updateSessionUI(){
   var el=$("sessionIndicator");if(!el)return;
   if(isLoggedIn){el.innerHTML='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981"></span> Signed in'}
@@ -236,8 +290,16 @@ function pollJob(id){stepStart=Date.now();clr();elapsedTimer=setInterval(updElap
 function clr(){if(pollingTimer)clearInterval(pollingTimer);if(elapsedTimer)clearInterval(elapsedTimer);pollingTimer=elapsedTimer=null}
 function updElapsed(){var el=$("stepEl");if(el&&stepStart)el.textContent=fmt(Math.round((Date.now()-stepStart)/1000))}
 
+var myJobAgent="";
+function myJobBlockMsg(fallback){
+  // This browser has its own job in flight. Name the agent handling it so the
+  // operator knows whose machine is busy — it does NOT block other designers.
+  if(myJobAgent)return "Your job is running on "+myJobAgent+". Cancel or complete it before starting another.";
+  return fallback;
+}
 function render(job){
   console.log("[render] job:",job);
+  myJobAgent=(job&&job.claimed_by_name)||"";
   try{
   // NOTE: do NOT early-return on !workerAlive. The agent heartbeat can briefly
   // lapse mid-job; returning here skipped the lastStatus/lastStage bookkeeping,
@@ -263,7 +325,8 @@ function render(job){
       if(job.stage!==lastStage)stepStart=Date.now();
       var steps=job.text_image?[0,1,2,3]:[1,2,3];
       var sh='<div class="progress-steps">';steps.forEach(function(s){sh+='<div class="progress-step '+(s<stage?"done":s===stage?"active":"")+'"></div>'});sh+='</div>';
-      statusArea.innerHTML='<div class="progress-box">'+sh+'<div class="progress-label">Step '+stage+' \u2014 '+esc(label)+'</div><div class="progress-bar"><div class="progress-bar-inner"></div></div><div class="progress-elapsed">Elapsed: <span id="stepEl">0:00</span></div><div class="progress-hint">This normally takes 2 to 4 minutes per step</div></div>';
+      var agentTag=job.claimed_by_name?'<div class="progress-agent" style="font-size:.72rem;color:var(--muted);margin-bottom:4px">Picked up by '+esc(job.claimed_by_name)+'</div>':'';
+      statusArea.innerHTML='<div class="progress-box">'+agentTag+sh+'<div class="progress-label">Step '+stage+' \u2014 '+esc(label)+'</div><div class="progress-bar"><div class="progress-bar-inner"></div></div><div class="progress-elapsed">Elapsed: <span id="stepEl">0:00</span></div><div class="progress-hint">This normally takes 2 to 4 minutes per step</div></div>';
       resultArea.innerHTML=renderStages(job)+cancelHtml(job);
       // Ensure exactly one elapsed timer runs, counting from the fixed stepStart.
       if(elapsedTimer)clearInterval(elapsedTimer);
@@ -293,10 +356,10 @@ function render(job){
     else if(job.workflow==="artwork")resultArea.innerHTML=renderArtworkResults(job);
     else if(job.workflow==="custom")resultArea.innerHTML=renderCustomResults(job);
     else resultArea.innerHTML=renderStages(job);
-    activeJobId=null;updBtn();addHist(job);
+    clearActiveJob();updBtn();addHist(job);
   }else if(job.status==="failed"||job.status==="cancelled"){
     clr();var msg=job.status==="cancelled"?"Job cancelled.":"Something went wrong: "+(job.error||"Unknown error");
-    statusArea.innerHTML='<div class="status-box failed">'+esc(msg)+'</div>';resultArea.innerHTML="";activeJobId=null;updBtn();addHist(job);
+    statusArea.innerHTML='<div class="status-box failed">'+esc(msg)+'</div>';resultArea.innerHTML="";clearActiveJob();updBtn();addHist(job);
   }
   lastStatus=job.status;lastStage=job.stage;lastImgKey=imgKey;
   }catch(e){console.error("[render] error:",e);resultArea.innerHTML='<div class="status-box failed">UI rendering error: '+esc(e.message)+'</div>'}
@@ -358,7 +421,7 @@ function doRegenerate(jid){
   fetch("/api/jobs/"+jid+"/regenerate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({template:null})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){stepStart=Date.now();lastStatus="";if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000);if(pauseTimer){clearInterval(pauseTimer);pauseTimer=null}}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';resultArea.querySelectorAll(".choice-btn,.regen-btn").forEach(function(b){b.disabled=false})});
 }
 function doCancelJob(jid){
-  fetch("/api/jobs/"+jid+"/cancel",{method:"POST",headers:{"Content-Type":"application/json"}}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){clr();if(pauseTimer){clearInterval(pauseTimer);pauseTimer=null}statusArea.innerHTML='<div class="status-box failed">Job cancelled.</div>';resultArea.innerHTML="";activeJobId=null;lastStatus="";updBtn()}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+  fetch("/api/jobs/"+jid+"/cancel",{method:"POST",headers:{"Content-Type":"application/json"}}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){clr();if(pauseTimer){clearInterval(pauseTimer);pauseTimer=null}statusArea.innerHTML='<div class="status-box failed">Job cancelled.</div>';resultArea.innerHTML="";clearActiveJob();lastStatus="";updBtn()}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
 }
 function doConfirmText(jid){
   var ta=$("extTxt");if(!ta||!ta.value.trim())return;
@@ -399,7 +462,7 @@ function updMockupBtn(){
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasImg||!hasDetails||blocked;
-  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent="A job is waiting for input. Cancel or complete it first.";else blk.textContent=""}
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is waiting for input. Cancel or complete it first.");else blk.textContent=""}
 }
 function submitMockupJob(){
   var cols=parseInt(($("mCols")||{}).value||"0",10);
@@ -410,7 +473,7 @@ function submitMockupJob(){
   var body={workflow:"mockup",mockup_image:mockupImageFile,extract_mode:mode,grid_cols:cols||4,grid_rows:rows||2,client:$("mcn").value.trim(),task_id:$("mti").value.trim(),text:"",text_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:tplExt?tplExt.value:"",template_regen:""};
   console.log("[submitMockupJob] body:",body);
   $("mGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
-  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){activeJobId=d.job_id;pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("mGenBtn").disabled=false});
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){saveActiveJob(d.job_id);pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("mGenBtn").disabled=false});
 }
 
 // === ARTWORK GENERATION WORKFLOW UI ===
@@ -464,14 +527,14 @@ function updArtworkBtn(){
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasFiles||!hasDetails||blocked;
-  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent="A job is in progress. Cancel or complete it first.";else blk.textContent=""}
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is in progress. Cancel or complete it first.");else blk.textContent=""}
 }
 function submitArtworkJob(){
   var tpl=$("tplArtRegen");
   var body={workflow:"artwork",artwork_files:artworkFiles,client:$("acn").value.trim(),task_id:$("ati").value.trim(),template_regen:tpl?tpl.value:"",text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
   console.log("[submitArtworkJob] artworkFiles:",artworkFiles,"body:",body);
   $("aGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
-  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){activeJobId=d.job_id;pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("aGenBtn").disabled=false});
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){saveActiveJob(d.job_id);pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("aGenBtn").disabled=false});
 }
 
 // === CUSTOM OPERATION WORKFLOW UI ===
@@ -630,7 +693,7 @@ function updCustomBtn(){
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasFile||!hasOps||!hasDetails||blocked;
-  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent="A job is in progress.";else blk.textContent=""}
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is in progress.");else blk.textContent=""}
 }
 function submitCustomJob(){
   console.log("[submitCustomJob] customFile:",customFile,"customOps:",customOps);
@@ -662,7 +725,7 @@ function submitCustomJob(){
   }
   var body={workflow:"custom",artwork_files:[customFile],custom_operations:customOps,custom_prompts:prompts,aspect_dpi:customDpi,halftone_settings:halftone,blackout_settings:blackout,client:$("ccn").value.trim(),task_id:$("cti").value.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
   $("cGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
-  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){activeJobId=d.job_id;pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("cGenBtn").disabled=false});
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){saveActiveJob(d.job_id);pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("cGenBtn").disabled=false});
 }
 
 function doAcceptCrops(jid){
@@ -1348,17 +1411,20 @@ window.openAgentSetup=function(){
 window.closeAgentSetup=function(){var ov=$("agentSetupOverlay");if(ov)ov.style.display="none"};
 function fetchAgentToken(){
   var name=($("asName").value||"").trim();
-  if(!name){$("asTokenWrap").style.display="none";asMsg("Enter a name to get this PC's token.","vm-err");return}
+  // No name (or a failed/empty fetch): never show a blank token field with a
+  // Copy button — hide the token block and prompt for a name instead.
+  if(!name){$("asTokenWrap").style.display="none";asMsg("Enter your name above to get a token","vm-err");return}
   if(name===_asLastName&&$("asTokenWrap").style.display!=="none")return;
   asMsg("Loading token…","");
   fetch("/api/my-agent-token?agent_name="+encodeURIComponent(name)).then(function(r){
     if(!r.ok)return r.json().then(function(d){throw new Error(d.detail||"Failed to get token")});
     return r.json();
   }).then(function(d){
+    if(!d||!d.token){throw new Error("Enter your name above to get a token")}
     _asLastName=name;
     try{localStorage.setItem("agentName",name)}catch(e){}
     $("asServer").value=d.server_url||window.location.origin;
-    $("asToken").value=d.token||"";
+    $("asToken").value=d.token;
     $("asTokenWrap").style.display="block";
     asMsg("Token for \u201c"+d.name+"\u201d ready. Copy it into the agent.","vm-ok");
     loadAgentList();
@@ -1663,6 +1729,7 @@ function ncRenderFeed(){
 }
 
 checkStatus();
+reconnectStoredJob();
 })();
 </script>
 <script src="/static/shell.js"></script>

@@ -272,55 +272,15 @@
       if (userInfo) uo.observe(userInfo, { childList: true, subtree: true, characterData: true });
     }
 
-    // --- Agent setup panel (download + token + three steps) ---
-    var backdrop = document.createElement("div");
-    backdrop.className = "agent-modal-backdrop";
-    backdrop.id = "agentModalBackdrop";
-    backdrop.style.display = "none";
-    backdrop.innerHTML =
-      '<div class="agent-modal" role="dialog" aria-label="Set up the agent">' +
-      '  <button class="agent-modal-close" id="agentModalClose" aria-label="Close">&times;</button>' +
-      '  <h2>Run the agent on your PC</h2>' +
-      '  <p class="agent-modal-sub">Generation runs in a real browser on your machine. Three steps, once:</p>' +
-      '  <ol class="agent-steps">' +
-      '    <li><b>Download &amp; unzip</b> the agent<br><a class="agent-dl-link" href="/api/download/agent">Download ArtworkAgent.zip</a><br><span style="font-size:12px;color:#7a7f8c">Unzip anywhere, then run <b>ArtworkAgent.exe</b> from the unzipped folder.</span></li>' +
-      '    <li><b>Run it</b>, then click <b>Sign in to ChatGPT</b> in its window and log in.</li>' +
-      '    <li><b>Paste your token</b> below into the agent, then click <b>Start</b>.</li>' +
-      '  </ol>' +
-      '  <div class="agent-token-row">' +
-      '    <label>Your token</label>' +
-      '    <div class="agent-token-box"><code id="agentTokenValue">…</code>' +
-      '      <button class="agent-copy-btn" id="agentTokenCopy">Copy</button></div>' +
-      '    <div class="agent-token-hint" id="agentTokenHint"></div>' +
-      '  </div>' +
-      '</div>';
-    document.body.appendChild(backdrop);
-    backdrop.addEventListener("click", function (e) { if (e.target === backdrop) closeAgentPanel(); });
-    document.getElementById("agentModalClose").addEventListener("click", closeAgentPanel);
-    document.getElementById("agentTokenCopy").addEventListener("click", function () {
-      var v = document.getElementById("agentTokenValue").textContent || "";
-      if (navigator.clipboard) navigator.clipboard.writeText(v).then(function () {
-        document.getElementById("agentTokenHint").textContent = "Copied to clipboard.";
-      });
-    });
-
-    var _tokenLoaded = false;
+    // --- Agent setup: there is a SINGLE panel now, the "Agent setup" modal
+    // defined in index.html (window.openAgentSetup). It asks for the designer's
+    // per-machine name, then shows that machine's token, the download link and
+    // the three setup steps. This shell no longer builds its own duplicate
+    // modal (which called /api/my-agent-token with no name and showed a blank
+    // token). All entry points delegate to that one modal.
     function openAgentPanel() {
-      backdrop.style.display = "flex";
-      if (!_tokenLoaded) {
-        fetch("/api/my-agent-token", { headers: { "Accept": "application/json" } })
-          .then(function (r) { return r.ok ? r.json() : null; })
-          .then(function (d) {
-            if (!d) return;
-            document.getElementById("agentTokenValue").textContent = d.token;
-            document.getElementById("agentTokenHint").textContent =
-              "Server URL: " + d.server_url + " (the agent pre-fills this).";
-            _tokenLoaded = true;
-          })
-          .catch(function () {});
-      }
+      if (typeof window.openAgentSetup === "function") window.openAgentSetup();
     }
-    function closeAgentPanel() { backdrop.style.display = "none"; }
     window.openAgentPanel = openAgentPanel;
 
     // Prominent no-agent banner above the columns.
