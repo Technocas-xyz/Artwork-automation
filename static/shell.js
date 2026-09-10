@@ -1,5 +1,5 @@
 /* ============================================================================
-   shell.js — product-shell chrome (sidebar, top bar, breadcrumb, action bar).
+   shell.js — product-shell chrome (sidebar, top bar, action bar).
    VISUAL/STRUCTURAL ADDITION ONLY.
 
    Rules honoured:
@@ -8,7 +8,7 @@
    - The existing <header>, its .wf-tab buttons, and the .columns block are
      MOVED (re-parented) into the new layout — moving a node preserves all its
      event listeners, so the original tab-switching logic keeps working.
-   - Workflow switching is NOT reimplemented: nav + breadcrumb items dispatch a
+   - Workflow switching is NOT reimplemented: sidebar nav items dispatch a
      real .click() on the matching existing .wf-tab. A MutationObserver mirrors
      the real tabs' .active state back into the new UI.
    ============================================================================ */
@@ -61,7 +61,10 @@
     var main = document.createElement("div");
     main.className = "app-main";
 
-    // Top bar (page title + breadcrumb + user)
+    // Top bar: page title + description on the left, agent status + user on the
+    // right. The numbered workflow breadcrumb was removed — the sidebar is the
+    // single place a workflow is chosen, and the numbering wrongly implied the
+    // workflows are sequential steps.
     var topbar = document.createElement("div");
     topbar.className = "app-topbar";
 
@@ -69,10 +72,6 @@
     titleWrap.className = "app-title-wrap";
     titleWrap.innerHTML = '<div class="app-page-title" id="shellPageTitle"></div>' +
       '<div class="app-page-desc" id="shellPageDesc"></div>';
-
-    var breadcrumb = document.createElement("div");
-    breadcrumb.className = "app-breadcrumb";
-    breadcrumb.id = "shellBreadcrumb";
 
     // User block moved visually to the top bar (clone-follow, see below).
     var userSlot = document.createElement("div");
@@ -94,7 +93,6 @@
     dlBtn.addEventListener("click", function () { openAgentPanel(); });
 
     topbar.appendChild(titleWrap);
-    topbar.appendChild(breadcrumb);
     userSlot.appendChild(agentPill);
     userSlot.appendChild(dlBtn);
     topbar.appendChild(userSlot);
@@ -194,32 +192,6 @@
       userSlot.appendChild(userInfo);
     }
 
-    // --- Build the numbered breadcrumb mirroring the real tab order/state ---
-    function buildBreadcrumb() {
-      breadcrumb.innerHTML = "";
-      realTabs.forEach(function (tab, i) {
-        var wf = tab.dataset.wf;
-        var step = document.createElement("button");
-        step.type = "button";
-        step.className = "bc-step";
-        step.dataset.wfBc = wf;
-        step.innerHTML = '<span class="bc-num">' + (i + 1) + '</span>' +
-          '<span class="bc-label">' + tab.textContent.trim() + '</span>';
-        step.addEventListener("click", function () {
-          if (tab.disabled) return;
-          tab.click();
-        });
-        breadcrumb.appendChild(step);
-        if (i < realTabs.length - 1) {
-          var chev = document.createElement("span");
-          chev.className = "bc-chevron";
-          chev.innerHTML = '<i class="ti ti-chevron-right"></i>';
-          breadcrumb.appendChild(chev);
-        }
-      });
-    }
-    buildBreadcrumb();
-
     // --- Mirror active state from the real tabs (source of truth) ---
     function activeIndex() {
       for (var i = 0; i < realTabs.length; i++) {
@@ -231,18 +203,9 @@
       var idx = activeIndex();
       var wf = realTabs[idx] ? realTabs[idx].dataset.wf : "text";
 
-      // Sidebar workflow items
+      // Sidebar workflow items — the single place a workflow is highlighted.
       Object.keys(wfNavItems).forEach(function (k) {
         wfNavItems[k].classList.toggle("active", k === wf);
-      });
-
-      // Breadcrumb: done (<idx) / current (==idx) / upcoming (>idx)
-      var steps = breadcrumb.querySelectorAll(".bc-step");
-      steps.forEach(function (s, i) {
-        s.classList.remove("done", "current", "upcoming");
-        if (i < idx) s.classList.add("done");
-        else if (i === idx) s.classList.add("current");
-        else s.classList.add("upcoming");
       });
 
       // Page title + description
