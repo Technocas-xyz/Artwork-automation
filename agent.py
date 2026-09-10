@@ -41,7 +41,7 @@ from config.workflows import (
 from src.aspect import image_info, fit_to_ratio
 from src.browser import launch_context, is_logged_in
 from src.generator import (
-    generate, open_chat, send_turn, send_text_turn,
+    generate, open_chat, rename_chat, send_turn, send_text_turn,
     get_last_text_reply, get_boxes, extract_artwork_images,
 )
 from src.postprocess import (
@@ -365,6 +365,36 @@ def _track_end(job: dict) -> None:
         job["_step_start"] = None
 
 
+def _open_chat_for(page: Any, job: dict) -> None:
+    """Open the chat in this job's per-workflow ChatGPT project.
+
+    A project link that fails to load falls back to plain chatgpt.com inside
+    open_chat(); when that happens we record a warning on the job (surfaced in
+    the web UI) rather than failing the run."""
+    result = open_chat(page, job.get("workflow"))
+    if isinstance(result, dict) and result.get("fell_back") and result.get("warning"):
+        report_warning(result["warning"])
+
+
+def _rename_chat_once(page: Any, job: dict) -> None:
+    """Name the chat "<client> - <task_id>" once, best-effort, for findability.
+
+    Guarded so it runs a single time per job and never raises — renaming is
+    cosmetic and must not fail the job."""
+    if job.get("_chat_renamed"):
+        return
+    job["_chat_renamed"] = True
+    client = (job.get("client") or "").strip()
+    task_id = (job.get("task_id") or "").strip()
+    title = " - ".join([p for p in (client, task_id) if p])
+    if not title:
+        return
+    try:
+        rename_chat(page, title)
+    except Exception as exc:
+        print(f"[agent] chat rename skipped: {exc}")
+
+
 # ===========================================================================
 # WORKFLOW FUNCTIONS — copied verbatim from the old app.py in-process worker.
 # Do not edit their logic. They read/write the module-global INPUT_DIR /
@@ -375,7 +405,7 @@ def _run_legacy_job(page: Any, job: dict[str, Any]) -> None:
     try:
         prompt = build_prompt(options=job["options"], params=job["params"], custom_note=job["custom_note"])
         image_paths = [str(INPUT_DIR / f) for f in job["files"]]
-        images = generate(page=page, image_paths=image_paths, prompt=prompt, run_id=job["id"])
+        images = generate(page=page, image_paths=image_paths, prompt=prompt, run_id=job["id"], workflow=job.get("workflow"))
         originals = list(images)
         processed = [remove_white_background(d) if is_opaque_white_bg(d) else d for d in images]
         output_names = []
@@ -416,7 +446,7 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
     job["vault_folder"] = str(run_dir)
 
     _track_start(job)
-    open_chat(page)
+    _open_chat_for(page, job)
     _track_end(job)
 
     # --- TURN 0 (optional): Extract text from image ---
@@ -425,6 +455,7 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
         job["stage_label"] = "Reading text from image"
         prompt0 = TEXT_TURN_0
         extracted_text = send_text_turn(page, prompt=prompt0, image_paths=[str(INPUT_DIR / text_image)], run_id=f"{job_id}_t0")
+        _rename_chat_once(page, job)
         job.setdefault("prompts", []).append(prompt0)
         job["extracted_text"] = extracted_text
         job["status"] = "awaiting_text_confirmation"
@@ -447,6 +478,7 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
         _track_start(job)
         images1 = send_turn(page, prompt=prompt1, image_paths=None, run_id=f"{job_id}_t1_{attempt}")
         _track_end(job)
+        _rename_chat_once(page, job)
 
         if images1:
             suffix = f"_attempt{attempt}" if attempt > 1 else ""
@@ -596,13 +628,14 @@ def _run_mockup_workflow(page: Any, job: dict[str, Any]) -> None:
     job["stage_label"] = "Generating numbered contact sheet..."
 
     _track_start(job)
-    open_chat(page)
+    _open_chat_for(page, job)
 
     extract_tpl = job.get("template_extract") or EXTRACT_CONTACT_SHEET
     job.setdefault("prompts", []).append(extract_tpl)
 
     images1 = send_turn(page, prompt=extract_tpl, image_paths=[str(image_path)], run_id=f"{job_id}_contact")
     _track_end(job)
+    _rename_chat_once(page, job)
 
     if images1:
         contact_output = f"{job_id}_contact_sheet.png"
@@ -687,7 +720,7 @@ def _run_artwork_workflow(page: Any, job: dict[str, Any]) -> None:
     job["stage_label"] = f"Regenerating {total} artwork(s)"
 
     _track_start(job)
-    open_chat(page)
+    _open_chat_for(page, job)
     _track_end(job)
 
     final_names: list[str] = []
@@ -706,6 +739,7 @@ def _run_artwork_workflow(page: Any, job: dict[str, Any]) -> None:
                 run_id=f"{job_id}_art_{i}",
             )
             _track_end(job)
+            _rename_chat_once(page, job)
 
             if result_images:
                 final_data = result_images[0]
@@ -776,7 +810,7 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
     }
 
     _track_start(job)
-    open_chat(page)
+    _open_chat_for(page, job)
     _track_end(job)
 
     # The current reference image path — starts as the uploaded file, updated after each step
@@ -809,6 +843,7 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                 _track_start(job)
                 detected_text = send_text_turn(page, prompt=detect_prompt, image_paths=[current_image_path], run_id=f"{job_id}_detect_obj")
                 _track_end(job)
+                _rename_chat_once(page, job)
             except Exception as exc:
                 _track_end(job)
                 errors.append(f"Step {i} ({label}) detect: {exc}")
@@ -888,6 +923,7 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                 _track_start(job)
                 baseline_images = send_turn(page, prompt=baseline_prompt, image_paths=[current_image_path], run_id=f"{job_id}_aspect_baseline")
                 _track_end(job)
+                _rename_chat_once(page, job)
             except Exception as exc:
                 _track_end(job)
                 errors.append(f"Step {i} ({label}) baseline: {exc}")
@@ -1052,6 +1088,7 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                 _track_start(job)
                 result_images = send_turn(page, prompt=prompt, image_paths=[current_image_path], run_id=f"{job_id}_{op}_{i}")
                 _track_end(job)
+                _rename_chat_once(page, job)
             except Exception as exc:
                 _track_end(job)
                 errors.append(f"Step {i} ({label}): {exc}")

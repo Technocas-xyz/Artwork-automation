@@ -16,12 +16,14 @@ from pathlib import Path
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
 
 from config.selectors import (
+    CHAT_TITLE_INPUT,
     COMPOSER_THUMBNAIL,
     CONVERSATION_TURN,
     FILE_INPUT,
     GENERATED_IMG,
     IMAGE_LOADER,
-    PROJECT_URL,
+    PROJECT_URLS,
+    PROJECT_URL_DEFAULT,
     PROMPT_BOX,
     SEND_BUTTON,
     STOP_BUTTON,
@@ -37,33 +39,114 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def open_chat(page: Page) -> None:
-    """Navigate to PROJECT_URL and wait for the prompt box to be ready.
+def project_url_for(workflow: str | None) -> str:
+    """Resolve the ChatGPT project URL for a workflow.
 
-    Retries up to 3 times with a 3-second pause between attempts.
-    Timeout raised to 90s per attempt. Only fails after all 3 exhausted.
-    """
+    Falls back to PROJECT_URL_DEFAULT (a plain chat) when the workflow key is
+    unknown or its configured URL is empty."""
+    url = (PROJECT_URLS.get(workflow or "") or "").strip()
+    return url or PROJECT_URL_DEFAULT
+
+
+def _project_id(url: str) -> str | None:
+    """Extract the project id (the `g-p-<id>` portion) from a project URL.
+
+    Verification matches on this id only, NOT the whole URL, because ChatGPT may
+    later append a name slug (e.g. .../g-p-<id>-dtf-artwork/project). The id is
+    the alphanumeric run immediately after `g-p-`, stopping before any `-slug`,
+    `/`, or `?`, so the check keeps working when a slug appears."""
+    m = re.search(r"g-p-([0-9a-zA-Z]+)", url)
+    return m.group(1) if m else None
+
+
+def _try_open_url(page: Page, url: str) -> None:
+    """Navigate to `url` and wait for the prompt box, retrying up to 3 times.
+
+    When `url` is a project URL, verifies we actually landed on THAT project by
+    matching the project id (tolerant of a name slug appearing later). A plain
+    chatgpt.com target has no id to check. Raises GenerationTimeoutError after
+    all attempts fail."""
+    project_id = _project_id(url)
     last_error: Exception | None = None
     for attempt in range(1, 4):
         try:
-            page.goto(PROJECT_URL, wait_until="domcontentloaded", timeout=90_000)
+            page.goto(url, wait_until="domcontentloaded", timeout=90_000)
             page.wait_for_selector(PROMPT_BOX, state="visible", timeout=30_000)
 
-            # Verify we actually landed on the project URL
-            if "/g/g-p-" not in page.url:
-                page.goto(PROJECT_URL, wait_until="domcontentloaded", timeout=90_000)
+            # Verify we landed on the CHOSEN project by its id. Match on the id
+            # only, so a slug ChatGPT adds later (…/g-p-<id>-dtf-…/project) still
+            # counts as the right project.
+            if project_id and project_id not in page.url:
+                page.goto(url, wait_until="domcontentloaded", timeout=90_000)
                 page.wait_for_selector(PROMPT_BOX, state="visible", timeout=30_000)
 
             return  # Success
         except Exception as exc:
             last_error = exc
-            logger.info("open_chat attempt %d/3 failed: %s", attempt, exc)
+            logger.info("open_chat attempt %d/3 for %s failed: %s", attempt, url, exc)
             if attempt < 3:
                 page.wait_for_timeout(3000)
 
     raise GenerationTimeoutError(
-        f"open_chat failed after 3 attempts. Last error: {last_error}"
+        f"open_chat failed after 3 attempts for {url}. Last error: {last_error}"
     )
+
+
+def open_chat(page: Page, workflow: str | None = None) -> dict:
+    """Navigate to the workflow's ChatGPT project and wait for readiness.
+
+    The URL is chosen per workflow from PROJECT_URLS, falling back to
+    PROJECT_URL_DEFAULT when the key is missing or its URL is empty. Keeps the
+    existing retry + URL verification, verifying against the CHOSEN url.
+
+    If a project URL is configured but fails to load after the retries, this
+    falls back to plain chatgpt.com rather than failing the whole run — a broken
+    project link must not stop production. The return dict tells the caller what
+    happened so it can record a warning:
+
+        {"url": <url actually opened>, "requested_url": <workflow url>,
+         "fell_back": bool, "warning": <str|None>}
+    """
+    requested = project_url_for(workflow)
+    logger.info("open_chat: workflow=%r -> %s", workflow, requested)
+    try:
+        _try_open_url(page, requested)
+        return {"url": requested, "requested_url": requested,
+                "fell_back": False, "warning": None}
+    except Exception as exc:
+        # Only the DEFAULT is left to try. If we were already on the default,
+        # there is nothing to fall back to — re-raise so the job fails clearly.
+        if requested == PROJECT_URL_DEFAULT:
+            raise
+        warning = (f"Project for workflow '{workflow}' ({requested}) failed to "
+                   f"load ({exc}); fell back to {PROJECT_URL_DEFAULT}.")
+        logger.info(warning)
+        _try_open_url(page, PROJECT_URL_DEFAULT)
+        return {"url": PROJECT_URL_DEFAULT, "requested_url": requested,
+                "fell_back": True, "warning": warning}
+
+
+def rename_chat(page: Page, title: str) -> bool:
+    """Best-effort: rename the current chat to `title` so it is findable later.
+
+    Cosmetic only — if ChatGPT's rename control is not reachable (markup changed,
+    element missing), this returns False silently and never raises, so a job is
+    never failed for a naming step."""
+    if not title:
+        return False
+    try:
+        el = page.query_selector(CHAT_TITLE_INPUT)
+        if not el:
+            logger.info("rename_chat: title control not found; skipping rename to %r", title)
+            return False
+        el.click()
+        el.fill(title)
+        page.keyboard.press("Enter")
+        logger.info("rename_chat: renamed chat to %r", title)
+        return True
+    except Exception as exc:
+        logger.info("rename_chat: skipped (%s)", exc)
+        return False
 
 
 def send_text_turn(
@@ -200,12 +283,14 @@ def generate(
     image_paths: list[str],
     prompt: str,
     run_id: str,
+    workflow: str | None = None,
 ) -> list[bytes]:
     """Single-turn generation — legacy wrapper around open_chat + send_turn.
 
-    Signature unchanged from original implementation.
+    `workflow` is optional so existing callers keep working; when given it
+    routes to that workflow's ChatGPT project.
     """
-    open_chat(page)
+    open_chat(page, workflow)
     return send_turn(page, prompt=prompt, image_paths=image_paths, run_id=run_id)
 
 
