@@ -42,6 +42,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .prompt-toggle{font-size:.72rem;color:var(--muted);cursor:pointer;margin-top:4px;user-select:none}.prompt-toggle:hover{color:var(--accent)}.prompt-content{display:none;margin-top:4px;padding:7px 9px;background:#f9fafb;border:1px solid var(--border);border-radius:6px;font-family:Consolas,Monaco,monospace;font-size:.7rem;white-space:pre-wrap;max-height:110px;overflow-y:auto;color:var(--muted)}.prompt-content.open{display:block}
 .history-section{border-top:1px solid var(--border);padding-top:12px;margin-top:12px}.history-section h3{font-size:.8rem;color:var(--muted);margin-bottom:6px}.history-item{padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:.76rem;cursor:pointer}.history-item:hover{border-color:var(--accent)}.history-item .hi-label{font-weight:600}.history-detail{display:none;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)}.history-detail.open{display:block}.history-detail img{max-width:100%;max-height:90px;border-radius:6px;margin-right:4px;margin-bottom:3px;border:1px solid var(--border)}
 .coming-soon{text-align:center;color:var(--muted);padding:40px 0;font-size:.88rem}
+.hd-thumb{display:inline-block;vertical-align:top;text-align:center;margin-right:6px;margin-bottom:4px}.hd-thumb-label{display:block;font-size:.64rem;color:var(--muted);margin-bottom:2px}
 /* --- Nextcloud vault browser --- */
 .nc-banner{padding:9px 11px;border-radius:8px;font-size:.76rem;margin-bottom:10px;line-height:1.35}.nc-banner.ok{background:#f0fdf4;border:1px solid #bbf7d0;color:#166534}.nc-banner.warn{background:#fffbeb;border:1px solid #fde68a;color:#92400e}.nc-banner.bad{background:#fee2e2;border:1px solid #fecaca;color:#991b1b}
 .nc-live{display:inline-flex;align-items:center;gap:5px;font-weight:600}.nc-dot{width:8px;height:8px;border-radius:50%;background:#10b981;animation:pulse 1.6s ease-in-out infinite;flex:none}.nc-dot.off{background:#f59e0b;animation:none}.nc-dot.bad{background:#dc2626;animation:none}
@@ -187,6 +188,8 @@ resultArea.addEventListener("click",function(e){
   else if(a==="submit-ratio") doSubmitRatio(jid);
   else if(a==="pick-ratio"){window.setRatioInputs(t.dataset.ratio)}
   else if(a==="toggle"){var tgt=$(t.dataset.target);if(tgt){tgt.classList.toggle("open");t.classList.toggle("open")}}
+  else if(a==="copy-text"){copyElementText(t.dataset.target,t)}
+  else if(a==="load-log"){toggleAgentLog(t,t.dataset.job,t.dataset.target)}
   else if(a==="open-folder") fetch("/api/open-folder",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:t.dataset.path})});
   else if(a==="save-vault") openVaultSave(t.dataset.vaultName,t.dataset.vaultClient||"",t.dataset.vaultTask||"");
   }catch(err){console.error("[delegation]",err)}
@@ -298,7 +301,6 @@ function myJobBlockMsg(fallback){
   return fallback;
 }
 function render(job){
-  console.log("[render] job:",job);
   myJobAgent=(job&&job.claimed_by_name)||"";
   try{
   // NOTE: do NOT early-return on !workerAlive. The agent heartbeat can briefly
@@ -312,8 +314,20 @@ function render(job){
   // NOT depend on stage_images, which the agent re-echoes every 2s and whose
   // JSON key order can jitter — using the full `changed` (which includes
   // imgKey) here re-rendered the panel every poll and wiped the operator's
-  // buttons. Gate the pause panels on status+stage only.
+  // buttons.
+  //
+  // Two guards for the pause panels:
+  //  - statusChanged (status OR stage): for panels that multiplex stages within
+  //    one status (Text's awaiting_selection covers stage 1 -> stage 2).
+  //  - statusOnlyChanged (status only): for single-shot pauses that never change
+  //    stage while paused (number/multi/object/ratio/crop/text-confirm). The
+  //    agent re-echoes `stage` every 2s and it can jitter, so keying these on
+  //    stage was re-rendering every poll and wiping the freshly built controls.
   var statusChanged=job.status!==lastStatus||job.stage!==lastStage;
+  var statusOnlyChanged=job.status!==lastStatus;
+  // Log ONLY when something actually changed, so a paused job stops spamming
+  // [render] every 2s and a real transition is easy to spot.
+  if(changed)console.log("[render] job:",job.id,job.status,"stage",job.stage);
 
   if(job.status==="running"||job.status==="queued"){
     var stage=job.stage||0,label=job.stage_label||"Working...";
@@ -336,17 +350,17 @@ function render(job){
   }else if(job.status==="awaiting_selection"){
     if(statusChanged){clearInterval(elapsedTimer);elapsedTimer=null;pauseStart=job.paused_at?job.paused_at*1000:Date.now();statusArea.innerHTML="";resultArea.innerHTML=renderAwaiting(job);startPauseTimer()}
   }else if(job.status==="awaiting_text_confirmation"){
-    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Text extracted from image. Check and confirm:</div>';resultArea.innerHTML='<div class="text-confirm-area"><textarea id="extTxt">'+esc(job.extracted_text||"")+'</textarea><button class="text-confirm-btn" data-action="confirm-text" data-job="'+job.id+'">Confirm and continue</button></div>'+cancelHtml(job)}
+    if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Text extracted from image. Check and confirm:</div>';resultArea.innerHTML='<div class="text-confirm-area"><textarea id="extTxt">'+esc(job.extracted_text||"")+'</textarea><button class="text-confirm-btn" data-action="confirm-text" data-job="'+job.id+'">Confirm and continue</button></div>'+cancelHtml(job)}
   }else if(job.status==="awaiting_crop_review"){
-    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Review the extracted designs below.</div>';resultArea.innerHTML=renderCropReview(job);maybeInitBoxEditor(job);startPauseTimer()}
+    if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Review the extracted designs below.</div>';resultArea.innerHTML=renderCropReview(job);maybeInitBoxEditor(job);startPauseTimer()}
   }else if(job.status==="awaiting_multi_selection"){
-    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Select which artworks the client approved for regeneration.</div>';resultArea.innerHTML=renderMultiSelect(job);startPauseTimer()}
+    if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Select which artworks the client approved for regeneration.</div>';resultArea.innerHTML=renderMultiSelect(job);startPauseTimer()}
   }else if(job.status==="awaiting_number_selection"){
-    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML="";resultArea.innerHTML=renderNumberSelection(job);startPauseTimer()}
+    if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML="";resultArea.innerHTML=renderNumberSelection(job);startPauseTimer()}
   }else if(job.status==="awaiting_object_selection"){
-    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Assign colours to the objects below.</div>';resultArea.innerHTML=renderObjectSelection(job);startPauseTimer()}
+    if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Assign colours to the objects below.</div>';resultArea.innerHTML=renderObjectSelection(job);startPauseTimer()}
   }else if(job.status==="awaiting_ratio_selection"){
-    if(statusChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Choose a target aspect ratio. Padding is added with transparency \u2014 the design is never cropped or stretched.</div>';resultArea.innerHTML=renderRatioSelection(job);startPauseTimer()}
+    if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Choose a target aspect ratio. Padding is added with transparency \u2014 the design is never cropped or stretched.</div>';resultArea.innerHTML=renderRatioSelection(job);startPauseTimer()}
   }else if(job.status==="done"||job.status==="done_with_errors"){
     clr();var activeT=job.active_time?Math.round(job.active_time):0;
     var doneMsg=job.status==="done_with_errors"?'Done with some errors ('+fmt(activeT)+' processing time)':'All done! ('+fmt(activeT)+' processing time)';
@@ -1358,6 +1372,32 @@ function renderArtworkResults(job){
 }
 function fmt(s){var m=Math.floor(s/60),sec=s%60;return m>0?m+":"+String(sec).padStart(2,"0"):"0:"+String(sec).padStart(2,"0")}
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
+// Turn a stage_images key into a readable label: "contact_sheet" -> "Contact
+// sheet", "stage1" -> "Stage 1", "final" -> "Final".
+var _loggedStageKeys={};
+function stageKeyLabel(key){
+  var s=String(key).replace(/_/g," ").replace(/(\d+)/," $1").trim();
+  return s.charAt(0).toUpperCase()+s.slice(1);
+}
+// Build history-detail thumbnails from the job's ACTUAL image keys. Every
+// stage_images key is served by /api/jobs/{id}/stage/{key}.png; mockup finals
+// live in final_names and are served by /api/output/. We never emit a request
+// for a key the job does not have.
+function stageThumbs(job,si){
+  si=si||job.stage_images||{};
+  var keys=Object.keys(si);
+  // Log the available keys once per job so a key mismatch is obvious.
+  if(!_loggedStageKeys[job.id]){_loggedStageKeys[job.id]=1;console.log("[render] job "+job.id+" stage_images keys:",keys,"final_names:",(job.final_names||[]).length)}
+  var det="";
+  keys.forEach(function(k){
+    det+='<div class="hd-thumb"><span class="hd-thumb-label">'+esc(stageKeyLabel(k))+'</span><img src="/api/jobs/'+job.id+'/stage/'+encodeURIComponent(k)+'.png" alt="'+esc(stageKeyLabel(k))+'"></div>';
+  });
+  // Mockup (and any) per-file finals are served from ./output by name.
+  (job.final_names||[]).forEach(function(fn){
+    det+='<div class="hd-thumb"><span class="hd-thumb-label">Final</span><img src="/api/output/'+encodeURIComponent(fn)+'" alt="Final"></div>';
+  });
+  return det;
+}
 function addHist(job){historyItems.unshift(job);historySection.style.display="block";renderHist()}
 function renderHist(){
   historyList.innerHTML="";
@@ -1366,7 +1406,11 @@ function renderHist(){
     var st=job.status==="done"?"\u2705 Done ("+fmt(el)+")":job.status==="cancelled"?"\u26d4 Cancelled":"\u274c Failed";
     var desc=job.text?'"'+esc(job.text)+'"':job.text_image||"";
     var si=job.stage_images||{};var did="hd_"+i;
-    var det="";if(si.stage1)det+='<img src="/api/jobs/'+job.id+'/stage/stage1.png">';if(si.stage2)det+='<img src="/api/jobs/'+job.id+'/stage/stage2.png">';if(si.final)det+='<img src="/api/jobs/'+job.id+'/stage/final.png">';
+    // Render from the job's ACTUAL stage_images keys — never hardcode
+    // stage1/stage2/final (those are Text-workflow keys; a mockup job stores a
+    // contact_sheet and its finals elsewhere). Requesting a key the job does
+    // not have is what caused the 404s on stage1.png / stage2.png.
+    var det=stageThumbs(job,si);
     var div=document.createElement("div");div.className="history-item";
     div.innerHTML='<span class="hi-label">'+st+'</span> \u2014 '+esc(job.client)+' / '+esc(job.task_id)+' \u2014 '+desc+'<div class="history-detail" id="'+did+'">'+det+'</div>';
     div.onclick=function(){$(did).classList.toggle("open")};

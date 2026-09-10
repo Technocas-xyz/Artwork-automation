@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 import time
 import shutil
 import tempfile
@@ -109,6 +110,75 @@ _current_job: dict | None = None
 _current_agent_id: str | None = None  # so every progress post carries the agent id (heartbeat)
 _sync_stop = threading.Event()
 
+# --- Per-job console capture -------------------------------------------------
+# Everything the agent prints while a job runs is buffered here and shipped to
+# the server on each progress sync, so a designer can read the log in the web UI
+# without opening the agent terminal. Bounded so a long job stays memory-safe.
+_LOG_BUFFER_MAX = 400
+_log_lock = threading.Lock()
+_log_buffer: list[str] = []      # lines not yet sent to the server
+_warn_buffer: list[str] = []     # non-fatal warnings not yet sent
+
+
+class _Tee:
+    """Wrap a stream so every line printed is also captured for the current job."""
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, s):
+        try:
+            self._stream.write(s)
+        except Exception:
+            pass
+        if s and _current_job_id:
+            for line in str(s).splitlines():
+                if line.strip() == "":
+                    continue
+                with _log_lock:
+                    _log_buffer.append(line)
+                    if len(_log_buffer) > _LOG_BUFFER_MAX:
+                        del _log_buffer[:len(_log_buffer) - _LOG_BUFFER_MAX]
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except Exception:
+            pass
+
+
+# Install the tee once, at import, so all print() output is captured.
+sys.stdout = _Tee(sys.stdout)
+sys.stderr = _Tee(sys.stderr)
+
+
+def _drain_log() -> list[str]:
+    """Return and clear the buffered console lines pending upload."""
+    with _log_lock:
+        lines = _log_buffer[:]
+        _log_buffer.clear()
+        return lines
+
+
+def _drain_warnings() -> list[str]:
+    with _log_lock:
+        w = _warn_buffer[:]
+        _warn_buffer.clear()
+        return w
+
+
+def report_warning(message: str) -> None:
+    """Record a non-fatal problem (a retried nav, a recovered timeout) so the UI
+    shows what nearly failed. Also prints it (and thus captures it in the log)."""
+    print(f"[warning] {message}")
+    with _log_lock:
+        _warn_buffer.append(str(message))
+
+
+def _reset_job_buffers() -> None:
+    with _log_lock:
+        _log_buffer.clear()
+        _warn_buffer.clear()
+
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
@@ -171,6 +241,9 @@ def _sync_job() -> None:
             "logged_in": True,
             # Slim blob — agent-owned fields only, never status/awaiting_input.
             "job": _agent_job_blob(_current_job, include_status=False),
+            # Console output + warnings since the last sync, for the web UI log.
+            "log_lines": _drain_log(),
+            "warnings": _drain_warnings(),
         }
         r = _post(f"/api/agent/job/{_current_job_id}/progress", json=payload)
         if r.ok and r.json().get("cancelled"):
@@ -178,7 +251,9 @@ def _sync_job() -> None:
     except _CancelledError:
         raise
     except Exception as exc:
-        print(f"[agent] sync failed (will retry): {exc}")
+        # Non-fatal: the next sync will retry. Surface it as a warning so the UI
+        # shows a hiccup even though the job recovered.
+        report_warning(f"progress sync failed, will retry: {exc}")
 
 
 def _sync_loop() -> None:
@@ -259,7 +334,7 @@ def _wait_for_resume(job_id: str) -> None:
         except _CancelledError:
             raise
         except Exception as exc:
-            print(f"[agent] paused-input poll failed (retry): {exc}")
+            report_warning(f"paused-input poll failed, will retry: {exc}")
             time.sleep(PAUSE_POLL_INTERVAL)
             continue
 
@@ -1118,6 +1193,7 @@ def _handle_claimed_job(page: Any, claim: dict) -> None:
     sync_thread = threading.Thread(target=_sync_loop, daemon=True)
     sync_thread.start()
 
+    _reset_job_buffers()
     print(f"[agent] running job {job_id} ({job.get('workflow')})")
     try:
         _run_job(page, job)
@@ -1125,14 +1201,14 @@ def _handle_claimed_job(page: Any, claim: dict) -> None:
         print(f"[agent] job {job_id} cancelled by operator")
         job["status"] = "cancelled"
     except Exception as exc:
-        traceback.print_exc()
+        # Capture the FULL traceback (not just str(exc)) plus which step failed,
+        # and post it so the failure is fully visible in the web UI.
+        tb = traceback.format_exc()
+        print(tb)
         job["status"] = "failed"
         job["error"] = str(exc)
         job["finished_at"] = time.time()
-        try:
-            _post(f"/api/agent/job/{job_id}/error", json={"message": str(exc)})
-        except Exception:
-            pass
+        _report_error(job_id, job, exc, tb)
     finally:
         _sync_stop.set()
         sync_thread.join(timeout=5)
@@ -1143,17 +1219,67 @@ def _handle_claimed_job(page: Any, claim: dict) -> None:
             print(f"[agent] output upload failed: {exc}")
         try:
             # Final post carries the TERMINAL status (done/failed/...) — the
-            # server accepts status only when it is terminal.
+            # server accepts status only when it is terminal. Flush any last
+            # console output so the tail of the log reaches the UI.
             _post(f"/api/agent/job/{job_id}/progress", json={
                 "agent_id": _current_agent_id,
                 "stage": job.get("stage"), "stage_label": job.get("stage_label"),
                 "active_time": job.get("active_time"), "logged_in": True,
                 "job": _agent_job_blob(job, include_status=True),
+                "log_lines": _drain_log(),
+                "warnings": _drain_warnings(),
             })
         except Exception as exc:
             print(f"[agent] final sync failed: {exc}")
         _current_job_id = None
         _current_job = None
+
+
+def _find_error_screenshot(job_id: str):
+    """Newest logs/{job_id}*_error.png the workflow saved for this failure, if any."""
+    try:
+        logs = Path("logs")
+        shots = sorted(logs.glob(f"{job_id}*_error.png"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        return shots[0] if shots else None
+    except Exception:
+        return None
+
+
+def _report_error(job_id: str, job: dict, exc: Exception, tb: str) -> None:
+    """Post rich failure diagnostics (+ screenshot when present) to the server."""
+    fields = {
+        "message": str(exc),
+        "exc_type": type(exc).__name__,
+        "traceback": tb,
+        "step_name": job.get("stage_label") or f"stage {job.get('stage', '?')}",
+        "agent_name": AGENT_NAME,
+        "timestamp": str(time.time()),
+        "session_expired": "true" if isinstance(exc, _session_expired_types()) else "false",
+    }
+    # Include the last of the captured console log inline with the error too.
+    shot = _find_error_screenshot(job_id)
+    try:
+        if shot is not None:
+            with open(shot, "rb") as fh:
+                _post(f"/api/agent/job/{job_id}/error",
+                      data=fields,
+                      files=[("screenshot", (shot.name, fh, "image/png"))])
+        else:
+            _post(f"/api/agent/job/{job_id}/error", data=fields)
+    except Exception as post_exc:
+        print(f"[agent] failed to report error to server: {post_exc}")
+
+
+def _session_expired_types():
+    """Exception types that mean the ChatGPT session expired, if importable."""
+    types = []
+    try:
+        from src.browser import SessionExpiredError
+        types.append(SessionExpiredError)
+    except Exception:
+        pass
+    return tuple(types) or (type(None),)
 
 
 def open_browser_context():

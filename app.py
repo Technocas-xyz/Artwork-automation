@@ -89,6 +89,25 @@ OUTPUT_DIR = Path("./output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOADS_DIR = Path("./downloads")
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR = Path("./logs")
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Per-job agent console log is kept in memory, capped so a long or chatty job
+# cannot grow the process without bound.
+AGENT_LOG_MAX_LINES = 400
+
+
+def _append_agent_log(job: dict, lines: list[str]) -> None:
+    """Append agent console lines to the job's bounded log buffer."""
+    if not lines:
+        return
+    buf = job.setdefault("agent_log", [])
+    for ln in lines:
+        if ln is None:
+            continue
+        buf.append(str(ln))
+    if len(buf) > AGENT_LOG_MAX_LINES:
+        del buf[:len(buf) - AGENT_LOG_MAX_LINES]
 # The agent is now a one-dir build shipped as a ZIP (one-file cannot extract
 # the large bundled Chromium at runtime). Kept .exe as a fallback name.
 AGENT_ZIP_NAME = "ArtworkAgent.zip"
@@ -262,6 +281,12 @@ class AgentProgressRequest(BaseModel):
     logged_in: bool | None = None
     # The agent posts the full job dict so the operator UI reflects live state.
     job: dict | None = None
+    # New console log lines produced on the agent since the last sync, so the UI
+    # can show what happened without the designer opening the agent terminal.
+    log_lines: list[str] | None = None
+    # Non-fatal problems that recovered (a retried navigation, a timeout that
+    # was survived). Surfaced in the UI so testing shows what nearly failed.
+    warnings: list[str] | None = None
     # The agent announces it has entered an operator pause. The server applies
     # this ONLY when the job is currently "running" (running -> awaiting_*), so
     # it can't override an already-answered/terminal job. Also carries the pause
@@ -274,6 +299,13 @@ class AgentErrorRequest(BaseModel):
     message: str
     step: int | None = None
     session_expired: bool = False
+    # Rich diagnostics so a failure can be understood from the web UI alone.
+    exc_type: str | None = None       # e.g. "GenerationTimeoutError"
+    traceback: str | None = None      # full traceback.format_exc()
+    step_name: str | None = None      # workflow step label that failed
+    agent_name: str | None = None     # which designer's PC hit it
+    timestamp: float | None = None    # epoch seconds on the agent
+    warning: bool = False             # True = non-fatal (recovered), not a failure
 
 
 class NextcloudImportRequest(BaseModel):
@@ -855,6 +887,37 @@ def list_jobs():
     return sorted([{k: v for k, v in j.items() if not k.startswith("_")} for j in jobs.values()], key=lambda j: j["created_at"], reverse=True)
 
 
+@app.get("/api/jobs/{job_id}/logs")
+def get_job_logs(job_id: str):
+    """Return the agent's captured console log, warnings and error details for a
+    job, so a designer can inspect what happened from the browser."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return {
+        "log": job.get("agent_log", []),
+        "warnings": job.get("warnings", []),
+        "error_details": job.get("error_details", []),
+        "error_screenshots": job.get("error_screenshots", []),
+    }
+
+
+@app.get("/api/jobs/{job_id}/error-screenshot/{name}")
+def get_error_screenshot(job_id: str, name: str):
+    """Serve a failure screenshot the agent uploaded for this job (from logs/)."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    safe = Path(name).name
+    # Only serve screenshots this job actually recorded — no arbitrary reads.
+    if safe not in job.get("error_screenshots", []):
+        raise HTTPException(status_code=404, detail="Screenshot not found for this job.")
+    path = LOGS_DIR / safe
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Screenshot file missing.")
+    return FileResponse(str(path), media_type="image/png", filename=safe)
+
+
 @app.get("/api/output/{name}")
 def serve_output(name: str):
     path = OUTPUT_DIR / name
@@ -1167,6 +1230,17 @@ def agent_progress(job_id: str, req: AgentProgressRequest, request: Request):
     job["last_progress_at"] = time.time()
     if req.job is not None:
         _merge_agent_job(job, req.job)
+    # Console output + non-fatal warnings from the agent, so the UI can show
+    # what happened (and what nearly failed) without the agent terminal.
+    if req.log_lines:
+        _append_agent_log(job, req.log_lines)
+    if req.warnings:
+        wbuf = job.setdefault("warnings", [])
+        for w in req.warnings:
+            entry = {"message": str(w), "timestamp": time.time(),
+                     "stage_label": job.get("stage_label", "")}
+            wbuf.append(entry)
+            _append_agent_log(job, [f"[warning] {w}"])
     # Agent announces it has entered an operator pause. Apply ONLY when the job
     # is currently "running" AND the operator hasn't already answered a pause at
     # this stage — so a duplicate/stale announce can't re-open a resolved pause.
@@ -1254,22 +1328,80 @@ def _recompute_aspect_similarity(job: dict) -> None:
 
 
 @app.post("/api/agent/job/{job_id}/error")
-def agent_error(job_id: str, req: AgentErrorRequest, request: Request):
+async def agent_error(job_id: str, request: Request):
+    """Record a failure (or a non-fatal warning) with full diagnostics.
+
+    Accepts multipart/form-data so a failure screenshot can ride along with the
+    JSON detail fields. Falls back to a plain JSON body when no file is sent.
+    Everything is stored on the job so the web UI can show the message plainly
+    plus a collapsible technical view — the designer never needs the terminal.
+    """
     _require_agent(request)
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
-    if job.get("status") != "cancelled":
+
+    ctype = request.headers.get("content-type", "")
+    fields: dict[str, Any] = {}
+    screenshot_name = None
+    if ctype.startswith("multipart/form-data"):
+        form = await request.form()
+        for key, value in form.multi_items():
+            if hasattr(value, "filename") and value.filename:
+                data = await value.read()
+                safe = Path(value.filename).name
+                dest = LOGS_DIR / safe
+                dest.write_bytes(data)
+                screenshot_name = safe
+            else:
+                fields[key] = value
+    else:
+        try:
+            fields = await request.json()
+        except Exception:
+            fields = {}
+
+    message = (fields.get("message") or "Unknown error").strip() or "Unknown error"
+    is_warning = str(fields.get("warning", "")).lower() in ("1", "true", "yes")
+
+    detail = {
+        "message": message,
+        "exc_type": fields.get("exc_type") or "",
+        "traceback": fields.get("traceback") or "",
+        "step_name": fields.get("step_name") or job.get("stage_label", ""),
+        "agent_name": fields.get("agent_name") or job.get("claimed_by_name", ""),
+        "timestamp": _coerce_float(fields.get("timestamp")) or time.time(),
+        "warning": is_warning,
+        "screenshot": screenshot_name,
+    }
+    job.setdefault("error_details", []).append(detail)
+    if screenshot_name:
+        job.setdefault("error_screenshots", []).append(screenshot_name)
+    # Mirror into the agent log so the single log view shows it in sequence.
+    _append_agent_log(job, [f"[{'warning' if is_warning else 'error'}] "
+                            f"{detail['step_name']}: {detail['exc_type']} {message}".strip()])
+
+    # A warning is non-fatal — record it but do not fail the job.
+    if not is_warning and job.get("status") != "cancelled":
         job["status"] = "failed"
-        job["error"] = req.message
+        job["error"] = message
         job["finished_at"] = time.time()
         job["awaiting_input"] = False
-    if req.session_expired:
+
+    if str(fields.get("session_expired", "")).lower() in ("1", "true", "yes"):
         a = agents.get(job.get("claimed_by"))
         if a:
             a["logged_in"] = False
-    print(f"[server] Agent error on job {job_id}: {req.message}")
+
+    print(f"[server] Agent {'warning' if is_warning else 'error'} on job {job_id}: {message}")
     return {"ok": True}
+
+
+def _coerce_float(v) -> float | None:
+    try:
+        return float(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 @app.get("/api/agent/job/{job_id}/paused-input")
