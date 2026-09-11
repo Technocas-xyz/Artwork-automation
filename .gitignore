@@ -19,3 +19,7 @@ logs/
 profiles/
 static/index-BEFORE-REDESIGN.html
 static/index-WORKING.html
+
+code_backup/
+code_staging/
+code_version.txt
