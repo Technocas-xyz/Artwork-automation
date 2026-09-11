@@ -64,6 +64,34 @@ CHROME_PREFIX = "ms-playwright/{chrome_name}"
 # Playwright package data/binaries/hidden imports (2-tuples for datas param).
 pw_datas, pw_binaries, pw_hidden = collect_all("playwright")
 
+# --- Runtime dependencies the BOOTSTRAP does not statically import -----------
+# The entry point is agent_bootstrap.py, which loads agent_gui/agent/src/config
+# at runtime from the writable code/ folder. Because that import is dynamic,
+# PyInstaller's static scan cannot see the third-party packages the real code
+# needs — so their DATA FILES and BINARIES (not just the .py modules) would be
+# left out. That is exactly what broke Tcl/Tk: tkinter's tcl8.6/tk8.6 data was
+# never collected once agent_gui stopped being the entry script.
+#
+# collect_all() returns (datas, binaries, hiddenimports) for a package, which
+# for tkinter includes the Tcl/Tk runtime the bootloader looks for, for PIL its
+# codecs, for numpy its DLLs, etc. Collect every runtime dep this way so a
+# clean extract has everything, regardless of what the bootstrap imports.
+_extra_datas, _extra_binaries, _extra_hidden = [], [], []
+for _pkg in ("tkinter", "PIL", "pystray", "numpy", "requests",
+             "dotenv", "certifi", "charset_normalizer"):
+    try:
+        _d, _b, _h = collect_all(_pkg)
+        _extra_datas += _d
+        _extra_binaries += _b
+        _extra_hidden += _h
+    except Exception as _exc:
+        print(f"[spec] collect_all({{_pkg!r}}) skipped: {{_exc}}")
+
+# _tkinter is the C extension behind tkinter; name it explicitly so the hook
+# that bundles the Tcl/Tk data trees is triggered even though nothing in the
+# static graph imports tkinter.
+_extra_hidden += ["tkinter", "_tkinter"]
+
 # Recursively enumerate the Chromium folder as (source, dest_dir) 2-tuples so
 # the Analysis normaliser turns them into proper 3-tuple DATA entries.
 chrome_datas = []
@@ -98,15 +126,16 @@ code_baseline.append(("code_version.txt", "code_baseline"))
 a = Analysis(
     ["agent_bootstrap.py"],
     pathex=[r"{root}"],
-    binaries=pw_binaries,
-    datas=code_baseline + pw_datas + chrome_datas,
+    binaries=pw_binaries + _extra_binaries,
+    datas=code_baseline + pw_datas + chrome_datas + _extra_datas,
     # The bootstrap imports agent_gui dynamically from code/, so PyInstaller's
-    # static scan won't discover the agent's third-party deps. List them so
-    # their packages are collected into _internal/ and importable at runtime.
+    # static scan won't discover the agent's third-party deps. collect_all above
+    # gathers each package's data + binaries + submodules; add the few explicit
+    # submodule names that collect_all does not always pull in.
     hiddenimports=[
         "pystray._win32", "PIL.Image", "PIL.ImageDraw",
-        "requests", "dotenv", "numpy", "playwright.sync_api",
-    ] + pw_hidden,
+        "playwright.sync_api",
+    ] + pw_hidden + _extra_hidden,
     hookspath=[],
     runtime_hooks=["pyi_rth_playwright.py"],
     excludes={excludes},
