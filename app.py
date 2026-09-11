@@ -11,12 +11,14 @@ Supports multi-turn workflows (Text workflow with operator decisions).
 from __future__ import annotations
 
 import hashlib
+import io
 import mimetypes
 import os
 import re
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from config.agent_version import AGENT_CODE_VERSION
 from config.job_options import JOB_OPTIONS, PARAMETERISED_OPTIONS
 from config.workflows import TEXT_TURN_1, TEXT_TURN_2, TEXT_TURN_3, EXTRACT_CONTACT_SHEET, EXTRACT_SINGLE, ARTWORK_REGENERATE, CUSTOM_OPERATIONS
 from src.aspect import image_info
@@ -137,10 +140,18 @@ def _online_agents() -> list[dict]:
     Multiple designers run their own agents on their own PCs, so "is an agent
     available" is a question about the whole fleet, not just the most recent
     registrant. Callers that only need one representative can take the first
-    entry; callers deciding availability should look at the whole list."""
+    entry; callers deciding availability should look at the whole list.
+
+    An agent that currently OWNS an active job (running or paused awaiting an
+    operator answer) is always counted online, regardless of last_seen. A busy
+    agent is provably alive; a transient run of failed progress syncs must not
+    make it look offline and trigger a spurious 503 from /api/generate — which
+    was the bug the heartbeat was meant to prevent."""
     now = time.time()
+    busy_ids = _busy_agent_ids()
     live = [a for a in agents.values()
-            if now - a.get("last_seen", 0) <= AGENT_ONLINE_WINDOW]
+            if now - a.get("last_seen", 0) <= AGENT_ONLINE_WINDOW
+            or a.get("id") in busy_ids]
     live.sort(key=lambda a: a.get("last_seen", 0), reverse=True)
     return live
 
@@ -1091,6 +1102,74 @@ def download_agent():
             headers={"Content-Disposition": f'attachment; filename="{AGENT_EXE_NAME}"'},
         )
     raise HTTPException(status_code=404, detail="Agent build not found. Run build_agent.bat on a Windows machine and place ArtworkAgent.zip in downloads/.")
+
+
+# ---------------------------------------------------------------------------
+# AGENT SELF-UPDATE — code-only. The full ZIP (with Chromium) is for first
+# installs; after that an agent pulls just its ~1 MB of Python via these two
+# endpoints. Both require the agent bearer token.
+# ---------------------------------------------------------------------------
+
+# The Python the agent needs, relative to the project root. Only these travel;
+# no Chromium, no venv, no build artefacts.
+_AGENT_CODE_FILES = ("agent.py", "agent_gui.py")
+_AGENT_CODE_DIRS = ("src", "config")
+# Never ship these — caches, compiled artefacts, secrets, local state.
+_BUNDLE_EXCLUDE_DIRS = {"__pycache__", ".git", "build", "dist", ".venv"}
+_BUNDLE_EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
+
+
+def _build_code_bundle() -> bytes:
+    """Build the code-only update zip on the fly from the working tree.
+
+    Contains agent.py, agent_gui.py and the src/ and config/ trees — the exact
+    set an agent imports — and nothing else. Deterministic-ish (sorted) so the
+    same tree yields the same archive."""
+    root = Path(__file__).parent
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in _AGENT_CODE_FILES:
+            p = root / fname
+            if p.is_file():
+                zf.write(p, fname)
+        for dname in _AGENT_CODE_DIRS:
+            base = root / dname
+            if not base.is_dir():
+                continue
+            for p in sorted(base.rglob("*")):
+                if not p.is_file():
+                    continue
+                if any(part in _BUNDLE_EXCLUDE_DIRS for part in p.relative_to(root).parts):
+                    continue
+                if p.suffix.lower() in _BUNDLE_EXCLUDE_SUFFIXES:
+                    continue
+                zf.write(p, str(p.relative_to(root)).replace(os.sep, "/"))
+    return buf.getvalue()
+
+
+@app.get("/api/agent/code-version")
+def agent_code_version(request: Request):
+    """Current agent CODE version. Bearer-token authenticated."""
+    _require_agent(request)
+    return {"version": AGENT_CODE_VERSION}
+
+
+@app.get("/api/agent/code-bundle")
+def agent_code_bundle(request: Request):
+    """Serve the code-only update zip. Bearer-token authenticated.
+
+    Small (~1 MB): just the agent's Python. The Chromium runtime is only in the
+    first-install ZIP and never changes, so it is deliberately excluded here."""
+    _require_agent(request)
+    data = _build_code_bundle()
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="agent_code.zip"',
+            "X-Agent-Code-Version": AGENT_CODE_VERSION,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

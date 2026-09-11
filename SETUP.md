@@ -26,6 +26,34 @@ The website header shows **"Agent connected — Your Name"** in green once it's 
 
 ---
 
+## Updates (you download the 270 MB ZIP only once)
+
+The big ZIP contains the browser runtime, which never changes. After your first
+install, the agent **updates its own code automatically** — only about 1 MB of
+Python travels, not the whole download again.
+
+- The agent checks for a newer version when it starts and once an hour while it
+  runs.
+- If a newer version is found it is downloaded in the background. Updates are
+  **only ever applied between jobs — never in the middle of one.**
+- When an update is ready the agent window shows **"Update available — restart to
+  apply"** with a **Restart** button. Click it (or just restart the agent) and it
+  relaunches on the new code. Left running, it also applies pending updates the
+  next time it's idle at startup.
+- If an update ever fails to download or apply, the agent **keeps running the
+  version you already have** and shows the reason — a bad update can never leave
+  you with a broken agent.
+
+You do **not** need to re-download the ZIP for code changes. Only re-download the
+full ZIP if the browser runtime itself changes (rare) or you're setting up a new
+PC.
+
+> Admin note: to publish new agent code, bump `AGENT_CODE_VERSION` in
+> `config/agent_version.py` on the server. Deployed agents pick it up
+> automatically via `/api/agent/code-bundle`.
+
+---
+
 ## Advanced: run from Python source
 
 Use this only if you are not using the packaged .exe. Build tools

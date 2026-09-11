@@ -369,64 +369,15 @@ def _track_end(job: dict) -> None:
         job["_step_start"] = None
 
 
-def _upload_files(job_id: str, names) -> set[str]:
-    """Upload specific OUTPUT_DIR files to the server NOW and return the set that
-    was sent successfully. Records every sent name on job-independent tracking
-    via the caller. Safe to call repeatedly during a job — the server writes
-    each posted file idempotently, so a file can be served the moment it exists
-    (e.g. the contact sheet must be visible during the number-selection pause,
-    long before the whole job finishes)."""
-    names = [n for n in (names or []) if n]
-    present = [n for n in names if (OUTPUT_DIR / n).exists()]
-    missing_local = [n for n in names if n not in present]
-    for n in missing_local:
-        print(f"[upload] skip {n}: not found in OUTPUT_DIR")
-    if not present:
-        return set()
-    multipart, handles = [], []
-    try:
-        for n in present:
-            fh = open(OUTPUT_DIR / n, "rb")
-            handles.append(fh)
-            multipart.append(("files", (n, fh, "image/png")))
-        r = _post(f"/api/agent/job/{job_id}/result", files=multipart)
-        if r.ok:
-            try:
-                saved = set(r.json().get("saved", []))
-            except Exception:
-                saved = set(present)
-            print(f"[upload] sent {len(present)} file(s) for {job_id}: {sorted(present)}")
-            return saved or set(present)
-        print(f"[upload] result upload HTTP {r.status_code}: {r.text[:200]}")
-        return set()
-    except Exception as exc:
-        print(f"[upload] upload failed for {job_id}: {exc}")
-        return set()
-    finally:
-        for fh in handles:
-            try:
-                fh.close()
-            except Exception:
-                pass
-
-
-def _mark_uploaded(job: dict, names) -> None:
-    """Track which output filenames have been uploaded, for the end-of-job audit."""
-    up = job.setdefault("_uploaded_files", set())
-    for n in names:
-        if n:
-            up.add(n)
-
-
 def _record_stage_image(job: dict, key: str, data: bytes, filename: str,
                         vault_dir: "Path | None" = None, vault_name: str | None = None) -> None:
-    """Write a stage image, record it under the SAME name, and UPLOAD it now.
+    """Write a stage image to OUTPUT_DIR and record it under the SAME name.
 
-    Recording and uploading come from this one place, so a produced file can
-    never be named-but-not-sent (the bug where the contact sheet was recorded
-    but never uploaded, so /api/output/<name> 404'd). The filename on disk, in
-    stage_images[key], in job['images'], and in the upload are all the single
-    `filename` argument, so they cannot drift.
+    The filename used on disk, in stage_images[key], and in job['images'] all
+    come from the single `filename` argument, so the recorded name can never
+    drift from the file that is actually uploaded and served (the bug where
+    stage_images said 'stage1.png' but the saved file was '<jobid>_stage1.png').
+    Every stage calls this as it completes, so no stage entry is ever skipped.
     """
     (OUTPUT_DIR / filename).write_bytes(data)
     job.setdefault("stage_images", {})[key] = filename
@@ -434,11 +385,6 @@ def _record_stage_image(job: dict, key: str, data: bytes, filename: str,
     if vault_dir is not None and vault_name:
         (vault_dir / vault_name).write_bytes(data)
     print(f"[stage-image] recorded {key} -> {filename}")
-    # Upload immediately so the server can serve it right away — critical for a
-    # stage the operator must view during a pause (contact sheet, style/colour
-    # collages) before the job finishes.
-    sent = _upload_files(job["id"], [filename])
-    _mark_uploaded(job, sent)
 
 
 def _open_chat_for(page: Any, job: dict) -> None:
@@ -709,13 +655,13 @@ def _run_mockup_workflow(page: Any, job: dict[str, Any]) -> None:
     _rename_chat_once(page, job)
 
     if images1:
-        # Route through _record_stage_image so the contact sheet is recorded AND
-        # uploaded here — the operator must see it during the pause below, which
-        # happens long before the job ends.
+        # Single source of truth for the name — recorded and saved identically.
         contact_output = f"{job_id}_contact_sheet.png"
-        _record_stage_image(
-            job, "contact_sheet", images1[0], contact_output,
-            vault_dir=run_dir, vault_name=f"{task_id}_R{run_number}_contact_sheet.png")
+        (OUTPUT_DIR / contact_output).write_bytes(images1[0])
+        job.setdefault("stage_images", {})["contact_sheet"] = contact_output
+        print(f"[stage-image] recorded contact_sheet -> {contact_output}")
+        # Save to vault
+        (run_dir / f"{task_id}_R{run_number}_contact_sheet.png").write_bytes(images1[0])
 
     # PAUSE: operator picks numbers
     job["stage"] = 1
@@ -760,8 +706,6 @@ def _run_mockup_workflow(page: Any, job: dict[str, Any]) -> None:
 
                 (run_dir / f"{task_id}_R{run_number}_design_{n}.png").write_bytes(final_data)
                 (run_dir / f"{task_id}_R{run_number}_design_{n}_original.png").write_bytes(original_data)
-                # Upload each finished design as it is produced.
-                _mark_uploaded(job, _upload_files(job_id, [final_name]))
         except Exception as exc:
             _track_end(job)
             print(f"[worker] Generation failed for design #{n}: {exc}")
@@ -828,8 +772,6 @@ def _run_artwork_workflow(page: Any, job: dict[str, Any]) -> None:
 
                 (run_dir / f"{task_id}_R{run_number}_final_{i}.png").write_bytes(final_data)
                 (run_dir / f"{task_id}_R{run_number}_final_{i}_original.png").write_bytes(original_data)
-                # Upload each regenerated artwork as it is produced.
-                _mark_uploaded(job, _upload_files(job_id, [final_name]))
             else:
                 errors.append(f"File {i} ({filename}): no image returned")
         except Exception as exc:
@@ -970,7 +912,6 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                 (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(final_data)
                 current_image_path = str(OUTPUT_DIR / step_name)
                 steps_done.append({"step": i, "op": op, "label": label, "file": step_name, "prompt": color_prompt})
-                _mark_uploaded(job, _upload_files(job_id, [step_name]))
             else:
                 errors.append(f"Step {i} ({label}): colour change returned no image")
                 break
@@ -1014,8 +955,6 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                 baseline_data = remove_white_background(baseline_data)
             baseline_name = f"{job_id}_step{i}_aspect_baseline.png"
             (OUTPUT_DIR / baseline_name).write_bytes(baseline_data)
-            # Uploaded now: the operator views the baseline during the ratio pause.
-            _mark_uploaded(job, _upload_files(job_id, [baseline_name]))
             (run_dir / f"{task_id}_R{run_number}_step{i}_aspect_baseline.png").write_bytes(baseline_data)
             baseline_path = str(OUTPUT_DIR / baseline_name)
             try:
@@ -1098,7 +1037,6 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                     gen_data = remove_white_background(gen_data)
                 (OUTPUT_DIR / step_name).write_bytes(gen_data)
                 (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(gen_data)
-                _mark_uploaded(job, _upload_files(job_id, [step_name]))
                 # Similarity: RESULT vs BASELINE (both background-free) — like for like.
                 try:
                     sim = similarity(baseline_bytes, gen_data)
@@ -1123,7 +1061,6 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                 current_image_path = str(OUTPUT_DIR / step_name)
                 steps_done.append({"step": i, "op": op, "label": "Final (target ratio)",
                                    "file": step_name, "method": "pad"})
-                _mark_uploaded(job, _upload_files(job_id, [step_name]))
 
         elif op in ("black_out", "half_tone"):
             # DETERMINISTIC LOCAL operations — no ChatGPT turn, no prompt, instant.
@@ -1160,7 +1097,6 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
             (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(result_bytes)
             current_image_path = str(OUTPUT_DIR / step_name)
             steps_done.append({"step": i, "op": op, "label": label, "file": step_name})
-            _mark_uploaded(job, _upload_files(job_id, [step_name]))
 
         else:
             # Single-turn operation
@@ -1186,7 +1122,6 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                 (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(final_data)
                 current_image_path = str(OUTPUT_DIR / step_name)
                 steps_done.append({"step": i, "op": op, "label": label, "file": step_name, "prompt": prompt})
-                _mark_uploaded(job, _upload_files(job_id, [step_name]))
             else:
                 errors.append(f"Step {i} ({label}): no image returned")
                 break
@@ -1263,56 +1198,28 @@ def _collect_output_files(job: dict) -> set[str]:
 
 
 def _upload_outputs(job_id: str, job: dict) -> None:
-    """Final upload sweep + audit.
-
-    Most files are uploaded the moment they are produced (see
-    _record_stage_image / the per-step _upload_files calls). This end-of-job
-    pass catches anything not sent yet, then AUDITS: every filename the job
-    recorded must have been uploaded. A recorded-but-never-uploaded name is
-    exactly the contact-sheet bug, so we report it as a warning."""
-    recorded = _collect_output_files(job)          # names that exist locally
-    already = job.get("_uploaded_files", set())
-    remaining = sorted(n for n in recorded if n not in already)
-    if remaining:
-        sent = _upload_files(job_id, remaining)
-        _mark_uploaded(job, sent)
-
-    # Audit: compare every recorded name against what was actually uploaded.
-    uploaded = job.get("_uploaded_files", set())
-    all_recorded = _all_recorded_names(job)
-    missing = sorted(n for n in all_recorded if n not in uploaded)
-    if missing:
-        msg = (f"recorded output(s) were never uploaded and will 404 in the "
-               f"browser: {missing}")
-        print(f"[upload][WARNING] {msg}")
-        report_warning(msg)
-    else:
-        print(f"[upload] audit OK for {job_id}: all {len(all_recorded)} "
-              f"recorded file(s) uploaded.")
-
-
-def _all_recorded_names(job: dict) -> set[str]:
-    """Every output filename this job recorded anywhere (regardless of whether
-    it still exists on disk) — the set the browser may try to fetch."""
-    names: set[str] = set()
-    for key in ("images", "final_names"):
-        for n in job.get(key, []) or []:
-            if n:
-                names.add(n)
-    si = job.get("stage_images") or {}
-    for k, v in si.items():
-        if isinstance(v, str) and v:
-            names.add(v)
-        elif isinstance(v, list):
-            for n in v:
-                if n:
-                    names.add(n)
-    for step in job.get("custom_steps_done", []) or []:
-        if step.get("file"):
-            names.add(step["file"])
-    if job.get("aspect_baseline_file"):
-        names.add(job["aspect_baseline_file"])
-    return names
+    """Upload all generated output images for this job to the server."""
+    files = _collect_output_files(job)
+    if not files:
+        return
+    multipart = []
+    handles = []
+    try:
+        for name in sorted(files):
+            fh = open(OUTPUT_DIR / name, "rb")
+            handles.append(fh)
+            multipart.append(("files", (name, fh, "image/png")))
+        r = _post(f"/api/agent/job/{job_id}/result", files=multipart)
+        if r.ok:
+            print(f"[agent] uploaded {len(files)} output file(s) for {job_id}")
+        else:
+            print(f"[agent] result upload HTTP {r.status_code}: {r.text[:200]}")
+    finally:
+        for fh in handles:
+            try:
+                fh.close()
+            except Exception:
+                pass
 
 
 def _run_job(page: Any, job: dict) -> None:

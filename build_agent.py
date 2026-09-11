@@ -74,12 +74,39 @@ for _r, _d, _files in os.walk(CHROME_DIR):
         _dest = CHROME_PREFIX if _reldir == "." else os.path.join(CHROME_PREFIX, _reldir)
         chrome_datas.append((_src, _dest))
 
+# The updatable code ships as a READ-ONLY baseline under _internal/code_baseline.
+# On first launch agent_bootstrap.py copies it to a WRITABLE <app>/code folder
+# and puts that folder first on sys.path, so self-update only has to replace the
+# ~1 MB of Python there — never the Chromium runtime. agent.py / agent_gui.py /
+# src / config are therefore NOT frozen into the PYZ; they load from code/.
+code_baseline = []
+for _name in ("agent.py", "agent_gui.py"):
+    code_baseline.append((_name, "code_baseline"))
+for _folder in ("src", "config"):
+    for _r, _d, _files in os.walk(_folder):
+        if "__pycache__" in _r:
+            continue
+        for _f in _files:
+            if _f.endswith((".pyc", ".pyo")):
+                continue
+            _src = os.path.join(_r, _f)
+            _dest = os.path.join("code_baseline", _r)
+            code_baseline.append((_src, _dest))
+# Record the baseline code version so a fresh install knows where it started.
+code_baseline.append(("code_version.txt", "code_baseline"))
+
 a = Analysis(
-    ["agent_gui.py"],
+    ["agent_bootstrap.py"],
     pathex=[r"{root}"],
     binaries=pw_binaries,
-    datas=[("src", "src"), ("config", "config")] + pw_datas + chrome_datas,
-    hiddenimports=["pystray._win32", "PIL.Image", "PIL.ImageDraw"] + pw_hidden,
+    datas=code_baseline + pw_datas + chrome_datas,
+    # The bootstrap imports agent_gui dynamically from code/, so PyInstaller's
+    # static scan won't discover the agent's third-party deps. List them so
+    # their packages are collected into _internal/ and importable at runtime.
+    hiddenimports=[
+        "pystray._win32", "PIL.Image", "PIL.ImageDraw",
+        "requests", "dotenv", "numpy", "playwright.sync_api",
+    ] + pw_hidden,
     hookspath=[],
     runtime_hooks=["pyi_rth_playwright.py"],
     excludes={excludes},
@@ -107,6 +134,15 @@ def main() -> None:
     root = Path(__file__).parent
     chrome_dir = chromium_folder()
     print(f"[build] bundling only: {chrome_dir.name}  ({chrome_dir})")
+
+    # Stamp the code baseline with the current AGENT_CODE_VERSION so a fresh
+    # install starts from a known version and the self-updater can compare.
+    try:
+        from config.agent_version import AGENT_CODE_VERSION
+    except Exception:
+        AGENT_CODE_VERSION = "0.0.0"
+    (root / "code_version.txt").write_text(AGENT_CODE_VERSION, encoding="utf-8")
+    print(f"[build] code baseline version: {AGENT_CODE_VERSION}")
 
     spec_path = root / "ArtworkAgent.spec"
     console = os.getenv("AGENT_BUILD_CONSOLE") == "1"
@@ -143,6 +179,9 @@ def main() -> None:
     print(f"[build] download ZIP:    {zip_path}")
     print(f"[build] zip size:        {zip_bytes:,} bytes  (~{zip_bytes/(1024*1024):.0f} MB)")
     print("[build] copy dist/ArtworkAgent.zip into the server's downloads/ folder to publish it.")
+    print("[build] NOTE: this full ZIP is for FIRST INSTALL only. After that,")
+    print("[build]       designers self-update code via /api/agent/code-bundle —")
+    print("[build]       just bump AGENT_CODE_VERSION in config/agent_version.py.")
 
 
 if __name__ == "__main__":
