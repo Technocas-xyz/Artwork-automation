@@ -326,6 +326,17 @@ class NextcloudImportRequest(BaseModel):
     target: str = "artwork"
 
 
+class PrintshopVaultSaveRequest(BaseModel):
+    # Ek generated file customer ke folder me, shop ki naming ke mutabiq.
+    # `name` ./output ki file; `customer` uska Nextcloud folder; `lifecycle`
+    # REF/SRC (naya design) ya WRK/FNL/FNLA (mojooda design ke saath), jis ke
+    # liye `attach_to` me us design ki id chahiye.
+    name: str = ""
+    customer: str = ""
+    lifecycle: str = "SRC"
+    attach_to: str = ""
+
+
 class PrintshopSaveRequest(BaseModel):
     # File a generated output back into PrintShop's vault as the design's next
     # working version. `name` is a file in ./output; `asset` is the id of the
@@ -1883,6 +1894,46 @@ def printshop_handoff(asset: str = "", path: str = ""):
         "artwork_code": code.group(1).upper() if code else "",
         "importable": Path(name).suffix.lower() in ALLOWED_EXTENSIONS,
     }
+
+
+@app.get("/api/printshop/designs")
+def printshop_designs(customer: str = ""):
+    """Is customer ke mojooda designs — jin ke saath nayi file jodi ja sakti hai."""
+    try:
+        key = printshop.entity_key(customer)
+        return {"entity_key": key, "rows": printshop.list_designs(key)}
+    except printshop.PrintshopError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+
+@app.post("/api/printshop/save-vault")
+def printshop_save_vault(req: PrintshopVaultSaveRequest):
+    """Generated file ko customer ke folder me, shop ki naming ke saath rakho.
+
+    Pehle yeh file `AI Artwork` naam ke alag folder me, apne hi naam ke saath
+    girti thi — yani naming ke nizaam se bahar, aur us design se kati hui jis ka
+    hissa thi. Ab PrintShop hi number deta hai: REF/SRC ko is client ka agla
+    khaali number, aur WRK/FNL/FNLA ko usi design ka number jis ke saath jodi
+    gayi. Ginti vault se aati hai, isliye kisi mojooda number se takra nahi
+    sakti.
+    """
+    name = Path(str(req.name or "").strip()).name
+    if not name:
+        raise HTTPException(status_code=400, detail="No generated file given.")
+    src = OUTPUT_DIR / name
+    if not src.exists() or not src.is_file():
+        raise HTTPException(status_code=404,
+                            detail="That generated file is no longer available.")
+
+    data = src.read_bytes()
+    mime = mimetypes.guess_type(name)[0] or "image/png"
+    try:
+        key = printshop.entity_key(req.customer)
+        saved = printshop.upload_to_vault(key, req.lifecycle, req.attach_to, name, data, mime)
+    except printshop.PrintshopError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    return {"ok": True, "size_kb": round(len(data) / 1024, 1), **saved}
 
 
 @app.post("/api/printshop/save-wrk")

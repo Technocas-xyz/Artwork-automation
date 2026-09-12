@@ -90,6 +90,129 @@ def artwork_token(asset_id: str) -> str:
     return (signing_input + b"." + _b64(signature)).decode()
 
 
+_VAULT_PURPOSE = "design-studio-vault"
+
+
+def vault_token() -> str:
+    """A token scoped to the vault as a whole, not to one asset.
+
+    Listing a customer's designs and adding a new file to their folder are
+    vault-wide actions, so PrintShop wants this wider scope. Same secret, same
+    two-hour life; only the purpose differs.
+    """
+    now = int(time.time())
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {
+        "purpose": _VAULT_PURPOSE,
+        "user_id": None,
+        "iat": now,
+        "exp": now + _TTL_SECONDS,
+        "aud": _AUDIENCE,
+        "iss": _ISSUER,
+    }
+    signing_input = b".".join(
+        _b64(json.dumps(part, separators=(",", ":"), sort_keys=True).encode())
+        for part in (header, payload)
+    )
+    signature = hmac.new(_secret().encode(), signing_input, hashlib.sha256).digest()
+    return (signing_input + b"." + _b64(signature)).decode()
+
+
+def _get(path: str, params: dict) -> dict:
+    try:
+        response = requests.get(f"{BACKEND}{path}", params=params, timeout=30)
+    except requests.RequestException as exc:
+        raise PrintshopError(f"PrintShop could not be reached: {exc}") from exc
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if not response.ok:
+        raise PrintshopError(body.get("message") or f"PrintShop said {response.status_code}.",
+                             response.status_code)
+    return body.get("data") or {}
+
+
+def entity_key(folder: str) -> str:
+    """PrintShop's key for a customer, found from their Nextcloud folder.
+
+    This side knows customers as folders on disk; PrintShop knows them as a
+    lead, a customer record, or the path itself. Only PrintShop can say which,
+    so we ask a file that already lives in that folder rather than guess —
+    guessing the path form for a customer it files under a lead would put the
+    artwork where nobody looks for it.
+
+    The folder is what we match on, not the person's name: two customers can
+    share a name, but a folder belongs to exactly one of them.
+    """
+    rel = str(folder or "").strip().strip("/")
+    name = rel.split("/")[-1]
+    if not name:
+        raise PrintshopError("Choose a customer folder first.", 400)
+
+    data = _get("/api/artworks/studio/vault", {"token": vault_token(), "search": name, "limit": 60})
+    prefix = f"{rel}/" if "/" in rel else f"/{name}/"
+    for row in data.get("rows") or []:
+        path = str(row.get("path") or "")
+        if (path.startswith(prefix) or f"/{name}/" in path) and row.get("entity_key"):
+            return row["entity_key"]
+
+    raise PrintshopError(
+        f"{name} has no indexed file in the PrintShop vault yet, so there is "
+        f"nothing to attach a number to.", 400)
+
+
+def list_designs(key: str) -> list:
+    """This customer's designs — what a WRK/FNL file can be attached to."""
+    data = _get("/api/artworks/studio/vault/pieces", {"token": vault_token(), "entity_key": key})
+    return data.get("rows") or []
+
+
+def upload_to_vault(key: str, lifecycle: str, attach_to: str,
+                    file_name: str, data: bytes, mime: str) -> dict:
+    """Add a generated file to a customer's folder under the shop's naming.
+
+    REF and SRC start a design and are given the next free number for that
+    client — read from the vault, so it can never repeat one already in use.
+    WRK, FNL and FNLA continue a design that already exists and inherit its
+    number; only the type suffix changes.
+    """
+    if not data:
+        raise PrintshopError("The generated file is empty.", 400)
+    fields = {"token": vault_token(), "entity_key": key,
+              "lifecycle_code": (lifecycle or "SRC").upper()}
+    if attach_to:
+        fields["attach_to"] = attach_to
+    try:
+        response = requests.post(
+            f"{BACKEND}/api/artworks/studio/vault/upload",
+            data=fields,
+            files={"file": (file_name or "artwork.png", data, mime or "image/png")},
+            timeout=120,
+        )
+    except requests.RequestException as exc:
+        raise PrintshopError(f"PrintShop could not be reached: {exc}") from exc
+
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if not response.ok:
+        raise PrintshopError(
+            body.get("message") or body.get("detail")
+            or f"PrintShop refused the upload ({response.status_code}).",
+            response.status_code)
+
+    saved = body.get("data") or {}
+    return {
+        "name": saved.get("file_name") or "",
+        "path": saved.get("path") or "",
+        "folder": saved.get("folder") or "",
+        "artwork_code": saved.get("artwork_code") or "",
+        "stage": saved.get("lifecycle_code") or lifecycle,
+    }
+
+
 def save_working_file(asset_id: str, file_name: str, data: bytes, mime: str) -> dict:
     """Send the generated bytes to PrintShop as the design's next WRK version.
 

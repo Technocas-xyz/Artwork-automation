@@ -1240,7 +1240,7 @@ function vaultCloseModal(){var o=$("vaultModal");if(o&&o.parentNode)o.parentNode
 function vaultRenderModal(name,client,task){
   vaultCloseModal();
   var pre=vaultMatchCustomer(client);
-  var suggestName=(task?String(task).replace(/[\/:*?"<>|]+/g,"_")+"_":"")+name;
+  // Naam ab hum nahi rakhte — PrintShop rakhta hai, shop ke apne nizaam se.
   var ov=document.createElement("div");
   ov.className="vm-overlay";ov.id="vaultModal";
   ov.innerHTML=
@@ -1260,9 +1260,19 @@ function vaultRenderModal(name,client,task){
       +'<input type="text" id="vmFilter" placeholder="Filter customers…" autocomplete="off">'
       +'<select id="vmCustomer" size="1"></select>'
       +'<div class="vm-hint" id="vmCustHint"></div>'
-      +'<label>Save as</label>'
-      +'<input type="text" id="vmName" value="'+esc(suggestName)+'" autocomplete="off">'
-      +'<div class="vm-hint">A name that already exists is kept safe — the copy is saved as …_v2, _v3, and so on.</div>'
+      +'<label>Type</label>'
+      +'<select id="vmKind">'
+        +'<option value="SRC">Source — a new design</option>'
+        +'<option value="REF">Reference — a new design</option>'
+        +'<option value="WRK">Work — continues an existing design</option>'
+        +'<option value="FNL">Final — continues an existing design</option>'
+        +'<option value="FNLA">Final Approved — continues an existing design</option>'
+      +'</select>'
+      +'<div id="vmAttachWrap" style="display:none">'
+        +'<label>Which design?</label>'
+        +'<select id="vmAttach"><option value="">Loading…</option></select>'
+      +'</div>'
+      +'<div class="vm-hint" id="vmNameHint"></div>'
     +'</div>'
     +'<div class="vm-foot"><span id="vmMsg"></span>'
       +'<button class="vm-btn ghost" id="vmCancel">Cancel</button>'
@@ -1287,7 +1297,45 @@ function vaultRenderModal(name,client,task){
   $("vmX").onclick=vaultCloseModal;$("vmCancel").onclick=vaultCloseModal;
   ov.addEventListener("click",function(e){if(e.target===ov)vaultCloseModal()});
   document.addEventListener("keydown",function esc2(e){if(e.key==="Escape"){vaultCloseModal();document.removeEventListener("keydown",esc2)}});
-  $("vmSave").onclick=function(){vaultDoSave(name,selEl.value,$("vmName").value)};
+  // Kaun si qismein mojooda design ke saath jurti hain. REF aur SRC naya design
+  // shuru karte hain, isliye un ke liye kuch chunna nahi hota.
+  var ATTACHES={WRK:1,FNL:1,FNLA:1};
+  var kindEl=$("vmKind"),attachWrap=$("vmAttachWrap"),attachEl=$("vmAttach"),hintEl=$("vmNameHint");
+  var designs=null,designsFor="";
+
+  function paintHint(){
+    var k=kindEl.value;
+    if(!ATTACHES[k]){hintEl.textContent="PrintShop will give this the next free number for this client, then name it AW-<client>-<number>-"+k+"."; return}
+    var d=designs&&designs.filter(function(x){return x.id===attachEl.value})[0];
+    hintEl.textContent=d?("Saves as "+d.artwork_code+"-"+k+" — the same design, a new stage.")
+                        :"Pick the design this file belongs to; it keeps that design's number.";
+  }
+
+  function loadDesigns(){
+    var cust=selEl.value;
+    if(!ATTACHES[kindEl.value]){attachWrap.style.display="none";paintHint();return}
+    attachWrap.style.display="";
+    if(!cust){attachEl.innerHTML='<option value="">Select a customer first</option>';paintHint();return}
+    if(designsFor===cust&&designs){paintHint();return}
+    attachEl.innerHTML='<option value="">Loading…</option>';
+    fetch("/api/printshop/designs?customer="+encodeURIComponent(cust))
+      .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||"Could not load designs");return d})})
+      .then(function(d){
+        designs=d.rows||[];designsFor=cust;
+        attachEl.innerHTML=designs.length
+          ? designs.map(function(x){return '<option value="'+esc(x.id)+'">'+esc(x.artwork_code)+' — '+esc(x.file_name)+'</option>'}).join("")
+          : '<option value="">This customer has no design yet — use Source or Reference</option>';
+        paintHint();
+      })
+      .catch(function(e){attachEl.innerHTML='<option value="">'+esc(e.message)+'</option>';paintHint()});
+  }
+
+  kindEl.onchange=loadDesigns;
+  attachEl.onchange=paintHint;
+  selEl.addEventListener("change",function(){designs=null;designsFor="";loadDesigns()});
+  loadDesigns();
+
+  $("vmSave").onclick=function(){vaultDoSave(name,selEl.value,kindEl.value,attachEl.value)};
   if($("vmWrk"))$("vmWrk").onclick=function(){psSaveWrk(name)};
   setTimeout(function(){filterEl.focus()},30);
 }
@@ -1307,18 +1355,24 @@ function psSaveWrk(name){
     })
     .catch(function(e){msg.className="vm-err";msg.textContent=e.message;if(btn)btn.disabled=false});
 }
-function vaultDoSave(name,customer,filename){
+// Generated file bhi usi naming se jaati hai jis se baqi sab kuch. Pehle yeh
+// apne hi naam ke saath "AI Artwork" naam ke alag folder me girti thi — number
+// ke baghair, aur us design se kati hui jis ka hissa thi.
+function vaultDoSave(name,customer,kind,attachTo){
   var msg=$("vmMsg"),btn=$("vmSave");
   if(!customer){msg.className="vm-err";msg.textContent="Choose a customer first.";return}
+  if({WRK:1,FNL:1,FNLA:1}[kind]&&!attachTo){
+    msg.className="vm-err";msg.textContent="Pick the design this file belongs to.";return
+  }
   msg.className="vm-hint";msg.textContent="Saving…";btn.disabled=true;
-  fetch("/api/nextcloud/save-to-vault",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({name:name,customer:customer,filename:filename||""})})
+  fetch("/api/printshop/save-vault",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({name:name,customer:customer,lifecycle:kind,attach_to:attachTo||""})})
     .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||"Save failed");return d})})
     .then(function(d){
       vaultCloseModal();
-      toast("Saved "+(d.name||name)+" to "+(d.customer_label||d.customer||"vault"),"ok");
+      toast("Saved as "+(d.name||name),"ok");
       // If that customer's grid is open in the Nextcloud tab, refresh it.
-      if(ncPath&&(d.customer===ncCustomerFolder||(d.folder&&d.folder.indexOf(ncPath)===0)))ncReloadArtworks();
+      if(ncPath&&d.folder&&d.folder.indexOf(ncPath)===0)ncReloadArtworks();
     })
     .catch(function(e){msg.className="vm-err";msg.textContent=e.message;btn.disabled=false});
 }
