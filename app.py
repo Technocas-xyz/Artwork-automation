@@ -39,6 +39,7 @@ from src.auth import (
 )
 from src.agent_tokens import token_name, get_or_create_for_name, touch_token, list_agents
 from src import nextcloud as nc
+from src import printshop
 from src.nc_live import watcher as nc_watcher
 
 # ---------------------------------------------------------------------------
@@ -323,6 +324,14 @@ class NextcloudImportRequest(BaseModel):
     # Vault paths to pull into ./input, and which workflow they are headed for.
     paths: list[str] = []
     target: str = "artwork"
+
+
+class PrintshopSaveRequest(BaseModel):
+    # File a generated output back into PrintShop's vault as the design's next
+    # working version. `name` is a file in ./output; `asset` is the id of the
+    # vault row the design came from, carried in from the Design Studio link.
+    name: str = ""
+    asset: str = ""
 
 
 class NextcloudSaveRequest(BaseModel):
@@ -1836,6 +1845,70 @@ def nextcloud_save_to_vault(req: NextcloudSaveRequest):
         }
     raise HTTPException(status_code=409,
                         detail="Too many files with that name already — rename and try again.")
+
+
+# ── Arriving from the Design Studio ─────────────────────────────────────────
+@app.get("/api/printshop/handoff")
+def printshop_handoff(asset: str = "", path: str = ""):
+    """Open the vault on the one file the Design Studio sent over.
+
+    The link carries the file's vault path and the id of its row in PrintShop's
+    index. Neither is a credential — PrintShop will not act on that id without a
+    signed token — so nothing sensitive rides in the URL of this plain-HTTP app.
+    The path is all this side needs to show the file; the id is kept only so a
+    later save can be filed against the same design.
+    """
+    if not str(asset or "").strip():
+        raise HTTPException(status_code=400, detail="That link carries no artwork id.")
+    cfg = nc.get_config()
+    try:
+        rel = nc.safe_rel(path, cfg)
+    except nc.NextcloudError as exc:
+        raise _nc_error(exc)
+
+    folder = nc.customer_folder(rel, cfg)
+    if not folder:
+        raise HTTPException(status_code=400,
+                            detail="That link does not point inside a customer folder.")
+    name = Path(rel).name
+    code = _ARTWORK_CODE.search(name)
+    return {
+        "asset": str(asset).strip(),
+        "nc_path": rel,
+        "file_name": name,
+        "customer": folder,
+        # The Nextcloud tab selects a customer by full path, not bare name.
+        "customer_path": f"{cfg.root}/{folder}",
+        "customer_label": nc.display_name(folder),
+        "artwork_code": code.group(1).upper() if code else "",
+        "importable": Path(name).suffix.lower() in ALLOWED_EXTENSIONS,
+    }
+
+
+@app.post("/api/printshop/save-wrk")
+def printshop_save_wrk(req: PrintshopSaveRequest):
+    """Save a generated image as the design's next WRK version.
+
+    PrintShop decides the name, the folder and the version number and indexes
+    the result, so the file appears in the vault on its own — see
+    src/printshop.py for why none of that is worked out here.
+    """
+    name = Path(str(req.name or "").strip()).name
+    if not name:
+        raise HTTPException(status_code=400, detail="No generated file given.")
+    src = OUTPUT_DIR / name
+    if not src.exists() or not src.is_file():
+        raise HTTPException(status_code=404,
+                            detail="That generated file is no longer available.")
+
+    data = src.read_bytes()
+    mime = mimetypes.guess_type(name)[0] or "image/png"
+    try:
+        saved = printshop.save_working_file(req.asset, name, data, mime)
+    except printshop.PrintshopError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    return {"ok": True, "size_kb": round(len(data) / 1024, 1), **saved}
 
 
 # The watcher runs whether or not anyone is looking at the Nextcloud tab, so a
