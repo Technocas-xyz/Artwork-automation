@@ -70,6 +70,17 @@ from src.prompt_builder import build_prompt
 from src.vault import save_to_vault
 from src import self_update
 
+# The agent's running CODE version, surfaced to the server (and thence the web
+# UI + the agent window) so a designer never has to open code_version.txt to
+# check whether a fix has landed.
+try:
+    AGENT_CODE_VERSION = self_update.read_local_version()
+except Exception:
+    try:
+        from config.agent_version import AGENT_CODE_VERSION  # type: ignore
+    except Exception:
+        AGENT_CODE_VERSION = "0.0.0"
+
 load_dotenv()
 
 # How often the idle claim loop checks the server for a newer agent build.
@@ -155,6 +166,16 @@ class _Tee:
 # Install the tee once, at import, so all print() output is captured.
 sys.stdout = _Tee(sys.stdout)
 sys.stderr = _Tee(sys.stderr)
+
+# Route library logging (src/generator.py etc. use `logging`, not print) to the
+# teed stdout at INFO, so the per-turn timing lines and raw-reply logs actually
+# reach the agent console AND the web UI job log. Without this the root logger
+# defaults to WARNING with no handler and those diagnostics vanish.
+import logging as _logging  # noqa: E402
+_logging.basicConfig(level=_logging.INFO, format="%(message)s", stream=sys.stdout)
+# Quiet the noisiest third parties so the job log stays readable.
+for _noisy in ("httpx", "httpcore", "urllib3", "PIL", "asyncio"):
+    _logging.getLogger(_noisy).setLevel(_logging.WARNING)
 
 
 def _drain_log() -> list[str]:
@@ -275,7 +296,7 @@ def _sync_loop() -> None:
 # Every field the operator can answer at a pause; copied from paused-input
 # back onto the local job so the workflow (unchanged) reads them normally.
 _ANSWER_FIELDS = (
-    "confirmed_text", "choices", "chosen_numbers", "selected_crops",
+    "confirmed_text", "_retry_extract", "choices", "chosen_numbers", "selected_crops",
     "object_color_choices", "aspect_target", "aspect_method",
     "template_turn2", "template_turn3",
     "_regenerate", "_regen_template",
@@ -360,6 +381,89 @@ def _wait_for_resume(job_id: str) -> None:
         time.sleep(PAUSE_POLL_INTERVAL)
 
 
+def _announce_signin_pause(job_id: str) -> None:
+    """Tell the server this job is paused because the ChatGPT session was lost.
+
+    Unlike _announce_pause this reports logged_in=False, so the UI can say
+    plainly 'sign in on the agent PC to continue'. Completed work already lives
+    in _PAUSE_FIELDS (stage_images / images / prompts / ...) and is sent along,
+    so nothing done so far is lost or hidden."""
+    if _current_job is None:
+        return
+    fields = {k: _current_job.get(k) for k in _PAUSE_FIELDS if k in _current_job}
+    try:
+        _post(f"/api/agent/job/{job_id}/progress", json={
+            "agent_id": _current_agent_id,
+            "stage": _current_job.get("stage"),
+            "stage_label": "Paused — sign in to ChatGPT on the agent PC to continue",
+            "active_time": _current_job.get("active_time"),
+            "logged_in": False,
+            "pause_status": "awaiting_signin",
+            "pause_fields": fields,
+        })
+        print(f"[agent] announced awaiting_signin for job {job_id}")
+    except Exception as exc:
+        print(f"[agent] signin-pause announce failed (will retry): {exc}")
+
+
+def _wait_for_signin(job_id: str, page: Any) -> None:
+    """Pause the current job until the ChatGPT session is restored.
+
+    Blocks the worker thread in place — exactly like _wait_for_resume — so every
+    completed step and the open browser state are kept. The job is NOT failed
+    and its work is NOT discarded. Returns once the session is back (so the
+    caller can carry on), or raises _CancelledError if the operator cancels.
+
+    On return the server job is flipped back to 'running' via the signin-resume
+    endpoint, mirroring how the operator answer endpoints resume a pause."""
+    if _current_job is not None:
+        _current_job["status"] = "awaiting_signin"
+        _current_job["awaiting_input"] = True
+        _current_job["paused_at"] = time.time()
+    _announce_signin_pause(job_id)
+    print(f"[agent] session lost mid-job {job_id}; waiting for sign-in "
+          f"(work preserved, job not failed).")
+
+    announced = time.time()
+    while True:
+        # Cancelled while paused? paused-input returns 404 once the job is gone
+        # or cancelled, matching _wait_for_resume's contract.
+        try:
+            r = _get(f"/api/agent/job/{job_id}/paused-input")
+            if r.status_code == 404:
+                raise _CancelledError()
+            if r.ok and r.json().get("cancelled"):
+                raise _CancelledError()
+        except _CancelledError:
+            raise
+        except Exception:
+            pass
+
+        try:
+            back = is_logged_in(page)
+        except Exception:
+            back = False
+        if back:
+            # Session restored — flip the job back to running and resume.
+            try:
+                _post(f"/api/agent/job/{job_id}/signin-resume",
+                      json={"agent_id": _current_agent_id})
+            except Exception as exc:
+                print(f"[agent] signin-resume post failed (will still resume locally): {exc}")
+            if _current_job is not None:
+                _current_job["status"] = "running"
+                _current_job["awaiting_input"] = False
+            print(f"[agent] sign-in restored for job {job_id}; resuming.")
+            return
+
+        # Re-announce periodically so a late-starting server poll still sees the
+        # pause (mirrors _announce_pause being resent by the caller's retries).
+        if time.time() - announced > 30:
+            _announce_signin_pause(job_id)
+            announced = time.time()
+        time.sleep(PAUSE_POLL_INTERVAL)
+
+
 def _track_start(job: dict) -> None:
     job["_step_start"] = time.time()
 
@@ -422,25 +526,41 @@ def _mark_uploaded(job: dict, names) -> None:
 
 def _record_stage_image(job: dict, key: str, data: bytes, filename: str,
                         vault_dir: "Path | None" = None, vault_name: str | None = None) -> None:
-    """Write a stage image, record it under the SAME name, and UPLOAD it now.
+    """Write a stage image, UPLOAD it to the server, and ONLY THEN record the
+    name so the UI can find it.
 
-    Recording and uploading come from this one place, so a produced file can
-    never be named-but-not-sent (the bug where the contact sheet was recorded
-    but never uploaded, so /api/output/<name> 404'd). The filename on disk, in
-    stage_images[key], in job['images'], and in the upload are all the single
+    ORDER MATTERS — this fixes the random stage-image 404s. The background sync
+    thread posts stage_images every couple of seconds, so the instant a name is
+    in stage_images the UI can request it. If we recorded the name before the
+    upload finished, the UI would ask for a file the server does not have yet
+    and get a 404. So:
+        1. write the file locally,
+        2. upload it and wait for the server to confirm,
+        3. only after a confirmed upload, put the name in stage_images /
+           job['images'] — never announce a filename the server does not yet
+           have.
+    The filename on disk, in the upload, and in stage_images is the one
     `filename` argument, so they cannot drift.
     """
     (OUTPUT_DIR / filename).write_bytes(data)
-    job.setdefault("stage_images", {})[key] = filename
-    job["images"] = [filename]
     if vault_dir is not None and vault_name:
         (vault_dir / vault_name).write_bytes(data)
-    print(f"[stage-image] recorded {key} -> {filename}")
-    # Upload immediately so the server can serve it right away — critical for a
-    # stage the operator must view during a pause (contact sheet, style/colour
-    # collages) before the job finishes.
+
+    # 1) Upload FIRST and confirm the server received it.
     sent = _upload_files(job["id"], [filename])
     _mark_uploaded(job, sent)
+
+    if filename in sent:
+        # 2) Only now expose the name — the file is provably on the server.
+        job.setdefault("stage_images", {})[key] = filename
+        job["images"] = [filename]
+        print(f"[stage-image] uploaded {filename}, then recorded {key} -> {filename}")
+    else:
+        # Upload did not confirm. Do NOT announce the name (that would 404).
+        # The end-of-job upload sweep + audit will retry and surface any file
+        # that never reached the server.
+        print(f"[stage-image] upload NOT confirmed for {filename}; "
+              f"withholding {key} from stage_images until it is on the server")
 
 
 def _open_chat_for(page: Any, job: dict) -> None:
@@ -658,17 +778,37 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
 
     # --- TURN 0 (optional): Extract text from image ---
     if text_image and not text:
-        job["stage"] = 0
-        job["stage_label"] = "Reading text from image"
         prompt0 = _tpl(job, "TEXT_TURN_0", TEXT_TURN_0)
-        extracted_text = send_text_turn(page, prompt=prompt0, image_paths=[str(INPUT_DIR / text_image)], run_id=f"{job_id}_t0")
-        _rename_chat_once(page, job)
-        job.setdefault("prompts", []).append(prompt0)
-        job["extracted_text"] = extracted_text
-        job["status"] = "awaiting_text_confirmation"
-        job["awaiting_input"] = True
-        job["paused_at"] = time.time()
-        _wait_for_resume(job_id)
+        # Read → pause for confirmation. If the operator hits "Try extraction
+        # again" (sets _retry_extract on resume) we re-ask ChatGPT; otherwise we
+        # take their confirmed text. Manual entry is always available, so an
+        # empty extraction never traps the operator.
+        while True:
+            job["stage"] = 0
+            job["stage_label"] = "Reading text from image"
+            job["status"] = "running"
+            job["awaiting_input"] = False
+            _track_start(job)
+            extracted_text = send_text_turn(page, prompt=prompt0, image_paths=[str(INPUT_DIR / text_image)], run_id=f"{job_id}_t0")
+            _track_end(job)
+            _rename_chat_once(page, job)
+            job.setdefault("prompts", []).append(prompt0)
+            # Log exactly what the agent stores, so we can tell an empty box
+            # apart from text lost on the way to the UI.
+            _extxt = (extracted_text or "").strip()
+            print(f"[text-from-image] stored extracted_text: {len(_extxt)} chars"
+                  + (f" -> {_extxt[:200]!r}" if _extxt else " (EMPTY — ChatGPT returned no text)"))
+            job["extracted_text"] = extracted_text
+            job["_retry_extract"] = None
+            job["status"] = "awaiting_text_confirmation"
+            job["awaiting_input"] = True
+            job["paused_at"] = time.time()
+            _wait_for_resume(job_id)
+            if job.get("_retry_extract"):
+                job["_retry_extract"] = None
+                print("[text-from-image] operator requested re-extraction; re-asking ChatGPT")
+                continue
+            break
         text = job["confirmed_text"]
         job["text"] = text
         job["status"] = "running"
@@ -1464,7 +1604,7 @@ def _run_job(page: Any, job: dict) -> None:
         _run_legacy_job(page, job)
 
 
-def _handle_claimed_job(page: Any, claim: dict) -> None:
+def _handle_claimed_job(page: Any, claim: dict, logged_in: bool = True) -> None:
     global _current_job_id, _current_job
     job = claim["job"]
     job_id = job["id"]
@@ -1479,10 +1619,32 @@ def _handle_claimed_job(page: Any, claim: dict) -> None:
     _reset_job_buffers()
     print(f"[agent] running job {job_id} ({job.get('workflow')})")
     try:
+        # If we claimed the job while signed out, pause for sign-in BEFORE any
+        # step runs — nothing is lost, and the job is not failed.
+        if not logged_in:
+            _wait_for_signin(job_id, page)
         _run_job(page, job)
     except _CancelledError:
         print(f"[agent] job {job_id} cancelled by operator")
         job["status"] = "cancelled"
+    except _session_expired_types() as exc:
+        # Session lost mid-job. PAUSE for sign-in and preserve every completed
+        # step instead of failing. On sign-in we cannot re-enter the exact line,
+        # but the work done so far stays recorded/uploaded and visible; the job
+        # is marked done_with_errors (not failed) so nothing is discarded.
+        print(f"[agent] session expired mid-job {job_id}: {exc}")
+        try:
+            _wait_for_signin(job_id, page)
+        except _CancelledError:
+            print(f"[agent] job {job_id} cancelled while paused for sign-in")
+            job["status"] = "cancelled"
+        else:
+            # Signed back in. Keep the completed work; surface that the job
+            # stopped early due to the session drop rather than discarding it.
+            job["status"] = "done_with_errors"
+            job["error"] = ("ChatGPT session dropped mid-job. Completed steps "
+                            "were kept; re-run the job to finish the rest.")
+            job["finished_at"] = time.time()
     except Exception as exc:
         # Capture the FULL traceback (not just str(exc)) plus which step failed,
         # and post it so the failure is fully visible in the web UI.
@@ -1566,24 +1728,59 @@ def _session_expired_types():
 
 
 def open_browser_context():
-    """Launch the persistent Chrome context and return (context, page).
+    """Launch the persistent Chrome context and return (pw, context, page).
 
     Used both by the console `main()` and the GUI. The GUI reuses this single
     context for the "Sign in to ChatGPT" flow and for the claim loop so there is
     only ever one profile lock.
+
+    The Playwright driver `pw` is returned too — the caller MUST hold it and
+    call pw.stop() on teardown, or the sync driver's event loop leaks onto the
+    thread and the next launch fails with the async-loop error.
+
+    The first navigation after a COLD Chromium start is slow (the bundled
+    browser is unpacking/initialising on that machine for the first time), so
+    the goto uses a 90s timeout and retries up to 3 times. If it still fails,
+    the context AND the driver are fully torn down before raising, so a retry
+    starts from a clean slate.
     """
     # A SECOND launch here while one is already open would lock the profile and
     # break the session check. This line makes any accidental re-launch obvious.
     print("[agent] launch_persistent_context('acct1') — opening browser context")
-    context = launch_context("acct1")
-    page = context.pages[0] if context.pages else context.new_page()
-    page.goto("https://chatgpt.com", wait_until="domcontentloaded")
-    return context, page
+    pw, context = launch_context("acct1")
+    try:
+        page = context.pages[0] if context.pages else context.new_page()
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=90_000)
+                return pw, context, page
+            except Exception as exc:
+                last_error = exc
+                print(f"[agent] initial navigation attempt {attempt}/3 failed: {exc}")
+                if attempt < 3:
+                    page.wait_for_timeout(3000)
+        raise RuntimeError(f"could not reach chatgpt.com after 3 attempts: {last_error}")
+    except Exception:
+        # Full teardown so the thread is clean for the next attempt.
+        try:
+            context.close()
+        except Exception:
+            pass
+        try:
+            pw.stop()
+        except Exception:
+            pass
+        raise
 
 
 def register(logged_in: bool):
     """Register with the server; returns agent_id or raises."""
-    r = _post("/api/agent/register", json={"agent_name": AGENT_NAME, "logged_in": logged_in})
+    r = _post("/api/agent/register", json={
+        "agent_name": AGENT_NAME,
+        "logged_in": logged_in,
+        "code_version": AGENT_CODE_VERSION,
+    })
     r.raise_for_status()
     return r.json()["agent_id"]
 
@@ -1725,7 +1922,7 @@ def run_loop(page, agent_id, stop_event=None, on_status=None, on_log=None,
             status("connected" if logged_in else "not_signed_in",
                    "Waiting for jobs" if logged_in else "Not signed in to ChatGPT")
 
-            r = _get("/api/agent/next-job", params={"agent_id": agent_id, "logged_in": str(logged_in).lower()})
+            r = _get("/api/agent/next-job", params={"agent_id": agent_id, "logged_in": str(logged_in).lower(), "code_version": AGENT_CODE_VERSION})
             if r.status_code == 204:
                 # IDLE: the only place a self-update may run, so it can never
                 # interrupt a job. This may re-exec the process (auto mode).
@@ -1740,23 +1937,18 @@ def run_loop(page, agent_id, stop_event=None, on_status=None, on_log=None,
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            if not logged_in:
-                # We claimed a job but the session is gone — fail it clearly.
-                claim = r.json()
-                jid = claim["job"]["id"]
-                log("[agent] session expired — sign in to ChatGPT.")
-                status("not_signed_in", "Session expired — sign in to ChatGPT")
-                _post(f"/api/agent/job/{jid}/error", json={
-                    "message": "ChatGPT session expired on the agent PC. Sign in and retry.",
-                    "session_expired": True,
-                })
-                time.sleep(POLL_INTERVAL)
-                continue
-
             claim = r.json()
+            if not logged_in:
+                # We claimed a job but the session is gone. PAUSE it as
+                # awaiting_signin (do NOT fail it) so no work is lost and it is
+                # not thrown back to the queue. _handle_claimed_job pauses up
+                # front, waits for sign-in, then runs the job normally.
+                log("[agent] session not active — pausing job for sign-in "
+                    "(not failing).")
+                status("not_signed_in", "Paused — sign in to ChatGPT to continue")
             status("running", f"Running job {claim['job']['id']} ({claim['job'].get('workflow')})")
             log(f"[agent] running job {claim['job']['id']} ({claim['job'].get('workflow')})")
-            _handle_claimed_job(page, claim)
+            _handle_claimed_job(page, claim, logged_in=logged_in)
             status("connected", "Job finished — waiting for jobs")
         except KeyboardInterrupt:
             log("\n[agent] stopping.")
@@ -1786,7 +1978,7 @@ def main() -> None:
         print(f"[update] startup self-update skipped ({exc}); continuing on current code.")
 
     try:
-        context, page = open_browser_context()
+        pw, context, page = open_browser_context()
         logged_in = is_logged_in(page)
     except Exception as exc:
         print(f"[agent] FATAL: could not launch Chrome: {exc}")

@@ -118,7 +118,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
       <p class="vm-hint" style="margin-top:0">Generation runs in a real browser on your machine. Three steps, once. Each PC needs its own token.</p>
       <ol style="margin:12px 0 0;padding-left:20px;font-size:.86rem;line-height:1.5">
         <li style="margin-bottom:12px"><b>Download &amp; unzip</b> the agent.<br>
-          <a class="vm-btn primary" href="/api/download/agent" style="display:inline-block;margin-top:6px;text-decoration:none">Download ArtworkAgent.zip</a><br>
+          <button type="button" class="vm-btn primary" onclick="downloadAgent(this)" style="display:inline-block;margin-top:6px">Download ArtworkAgent.zip</button><br>
           <span class="vm-hint">Unzip anywhere, then run <b>ArtworkAgent.exe</b> from the unzipped folder.</span></li>
         <li style="margin-bottom:12px"><b>Run it</b>, then click <b>Sign in to ChatGPT</b> in its window and log in.</li>
         <li style="margin-bottom:4px"><b>Get this PC's token</b> and paste it into the agent, then click <b>Start</b>.
@@ -167,7 +167,7 @@ var col1=$("col1"),col2=$("col2"),statusArea=$("statusArea"),resultArea=$("resul
 var ACTIVE_JOB_KEY="activeJobId";
 function saveActiveJob(id){activeJobId=id;try{if(id)localStorage.setItem(ACTIVE_JOB_KEY,id);else localStorage.removeItem(ACTIVE_JOB_KEY)}catch(e){}}
 function clearActiveJob(){activeJobId=null;try{localStorage.removeItem(ACTIVE_JOB_KEY)}catch(e){}}
-var _ACTIVE_JOB_LIVE={running:1,queued:1,awaiting_selection:1,awaiting_text_confirmation:1,awaiting_crop_review:1,awaiting_multi_selection:1,awaiting_number_selection:1,awaiting_object_selection:1,awaiting_ratio_selection:1};
+var _ACTIVE_JOB_LIVE={running:1,queued:1,awaiting_selection:1,awaiting_text_confirmation:1,awaiting_crop_review:1,awaiting_multi_selection:1,awaiting_number_selection:1,awaiting_object_selection:1,awaiting_ratio_selection:1,awaiting_signin:1};
 function reconnectStoredJob(){
   var id="";try{id=localStorage.getItem(ACTIVE_JOB_KEY)||""}catch(e){}
   if(!id)return;
@@ -198,6 +198,7 @@ resultArea.addEventListener("click",function(e){
   else if(a==="regenerate") doRegenerate(jid);
   else if(a==="cancel") doCancelJob(jid);
   else if(a==="confirm-text") doConfirmText(jid);
+  else if(a==="retry-text") doRetryExtract(jid);
   else if(a==="accept-crops") doAcceptCrops(jid);
   else if(a==="reextract") doReextract(jid,t.dataset.mode||"auto");
   else if(a==="recrop-apply") doRecrop(jid);
@@ -213,6 +214,38 @@ resultArea.addEventListener("click",function(e){
   else if(a==="save-vault") openVaultSave(t.dataset.vaultName,t.dataset.vaultClient||"",t.dataset.vaultTask||"");
   }catch(err){console.error("[delegation]",err)}
 });
+
+// === STAGE-IMAGE 404 RESILIENCE ===
+// A stage/output image can be requested a second or two before the agent's
+// upload lands on the server, so an <img> may 404 transiently. Instead of
+// showing a broken image, retry it a few times a second or two apart before
+// giving up. A file that is merely late must not look like a failure.
+// `error` does not bubble, so we listen in the capture phase on document.
+var IMG_RETRY_MAX=4, IMG_RETRY_DELAY_MS=1500;
+function isResultImage(src){
+  return /\/api\/jobs\/[^/]+\/stage\//.test(src) || /\/api\/output\//.test(src);
+}
+document.addEventListener("error",function(e){
+  var el=e.target;
+  if(!el||el.tagName!=="IMG")return;
+  var raw=el.getAttribute("src")||"";
+  if(!raw||!isResultImage(raw))return;
+  var n=(parseInt(el.getAttribute("data-retry")||"0",10))||0;
+  if(n>=IMG_RETRY_MAX){
+    // Genuinely gone after several tries — stop retrying and hide quietly.
+    el.setAttribute("data-retry-failed","1");
+    el.style.visibility="hidden";
+    console.warn("[img-retry] gave up after "+n+" tries:",raw);
+    return;
+  }
+  n+=1;
+  el.setAttribute("data-retry",String(n));
+  // Strip any previous cache-bust param, keep the clean base url.
+  var base=raw.split("#")[0].replace(/([?&])_r=\d+(&|$)/,function(m,p1,p2){return p2?p1:""}).replace(/[?&]$/,"");
+  var bust=(base.indexOf("?")===-1?"?":"&")+"_r="+Date.now();
+  console.log("[img-retry] retry "+n+"/"+IMG_RETRY_MAX+" in "+IMG_RETRY_DELAY_MS+"ms:",base);
+  setTimeout(function(){ el.style.visibility=""; el.src=base+bust; }, IMG_RETRY_DELAY_MS);
+},true);
 
 fetch("/api/templates").then(function(r){return r.json()}).then(function(d){DT=d;renderCols()}).catch(function(e){console.error("[templates] fetch failed, using defaults:",e);DT={turn1:"",turn2:"",turn3:"",extract:"",regen:"",artwork:""};renderCols()});
 function switchWorkflow(wf){document.querySelectorAll(".wf-tab").forEach(function(x){x.classList.toggle("active",x.dataset.wf===wf)});currentWorkflow=wf;renderCols()}
@@ -399,6 +432,7 @@ function agentBannerHtml(s){
 }
 function jobStatusLabel(st){
   if(st==="running")return "running";
+  if(st==="awaiting_signin")return "paused \u2014 sign in on the agent PC";
   if(st&&st.indexOf("awaiting_")===0)return "waiting for the client\u2019s choice";
   return st||"busy";
 }
@@ -482,7 +516,7 @@ function render(job){
   }else if(job.status==="awaiting_selection"){
     if(statusChanged){clearInterval(elapsedTimer);elapsedTimer=null;pauseStart=job.paused_at?job.paused_at*1000:Date.now();statusArea.innerHTML="";resultArea.innerHTML=renderAwaiting(job);startPauseTimer()}
   }else if(job.status==="awaiting_text_confirmation"){
-    if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Text extracted from image. Check and confirm:</div>';resultArea.innerHTML='<div class="text-confirm-area"><textarea id="extTxt">'+esc(job.extracted_text||"")+'</textarea><button class="text-confirm-btn" data-action="confirm-text" data-job="'+job.id+'">Confirm and continue</button></div>'+cancelHtml(job)}
+    if(statusOnlyChanged){clearInterval(elapsedTimer);renderTextConfirm(job)}
   }else if(job.status==="awaiting_crop_review"){
     if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Review the extracted designs below.</div>';resultArea.innerHTML=renderCropReview(job);maybeInitBoxEditor(job);startPauseTimer()}
   }else if(job.status==="awaiting_multi_selection"){
@@ -504,6 +538,15 @@ function render(job){
     else if(job.workflow==="text"&&job.text_mode==="replace")resultArea.innerHTML=renderReplaceResults(job);
     else resultArea.innerHTML=renderStages(job);
     clearActiveJob();updBtn();addHist(job);
+  }else if(job.status==="awaiting_signin"){
+    // Session dropped on the agent PC. This is a PAUSE, not a failure: the job
+    // and every completed step are kept. Show a calm sign-in instruction (blue,
+    // not red) and leave the finished work on screen.
+    if(statusOnlyChanged){
+      clearInterval(elapsedTimer);elapsedTimer=null;
+      statusArea.innerHTML='<div class="status-box awaiting">Paused \u2014 the ChatGPT session dropped on the agent PC. Sign in again on that PC and the job continues automatically. Nothing done so far is lost.</div>';
+      resultArea.innerHTML=renderStages(job)+cancelHtml(job);
+    }
   }else if(job.status==="failed"||job.status==="cancelled"){
     clr();var msg=job.status==="cancelled"?"Job cancelled.":"Something went wrong: "+(job.error||"Unknown error");
     statusArea.innerHTML='<div class="status-box failed">'+esc(msg)+'</div>';resultArea.innerHTML="";clearActiveJob();updBtn();addHist(job);
@@ -593,9 +636,33 @@ function doRegenerate(jid){
 function doCancelJob(jid){
   fetch("/api/jobs/"+jid+"/cancel",{method:"POST",headers:{"Content-Type":"application/json"}}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){clr();if(pauseTimer){clearInterval(pauseTimer);pauseTimer=null}statusArea.innerHTML='<div class="status-box failed">Job cancelled.</div>';resultArea.innerHTML="";clearActiveJob();lastStatus="";updBtn()}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
 }
+// Text-from-image confirmation. When ChatGPT returned text, show it for review.
+// When it returned NOTHING, be honest: say so, and offer to type it manually or
+// retry — never a blank box that looks like it worked.
+function renderTextConfirm(job){
+  var txt=(job.extracted_text||"").trim();
+  if(txt){
+    statusArea.innerHTML='<div class="status-box awaiting">Text extracted from image. Check and confirm:</div>';
+    resultArea.innerHTML='<div class="text-confirm-area"><textarea id="extTxt">'+esc(job.extracted_text||"")+'</textarea>'
+      +'<button class="text-confirm-btn" data-action="confirm-text" data-job="'+job.id+'">Confirm and continue</button></div>'
+      +cancelHtml(job);
+  }else{
+    statusArea.innerHTML='<div class="status-box failed">ChatGPT did not return any text \u2014 type it in manually or try again.</div>';
+    resultArea.innerHTML='<div class="text-confirm-area">'
+      +'<textarea id="extTxt" placeholder="Type the wording here\u2026"></textarea>'
+      +'<button class="text-confirm-btn" data-action="confirm-text" data-job="'+job.id+'">Use this text and continue</button>'
+      +'<button class="regen-btn" data-action="retry-text" data-job="'+job.id+'">Try extraction again</button>'
+      +'</div>'+cancelHtml(job);
+  }
+}
 function doConfirmText(jid){
   var ta=$("extTxt");if(!ta||!ta.value.trim())return;
   fetch("/api/jobs/"+jid+"/confirm-text",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:ta.value.trim()})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){stepStart=Date.now();lastStatus="";if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+}
+function doRetryExtract(jid){
+  // Ask the agent to re-run the extraction. lastStatus is reset so the running
+  // panel re-renders when the job flips back to running.
+  fetch("/api/jobs/"+jid+"/confirm-text",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({retry:true})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){stepStart=Date.now();lastStatus="";if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
 }
 
 var pauseTimer=null;
@@ -1740,6 +1807,35 @@ window.copyAgentField=function(id){
   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(val).then(ok,function(){try{document.execCommand("copy");ok()}catch(e){}})}
   else{try{document.execCommand("copy");ok()}catch(e){}}
 };
+// Fetch the agent build via JS so a "not ready" (404) shows the friendly server
+// message in the modal instead of navigating the browser to raw JSON. On
+// success we stream the ZIP to a temporary download link.
+window.downloadAgent=function(btn){
+  var orig=btn?btn.textContent:"";
+  if(btn){btn.disabled=true;btn.textContent="Preparing download…"}
+  asMsg("","");
+  fetch("/api/download/agent",{headers:{Accept:"application/zip"}}).then(function(r){
+    if(!r.ok){
+      // Read the friendly detail; never dump JSON to the page.
+      return r.json().catch(function(){return {}}).then(function(d){
+        throw new Error(d.detail||"The agent download isn\u2019t ready yet. Please contact your administrator.");
+      });
+    }
+    return r.blob();
+  }).then(function(blob){
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement("a");
+    a.href=url;a.download="ArtworkAgent.zip";
+    document.body.appendChild(a);a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){URL.revokeObjectURL(url)},1000);
+    asMsg("Download started.","vm-ok");
+  }).catch(function(e){
+    asMsg(e.message,"vm-err");
+  }).finally(function(){
+    if(btn){btn.disabled=false;btn.textContent=orig}
+  });
+};
 function loadAgentList(){
   fetch("/api/agent-tokens").then(function(r){return r.ok?r.json():{agents:[]}}).then(function(d){
     var box=$("asExisting");if(!box)return;
@@ -1748,8 +1844,12 @@ function loadAgentList(){
     var h='<label style="margin-top:0">Who\u2019s set up</label><div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">';
     for(var i=0;i<list.length;i++){
       var a=list[i];
+      // Show the running code version for a currently-connected agent, so a
+      // designer/admin can confirm a fix has landed without opening
+      // code_version.txt on the machine.
+      var ver=(a.online&&a.code_version)?(' \u00b7 <span style="color:var(--muted)">v'+esc(a.code_version)+'</span>'):'';
       h+='<div style="display:flex;justify-content:space-between;gap:8px;padding:8px 10px;font-size:.8rem;'+(i?'border-top:1px solid var(--border)':'')+'">'
-        +'<span style="font-weight:600">'+esc(a.name||"(unnamed)")+'</span>'
+        +'<span style="font-weight:600">'+esc(a.name||"(unnamed)")+ver+'</span>'
         +'<span style="color:var(--muted)">'+esc(asFmtSeen(a.last_seen))+'</span></div>';
     }
     box.innerHTML=h+'</div>';

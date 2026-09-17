@@ -289,7 +289,10 @@ class ObjectSelectionRequest(BaseModel):
 
 
 class TextConfirmRequest(BaseModel):
-    text: str
+    text: str = ""
+    # When True the operator asked to re-run the extraction (ChatGPT returned
+    # no text). No `text` is required in that case.
+    retry: bool = False
 
 
 class OpenFolderRequest(BaseModel):
@@ -300,6 +303,7 @@ class OpenFolderRequest(BaseModel):
 class AgentRegisterRequest(BaseModel):
     agent_name: str = "designer"
     logged_in: bool = False
+    code_version: str = ""
 
 
 class AgentProgressRequest(BaseModel):
@@ -406,6 +410,10 @@ _AGENT_BUSY_STATUSES = (
     "awaiting_crop_review", "awaiting_multi_selection",
     "awaiting_number_selection", "awaiting_object_selection",
     "awaiting_ratio_selection",
+    # Session dropped mid-job: the agent holds the job paused and will resume it
+    # once the designer signs in again. It must stay assigned to that agent and
+    # the agent must not pick up other work while paused.
+    "awaiting_signin",
 )
 
 
@@ -854,9 +862,25 @@ def confirm_text(job_id: str, req: TextConfirmRequest):
         raise HTTPException(status_code=404, detail="Job not found.")
     if job.get("status") != "awaiting_text_confirmation":
         raise HTTPException(status_code=400, detail="This job is not waiting for text confirmation.")
-    if not req.text.strip():
-        raise HTTPException(status_code=400, detail="Text cannot be empty.")
-    job["confirmed_text"] = req.text.strip()
+    if req.retry:
+        # Operator asked to re-run extraction (empty/wrong result). The agent's
+        # turn-0 loop re-asks ChatGPT when it sees this flag on resume, then
+        # RE-announces the confirmation pause at the same stage (0). Clear that
+        # stage from the answered list so the re-announced pause is accepted
+        # instead of being deduped as "already answered".
+        job["_retry_extract"] = True
+        job["confirmed_text"] = ""
+        answered = job.setdefault("_answered_pause_stages", [])
+        stg = job.get("stage")
+        job["_answered_pause_stages"] = [s for s in answered if s != stg]
+        job["status"] = "running"
+        job["awaiting_input"] = False
+        return {"ok": True, "retry": True}
+    else:
+        if not req.text.strip():
+            raise HTTPException(status_code=400, detail="Text cannot be empty.")
+        job["_retry_extract"] = False
+        job["confirmed_text"] = req.text.strip()
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
@@ -1010,6 +1034,28 @@ def select_ratio(job_id: str, req: RatioSelectionRequest):
     return {"ok": True, "target": {"w": w, "h": h}, "method": method}
 
 
+@app.post("/api/agent/job/{job_id}/signin-resume")
+async def agent_signin_resume(job_id: str, request: Request):
+    """The agent signed back in after a mid-job session drop. Flip the paused
+    job back to 'running' so the agent's blocked worker can carry on.
+
+    Mirrors the operator answer endpoints (they also move awaiting_* -> running),
+    but this one is driven by the agent restoring its own session rather than an
+    operator answering a prompt. Idempotent: a no-op if the job is not paused for
+    sign-in."""
+    _require_agent(request)
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("status") == "awaiting_signin":
+        job["status"] = "running"
+        job["awaiting_input"] = False
+        job["stage_label"] = "Resumed after sign-in"
+        job["last_progress_at"] = time.time()
+        print(f"[server] job {job_id} resumed after agent sign-in")
+    return {"ok": True, "status": job.get("status")}
+
+
 @app.get("/api/jobs/{job_id}/crop/{index}")
 def serve_crop(job_id: str, index: int):
     """Serve a specific crop image by index (1-based)."""
@@ -1063,14 +1109,63 @@ def get_job(job_id: str):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
-    # Don't expose internal fields
+    return _public_job(job)
+
+
+def _output_ready(filename: str) -> bool:
+    """True if a generated output file actually exists on disk right now."""
+    if not filename:
+        return False
+    try:
+        return (OUTPUT_DIR / Path(filename).name).exists()
+    except Exception:
+        return False
+
+
+def _public_job(job: dict) -> dict:
+    """The job as the UI should see it: internal fields stripped, and — crucially
+    — no image filename exposed until the file is actually on disk.
+
+    Belt-and-braces against the stage-image 404 race: even if an agent announces
+    a filename slightly before its upload lands, we withhold that name from the
+    polled job until the matching file exists, so the UI never requests a 404.
+    Once the upload arrives (a second or two later) the next poll reveals it."""
     safe = {k: v for k, v in job.items() if not k.startswith("_")}
+
+    # stage_images: {key: filename} for single images, plus list-valued entries
+    # like "finals". Drop any whose file is not yet present.
+    si = safe.get("stage_images")
+    if isinstance(si, dict):
+        filtered = {}
+        for k, v in si.items():
+            if isinstance(v, str):
+                if _output_ready(v):
+                    filtered[k] = v
+            elif isinstance(v, list):
+                ready = [n for n in v if _output_ready(n)]
+                if ready:
+                    filtered[k] = ready
+            else:
+                filtered[k] = v
+        safe["stage_images"] = filtered
+
+    # images / final_names: only expose files that exist.
+    for key in ("images", "final_names"):
+        if isinstance(safe.get(key), list):
+            safe[key] = [n for n in safe[key] if _output_ready(n)]
+
+    # custom_steps_done: hide a step's file until it lands (the step row can show
+    # once its image is servable).
+    steps = safe.get("custom_steps_done")
+    if isinstance(steps, list):
+        safe["custom_steps_done"] = [s for s in steps if not s.get("file") or _output_ready(s.get("file"))]
+
     return safe
 
 
 @app.get("/api/jobs")
 def list_jobs():
-    return sorted([{k: v for k, v in j.items() if not k.startswith("_")} for j in jobs.values()], key=lambda j: j["created_at"], reverse=True)
+    return sorted([_public_job(j) for j in jobs.values()], key=lambda j: j["created_at"], reverse=True)
 
 
 @app.get("/api/jobs/{job_id}/logs")
@@ -1114,37 +1209,65 @@ def serve_output(name: str):
 
 @app.get("/api/jobs/{job_id}/stage/{stage}.png")
 def serve_stage_image(job_id: str, stage: str):
-    """Serve a stage image. Resolves from vault folder using pathlib."""
+    """Serve a stage image. Resolves from ./output first, then the vault folder.
+
+    A MISSING image is always a 404, never a 500. Callers routinely request
+    stages a job does not have — e.g. /stage/finals.png on a failed or cancelled
+    job that never produced any images, or while an upload is still in flight.
+    Several such cases used to raise an unhandled exception (500):
+      * `finals` maps to a LIST (final_names), so `OUTPUT_DIR / filename` hit a
+        TypeError on a non-str path;
+      * a bad/again-unavailable vault_folder made iterdir() raise OSError.
+    We now treat every "cannot resolve a real file" outcome as a clean 404."""
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
-    filename = job.get("stage_images", {}).get(stage)
-    if not filename:
+
+    filename = (job.get("stage_images") or {}).get(stage)
+    # Only a single string names a servable image. Lists (e.g. "finals" ->
+    # final_names) and anything non-string are not directly servable here — the
+    # UI fetches those per-name via /api/output/<name>.
+    if isinstance(filename, list):
+        raise HTTPException(status_code=404,
+                            detail=f"Stage '{stage}' is a set of images; fetch each by name.")
+    if not isinstance(filename, str) or not filename:
         raise HTTPException(status_code=404, detail=f"No image for stage '{stage}'.")
 
-    # Try ./output/ first, then vault folder
-    path = OUTPUT_DIR / filename
-    if not path.exists():
-        # Resolve from vault folder
-        vault_folder = job.get("vault_folder")
-        if vault_folder:
-            vault_path = Path(vault_folder)
-            # Search for the file in the vault folder
-            for f in vault_path.iterdir() if vault_path.exists() else []:
-                if f.name == filename:
-                    path = f
-                    break
-            else:
-                # Filename in stage_images might differ from vault name — find by stage pattern
-                stage_patterns = {"stage1": "stage1", "stage2": "stage2", "final": "final"}
-                pattern = stage_patterns.get(stage, stage)
-                for f in vault_path.iterdir() if vault_path.exists() else []:
-                    if pattern in f.name and f.suffix == ".png" and "original" not in f.name:
-                        path = f
-                        break
+    # Try ./output/ first, then the vault folder. Guard every filesystem touch so
+    # an odd path or a vanished vault folder degrades to 404, not 500.
+    try:
+        path = OUTPUT_DIR / Path(filename).name
+        if not path.exists():
+            vault_folder = job.get("vault_folder")
+            if vault_folder:
+                vault_path = Path(vault_folder)
+                found = None
+                if vault_path.exists():
+                    for f in vault_path.iterdir():
+                        if f.name == filename:
+                            found = f
+                            break
+                    if found is None:
+                        # stage_images name may differ from the vault name — match
+                        # by stage pattern.
+                        pattern = {"stage1": "stage1", "stage2": "stage2",
+                                   "final": "final"}.get(stage, stage)
+                        for f in vault_path.iterdir():
+                            if pattern in f.name and f.suffix == ".png" and "original" not in f.name:
+                                found = f
+                                break
+                if found is not None:
+                    path = found
 
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Image file not found on disk.")
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Image file not found on disk.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Any unexpected filesystem/type error -> 404, never a 500.
+        print(f"[server] stage image resolve failed for {job_id}/{stage}: {exc}")
+        raise HTTPException(status_code=404, detail="Image not available.")
+
     return FileResponse(str(path), media_type="image/png", filename=path.name)
 
 
@@ -1194,6 +1317,15 @@ def get_status():
         "agent_count": len(live),
         "agent_name": label_agent.get("name") if label_agent else "",
         "agent_names": [a.get("name", "") for a in live],
+        # Code version of the labelled agent, and per-agent detail so the UI can
+        # show the running version beside each connected agent.
+        "agent_version": label_agent.get("code_version") if label_agent else "",
+        "agents": [
+            {"name": a.get("name", ""),
+             "logged_in": bool(a.get("logged_in")),
+             "code_version": a.get("code_version") or "unknown"}
+            for a in live
+        ],
     }
 
 
@@ -1253,7 +1385,19 @@ def agent_tokens(request: Request):
     is set up. Cookie-authed by the middleware."""
     if not get_current_user(request):
         raise HTTPException(status_code=401, detail="Not authenticated")
-    return {"agents": list_agents()}
+    # Match each issued token to a currently-connected agent (by name) so the
+    # admin panel can show the running code version next to who is online.
+    live = _online_agents()
+    ver_by_name = {a.get("name", ""): (a.get("code_version") or "") for a in live}
+    online_names = set(ver_by_name.keys())
+    out = []
+    for entry in list_agents():
+        nm = entry.get("name", "")
+        entry = dict(entry)
+        entry["online"] = nm in online_names
+        entry["code_version"] = ver_by_name.get(nm, "")
+        out.append(entry)
+    return {"agents": out}
 
 
 @app.get("/api/download/agent")
@@ -1276,7 +1420,13 @@ def download_agent():
             filename=AGENT_EXE_NAME,
             headers={"Content-Disposition": f'attachment; filename="{AGENT_EXE_NAME}"'},
         )
-    raise HTTPException(status_code=404, detail="Agent build not found. Run build_agent.bat on a Windows machine and place ArtworkAgent.zip in downloads/.")
+    # Designer-facing: no dev instructions (build_agent.bat means nothing to
+    # them). The UI catches this and shows the friendly message in the modal
+    # rather than navigating the browser to raw JSON.
+    raise HTTPException(
+        status_code=404,
+        detail="The agent download isn't ready yet. Please contact your administrator — it will be available here shortly.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1541,18 +1691,22 @@ def agent_register(req: AgentRegisterRequest, request: Request):
         "id": agent_id, "name": req.agent_name or name,
         "registered_at": time.time(), "last_seen": time.time(),
         "logged_in": req.logged_in,
+        "code_version": (req.code_version or "").strip() or "unknown",
     }
-    print(f"[server] Agent registered: {req.agent_name!r} ({agent_id})")
+    print(f"[server] Agent registered: {req.agent_name!r} ({agent_id}) "
+          f"code {agents[agent_id]['code_version']}")
     return {"agent_id": agent_id, "name": req.agent_name or name}
 
 
 @app.get("/api/agent/next-job")
-def agent_next_job(request: Request, agent_id: str, logged_in: bool = False):
+def agent_next_job(request: Request, agent_id: str, logged_in: bool = False, code_version: str = ""):
     _require_agent(request)
     a = agents.get(agent_id)
     if a:
         a["last_seen"] = time.time()
         a["logged_in"] = logged_in
+        if code_version.strip():
+            a["code_version"] = code_version.strip()
     _requeue_stale_jobs()
     # Claim the oldest queued job atomically. An agent holds at most one job at
     # a time, so if this agent is already running/paused on one, it takes
@@ -1824,6 +1978,7 @@ def agent_paused_input(job_id: str, request: Request):
     return {
         "ready": True, "cancelled": False, "status": status,
         "confirmed_text": job.get("confirmed_text", ""),
+        "_retry_extract": job.get("_retry_extract", False),
         "choices": job.get("choices", []),
         "chosen_numbers": job.get("chosen_numbers", []),
         "selected_crops": job.get("selected_crops", []),
