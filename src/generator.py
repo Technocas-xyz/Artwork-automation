@@ -157,33 +157,62 @@ def send_text_turn(
 ) -> str:
     """Send a turn expecting a TEXT reply (not images). Returns the reply text.
 
-    Uses a short quiet period (1.5s) since text replies complete quickly.
-    Does NOT wait on IMAGE_LOADER.
+    Uses a short quiet period since text replies complete quickly, and NEVER
+    waits on any image-generation signal (IMAGE_LOADER). Every wait is
+    timestamped in the log so a slow text turn can be diagnosed at a glance:
+
+        [text-turn <run_id>] submit sent            t=+0.0s
+        [text-turn <run_id>] stop button appeared   t=+1.2s   (or 'never appeared')
+        [text-turn <run_id>] stop button detached   t=+3.4s
+        [text-turn <run_id>] quiet period elapsed   t=+4.2s
+        [text-turn <run_id>] reply read (<n> chars) t=+4.3s
+
+    A short reply should finish well under 15s; the timestamps show which wait,
+    if any, is spending the time.
     """
+    t0 = time.monotonic()
+
+    def _ts(msg: str) -> None:
+        logger.info("[text-turn %s] %s  t=+%.1fs", run_id, msg, time.monotonic() - t0)
+
     try:
         # Upload files if given
         if image_paths:
             page.set_input_files(FILE_INPUT, image_paths)
-            _wait_for_upload_thumbnails(page, expected_count=len(image_paths))
+            _wait_for_upload_thumbnails(page, image_paths, run_id=run_id)
+            _ts("upload attached")
 
         # Type prompt and submit
         page.click(PROMPT_BOX)
         _enter_prompt(page, prompt)
+        _ts("prompt entered")
+
         page.keyboard.press("Enter")
+        _ts("submit sent")
 
-        # Wait for STOP_BUTTON to appear (turn started)
+        # Wait for STOP_BUTTON to appear (turn started). A fast text reply can
+        # come and go before we look, so a miss here is NOT fatal — we log it
+        # and fall through to the completion wait, which will read the reply.
         try:
-            page.wait_for_selector(STOP_BUTTON, state="attached", timeout=30_000)
-        except PlaywrightTimeout as exc:
-            raise GenerationTimeoutError(
-                "Stop button never appeared — text turn may not have started."
-            ) from exc
+            page.wait_for_selector(STOP_BUTTON, state="attached", timeout=15_000)
+            _ts("stop button appeared")
+        except PlaywrightTimeout:
+            _ts("stop button never appeared (reply may already be finishing)")
 
-        # Wait for turn to complete with SHORT quiet period (1.5s)
-        _wait_for_turn_complete(page, quiet_ms=1500, timeout=120_000)
+        # Wait for the turn to settle. Short quiet period: a text answer streams
+        # in a couple of seconds and then the stop button detaches. 1.5s of
+        # continuous absence is enough to be sure the stream ended.
+        _wait_for_turn_complete(page, quiet_ms=1500, timeout=120_000, label=f"text-turn {run_id}", on_phase=_ts, text_only=True)
 
         # Return the text reply
-        return get_last_text_reply(page)
+        reply = get_last_text_reply(page)
+        _ts(f"reply read ({len(reply)} chars)")
+        # Raw reply logged so an empty/garbled result is visible at the agent
+        # (truncated to keep the log readable).
+        preview = reply.replace("\n", " ")[:300]
+        logger.info("[text-turn %s] RAW REPLY (%d chars): %r%s",
+                    run_id, len(reply), preview, " …" if len(reply) > 300 else "")
+        return reply
 
     except (GenerationTimeoutError, RateLimitError):
         _save_error_screenshot(page, run_id)
@@ -222,7 +251,7 @@ def send_turn(
         # --- Upload images if provided ---
         if image_paths:
             page.set_input_files(FILE_INPUT, image_paths)
-            _wait_for_upload_thumbnails(page, expected_count=len(image_paths))
+            _wait_for_upload_thumbnails(page, image_paths, run_id=run_id)
 
         # --- Snapshot AFTER upload so uploaded file ids are already in the DOM ---
         pre_existing_ids = _collect_image_ids(page)
@@ -444,7 +473,7 @@ def extract_artwork_images(
     try:
         # Upload first, THEN snapshot so uploaded file ids are excluded
         page.set_input_files(FILE_INPUT, [image_path])
-        _wait_for_upload_thumbnails(page, expected_count=1)
+        _wait_for_upload_thumbnails(page, [image_path], run_id=run_id)
 
         pre_existing_ids = _collect_image_ids(page)
         logger.info("extract_artwork_images before-ids: %d", len(pre_existing_ids))
@@ -596,22 +625,78 @@ def _collect_last_turn_images(page: Page, exclude_ids: set[str]) -> list[str]:
     return new_srcs
 
 
-def _wait_for_turn_complete(page: Page, quiet_ms: int = 5000, timeout: int = 900_000) -> None:
-    """Wait until STOP_BUTTON is absent continuously for `quiet_ms` ms.
+def _wait_for_turn_complete(page: Page, quiet_ms: int = 5000, timeout: int = 900_000,
+                            label: str = "", on_phase=None, text_only: bool = False) -> None:
+    """Wait until the turn has settled — the STOP button is gone and stays gone.
 
     Uses a Python polling loop because Playwright's raf-based wait_for_function
     stops firing when the page goes idle, making it unreliable for time-based
     stability checks.
+
+    FLICKER GUARD (the text-turn 120s hang): after a text answer finishes, the
+    STOP button detaches, but ChatGPT briefly re-renders a button while it swaps
+    in the "Worked for Ns" chrome / send button. The old logic reset the quiet
+    window to zero on ANY single poll that saw a button, so the 1.5s of
+    continuous absence never accumulated and the loop spun until the 120s
+    timeout. We now require the button to be present for TWO consecutive polls
+    (~1s) to count as "still streaming"; a lone flicker poll no longer resets an
+    established quiet window.
+
+    `text_only=True` (text replies) never inspects any image-generation signal —
+    completion is purely "STOP button gone". Image turns keep their existing
+    behaviour: this function only ever waited on the STOP button, so image turns
+    are unchanged aside from the same harmless flicker tolerance.
+
+    `on_phase(msg)` (optional) is called once when the stop button first goes
+    absent ("stop button detached") and once when the quiet period elapses
+    ("quiet period elapsed"), so callers can timestamp the turn precisely.
     """
+    def _phase(msg: str) -> None:
+        if on_phase:
+            try:
+                on_phase(msg)
+            except Exception:
+                pass
+
     deadline = time.monotonic() + timeout / 1000
+    quiet_s = quiet_ms / 1000
     absent_since: float | None = None
+    detached_logged = False
+    present_streak = 0     # consecutive polls the button was seen present
+    poll = 0
     while time.monotonic() < deadline:
-        present = page.query_selector(STOP_BUTTON) is not None
-        if present:
+        raw_present = page.query_selector(STOP_BUTTON) is not None
+        poll += 1
+        now = time.monotonic()
+
+        if raw_present:
+            present_streak += 1
+        else:
+            present_streak = 0
+
+        # A single flicker (one poll) does NOT count as streaming once the turn
+        # has already detached — only a sustained presence (>=2 polls) does.
+        streaming = raw_present and (absent_since is None or present_streak >= 2)
+
+        if streaming:
             absent_since = None
-        elif absent_since is None:
-            absent_since = time.monotonic()
-        elif time.monotonic() - absent_since >= quiet_ms / 1000:
+        else:
+            if absent_since is None:
+                absent_since = now
+                if not detached_logged:
+                    _phase("stop button detached")
+                    detached_logged = True
+
+        absent_for = (now - absent_since) if absent_since is not None else 0.0
+        logger.debug("[turn-wait %s] poll=%d stop=%s streak=%d absent_for=%.2fs "
+                     "need>=%.2fs waiting_for=%s%s",
+                     label, poll, "present" if raw_present else "absent",
+                     present_streak, absent_for, quiet_s,
+                     "streaming" if streaming else "quiet-period",
+                     " (flicker-ignored)" if (raw_present and not streaming) else "")
+
+        if absent_since is not None and absent_for >= quiet_s:
+            _phase("quiet period elapsed")
             return
         page.wait_for_timeout(500)
     raise GenerationTimeoutError("Turn never completed.")
@@ -661,22 +746,111 @@ def _type_multiline(page: Page, text: str) -> None:
             page.keyboard.press("Shift+Enter")
 
 
-def _wait_for_upload_thumbnails(page: Page, expected_count: int) -> None:
-    """Poll until the composer shows exactly `expected_count` upload thumbnails.
+def _wait_for_upload_thumbnails(page: Page, image_paths, run_id: str = "upload") -> None:
+    """Confirm attached files reached the composer, tolerating a missing blob
+    thumbnail so a rendering quirk never kills a job.
 
-    Uses wait_for_function so we never sleep on a fixed timer.  Times out after 30 s.
-    Also waits for SEND_BUTTON to appear — it only becomes visible once the
-    composer has content, confirming the upload is fully attached.
+    ChatGPT usually shows an ``img[src^='blob:']`` thumbnail per attached file,
+    but sometimes attaches the file without rendering that blob (or renders it
+    differently). So we treat the upload as attached if EITHER:
+      * at least `expected_count` blob thumbnails are present, OR
+      * the send button has become enabled (it only enables once the composer
+        has content).
+
+    If neither appears within the timeout, we re-attach the files once and wait
+    again. Only if that also fails do we raise — with a screenshot and a plain
+    message naming the file(s) — so an operator can see whether the file did
+    attach and the thumbnail merely looked different.
+
+    `image_paths` is needed for the single retry; `run_id` names the screenshot.
     """
-    page.wait_for_selector(COMPOSER_THUMBNAIL, state="visible", timeout=30_000)
+    expected_count = len(image_paths)
 
-    page.wait_for_function(
-        """([selector, count]) => document.querySelectorAll(selector).length >= count""",
-        arg=[COMPOSER_THUMBNAIL, expected_count],
-        timeout=30_000,
+    def _attached() -> bool:
+        try:
+            n_blobs = len(page.query_selector_all(COMPOSER_THUMBNAIL))
+        except Exception:
+            n_blobs = 0
+        if n_blobs >= expected_count:
+            return True
+        # Send button enabled is independent evidence the composer has content.
+        return _send_button_ready(page)
+
+    # Attempt 1: give a busy machine / large file up to 60s.
+    if _wait_until(_attached, timeout_ms=60_000):
+        _log_upload_state(page, expected_count, "attached")
+        return
+
+    # Retry the attach once — ChatGPT occasionally drops the first set_input_files.
+    logger.info("upload not confirmed after 60s; re-attaching files once")
+    try:
+        page.set_input_files(FILE_INPUT, list(image_paths))
+    except Exception as exc:
+        logger.info("re-attach set_input_files failed: %s", exc)
+
+    if _wait_until(_attached, timeout_ms=60_000):
+        _log_upload_state(page, expected_count, "attached after retry")
+        return
+
+    # Give up — screenshot + a plain message naming the file(s) that failed.
+    _log_upload_state(page, expected_count, "FAILED")
+    _save_error_screenshot(page, run_id)
+    names = ", ".join(Path(p).name for p in image_paths) or "(no files)"
+    raise GenerationTimeoutError(
+        f"Upload did not attach in the composer: {names}. "
+        f"No blob thumbnail appeared and the send button never enabled."
     )
 
-    page.wait_for_selector(SEND_BUTTON, state="visible", timeout=10_000)
+
+def _send_button_ready(page: Page) -> bool:
+    """True if the send button exists and is enabled (composer has content)."""
+    try:
+        btn = page.query_selector(SEND_BUTTON)
+        if not btn:
+            return False
+        # Visible + not disabled. ChatGPT disables it while the composer is empty.
+        if not btn.is_visible():
+            return False
+        disabled = btn.get_attribute("disabled")
+        aria = btn.get_attribute("aria-disabled")
+        return disabled is None and aria not in ("true", "")
+    except Exception:
+        return False
+
+
+def _wait_until(predicate, timeout_ms: int, poll_ms: int = 500) -> bool:
+    """Poll `predicate` until true or the timeout elapses. Never raises."""
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline:
+        try:
+            if predicate():
+                return True
+        except Exception:
+            pass
+        time.sleep(poll_ms / 1000.0)
+    try:
+        return bool(predicate())
+    except Exception:
+        return False
+
+
+def _log_upload_state(page: Page, expected_count: int, phase: str) -> None:
+    """Log what the upload check saw: blob count, send-button presence/enabled."""
+    try:
+        n_blobs = len(page.query_selector_all(COMPOSER_THUMBNAIL))
+    except Exception:
+        n_blobs = -1
+    present = enabled = False
+    try:
+        btn = page.query_selector(SEND_BUTTON)
+        present = btn is not None
+        enabled = _send_button_ready(page)
+    except Exception:
+        pass
+    logger.info(
+        "upload check [%s]: blob_thumbnails=%d (expected %d) send_button_present=%s send_button_enabled=%s",
+        phase, n_blobs, expected_count, present, enabled,
+    )
 
 
 def _save_error_screenshot(page: Page, run_id: str) -> None:

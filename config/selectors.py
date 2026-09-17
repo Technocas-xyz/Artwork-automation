@@ -28,3 +28,18 @@ COMPOSER_THUMBNAIL = "img[src^='blob:']"
 SEND_BUTTON        = "[data-testid='send-button']"
 
 CONVERSATION_TURN = "section[data-testid^='conversation-turn-']"
+
+# Positive markers that the LOGGED-OUT / login screen is showing. We use these to
+# confirm a real logout rather than inferring it from a missing prompt box (which
+# is also missing while the editor is merely slow to render). Kept broad on
+# purpose so a wording/markup tweak on ChatGPT's auth screen still matches.
+LOGIN_SCREEN = (
+    "[data-testid='login-button'], "
+    "[data-testid='mobile-login-button'], "
+    "[data-testid='signup-button'], "
+    "[data-testid='welcome-login-button'], "
+    "a[href*='/auth/login'], "
+    "button:has-text('Log in'), "
+    "button:has-text('Sign up'), "
+    "a:has-text('Log in')"
+)

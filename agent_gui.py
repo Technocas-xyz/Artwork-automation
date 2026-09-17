@@ -68,8 +68,11 @@ _TRAY_COLORS = {
 class AgentGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Artwork Agent")
-        self.root.geometry("440x300")
+        # Show the running code version in the title so a designer can confirm a
+        # fix has landed without opening code_version.txt on their machine.
+        self._code_version = getattr(agent, "AGENT_CODE_VERSION", "unknown")
+        self.root.title(f"Artwork Agent  v{self._code_version}")
+        self.root.geometry("440x320")
         self.root.resizable(False, False)
 
         cfg = load_config()
@@ -90,6 +93,7 @@ class AgentGUI:
         # commands (sign-in / start / stop) from this queue. Nothing else ever
         # launches a context, so the profile is locked exactly once.
         self._cmd_queue: queue.Queue = queue.Queue()
+        self._pw = None               # Playwright driver, owned by the browser thread only
         self._context = None          # owned by the browser thread only
         self._page = None             # owned by the browser thread only
         self._signed_in = False       # set True after a successful sign-in while the context stays open
@@ -144,6 +148,12 @@ class AgentGUI:
         # Not packed until an update is actually staged.
         self.update_frame.grid_remove()
 
+        # Always-visible running code version — the one place a designer can read
+        # it off without opening code_version.txt.
+        ttk.Label(frm, text=f"Code version v{self._code_version}",
+                  foreground="#9ca3af").grid(row=7, column=0, columnspan=3,
+                                             sticky="w", padx=12, pady=(10, 0))
+
         frm.columnconfigure(1, weight=1)
 
     def _set_state(self, state: str, detail: str = ""):
@@ -191,11 +201,15 @@ class AgentGUI:
         self._cmd_queue.put(("start", None))
 
     def _on_stop(self):
-        # Ask the loop to stop; the context stays open (only Quit/close closes it).
+        # Ask the claim loop to stop, THEN fully tear the browser down on its
+        # owning thread. A full teardown (context + Playwright driver) lets a
+        # designer recover from a wedged session with Stop -> Start, without
+        # killing the whole process. The next Start relaunches cleanly.
         self._stop_event.set()
         self.stop_btn.config(state="disabled")
         self.start_btn.config(state="normal")
         self._set_state("stopped", "Stopped")
+        self._cmd_queue.put(("teardown", None))
 
     # -------------------------------------------------- single browser thread
     def _browser_loop(self):
@@ -217,11 +231,20 @@ class AgentGUI:
                 self._do_signin()
             elif cmd == "start":
                 self._do_start()
+            elif cmd == "teardown":
+                # Full teardown on the OWNING thread so a designer can recover
+                # (Stop) without killing the process. Next signin/start relaunches.
+                self._close_context()
+                self._events.put(("log", "browser fully torn down; ready to start again"))
 
     def _ensure_context(self):
-        """Launch the context exactly once; reuse it forever after."""
+        """Launch the context exactly once; reuse it forever after.
+
+        Holds the Playwright driver (self._pw) so teardown can stop it — not
+        stopping it leaks the sync event loop onto this thread and breaks the
+        next launch."""
         if self._context is None:
-            self._context, self._page = agent.open_browser_context()
+            self._pw, self._context, self._page = agent.open_browser_context()
         return self._page
 
     def _do_signin(self):
@@ -240,6 +263,11 @@ class AgentGUI:
             self._events.put(("signin_done", logged_in))
         except Exception as exc:
             traceback.print_exc()
+            # A failed sign-in must NOT leave a half-open context / leaked
+            # Playwright driver on this thread — that is what made every retry
+            # fail with 'Sync API inside the async loop'. Tear everything down
+            # here (we are on the browser thread) so the next attempt is clean.
+            self._close_context()
             self._events.put(("signin_error", str(exc)))
 
     def _do_start(self):
@@ -289,11 +317,26 @@ class AgentGUI:
             self._events.put(("status", ("error", str(exc))))
 
     def _close_context(self):
-        if self._context is not None:
-            try:
-                self._context.close()
-            except Exception:
-                pass
+        """FULL teardown: close the context AND stop the Playwright driver.
+
+        Runs only on the browser thread. Stopping pw is what actually clears the
+        sync driver's event loop from this thread; closing the context alone
+        leaves it attached and the next launch fails with the async-loop error.
+        Always resets state so a subsequent launch starts from a clean slate,
+        even if one of the teardown steps raised."""
+        try:
+            if self._context is not None:
+                try:
+                    self._context.close()
+                except Exception:
+                    pass
+            if self._pw is not None:
+                try:
+                    self._pw.stop()
+                except Exception:
+                    pass
+        finally:
+            self._pw = None
             self._context = None
             self._page = None
             self._signed_in = False

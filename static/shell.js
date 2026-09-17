@@ -273,7 +273,8 @@
           if (s.agent_connected) {
             pill.className = "agent-pill agent-pill-on";
             var nm = s.agent_name || "agent";
-            textEl.textContent = "Agent connected — " + nm;
+            var ver = s.agent_version ? "  v" + s.agent_version : "";
+            textEl.textContent = "Agent connected — " + nm + ver;
             if (dl) dl.classList.remove("agent-dl-prominent");
             if (bnr) bnr.style.display = "none";
           } else {
