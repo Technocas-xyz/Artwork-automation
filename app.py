@@ -2604,6 +2604,7 @@ def nextcloud_artworks(customer: str = "", limit: int = 500):
     files = [
         _decorate(e, cfg) for e in entries
         if not e.is_dir and Path(e.name).suffix.lower() in VAULT_IMAGE_EXTENSIONS
+        and not nc.is_sent_file(e.path)
     ]
     files.sort(key=lambda f: f["modified_ms"], reverse=True)
     return {
