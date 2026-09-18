@@ -2394,7 +2394,10 @@ WORKFLOW_TARGETS = {
     "artwork": {"label": "Artwork Generation", "multiple": True},
     "mockup": {"label": "Artwork Extraction", "multiple": False},
     "custom": {"label": "Custom Operation", "multiple": False},
-    "text": {"label": "Text (as text image)", "multiple": False},
+    "text": {"label": "Text (read wording from image)", "multiple": False},
+    # Text + Image: the vault file is the client's image; the operator picks the
+    # mode (element / style / replace) in the tab before entering wording.
+    "textimage": {"label": "Text + Image", "multiple": False},
 }
 
 

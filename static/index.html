@@ -157,6 +157,7 @@ var historyItems=[],textImageFile="",mockupImageFile="",workerAlive=true;
 var textMode="typed",replaceImageFile="";  // Text workflow input mode + replace-design upload
 var currentTypedText="",replaceNewText="",replaceTargetText="";  // preserved across mode-tab switches
 var referenceImageFile="",imageModeText="";  // UC-3: reference image + wording for image_element/image_style
+var pendingImageFile="";  // Text+Image file sent from the vault before a mode is picked
 var currentWorkflow="nextcloud";
 // --- Arriving from the Design Studio --------------------------------------
 // The studio's vault sends one file over by link. psAsset is that file's row in
@@ -266,10 +267,12 @@ function renderCols(){
   ncStopPolling();
   if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else if(currentWorkflow==="custom"){textImageFile="";mockupImageFile="";renderCustomCol1();renderCustomCol2()}else{
     // "text" and "textimage" share the same renderers; they differ only in which
-    // modes they expose. Keep text_mode valid for the active tab.
+    // modes they expose. Keep text_mode valid for the active tab — EXCEPT the
+    // deliberate unset state ("") used when a Text + Image file arrives from the
+    // vault: we leave the mode unpicked so the operator chooses it, never guess.
     mockupImageFile="";artworkFiles=[];
     var allowed=_textModesFor(currentWorkflow).map(function(m){return m[0]});
-    if(allowed.indexOf(textMode)<0)textMode=allowed[0];
+    if(textMode!==""&&allowed.indexOf(textMode)<0)textMode=allowed[0];
     renderCol1();renderCol2();
   }
   applyNcPrefill();
@@ -301,11 +304,28 @@ function renderCol1(){
   });
   tabs+='</div>';
   col1.innerHTML='<div class="col-title">'+title+'</div>'+tabs+'<div id="tmodePanel"></div>';
-  col1.querySelectorAll(".tmode-tab").forEach(function(b){b.onclick=function(){textMode=b.dataset.tmode;renderCol1();renderCol2();updBtn()}});
+  col1.querySelectorAll(".tmode-tab").forEach(function(b){b.onclick=function(){
+    textMode=b.dataset.tmode;
+    // A Text + Image file sent from the vault is held until a mode is chosen;
+    // now route it into the variable that mode actually reads from.
+    if(pendingImageFile){
+      if(textMode==="replace")replaceImageFile=pendingImageFile;
+      else if(textMode==="image_element"||textMode==="image_style")referenceImageFile=pendingImageFile;
+      pendingImageFile="";
+    }
+    renderCol1();renderCol2();updBtn();
+  }});
   renderTextModePanel();
 }
 function renderTextModePanel(){
   var panel=$("tmodePanel");if(!panel)return;
+  if(textMode===""){
+    // Text + Image file arrived from the vault but no mode is chosen yet. Show
+    // the image and ask the operator to pick a mode — never guess one.
+    var prev=pendingImageFile?'<div class="uploaded-preview"><img src="/input/'+pendingImageFile+'"></div>':'';
+    panel.innerHTML=prev+'<div class="or-divider">Choose how to use this image above, then enter the wording.</div>';
+    return;
+  }
   if(textMode==="typed"){
     panel.innerHTML='<input type="text" class="text-input-large" id="designText" placeholder="Type the text for the design">';
     var dt=$("designText");if(dt){dt.value=(currentTypedText||"");dt.oninput=function(){currentTypedText=dt.value;updBtn()}}
@@ -383,7 +403,8 @@ function updBtn(){
   var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();return}
   var dt=$("designText"),cn=$("cn"),ti=$("ti");
   var hasInput;
-  if(textMode==="replace"){hasInput=replaceImageFile&&(replaceNewText||"").trim()}
+  if(textMode===""){hasInput=false}  // Text + Image mode not yet chosen — nothing to submit
+  else if(textMode==="replace"){hasInput=replaceImageFile&&(replaceNewText||"").trim()}
   else if(textMode==="from_image"){hasInput=textImageFile}
   else if(textMode==="image_element"||textMode==="image_style"){hasInput=referenceImageFile&&(imageModeText||"").trim()}
   else{hasInput=(dt&&dt.value.trim())||(currentTypedText||"").trim()}
@@ -1918,7 +1939,8 @@ var NC_TARGETS=[
   {key:"artwork",label:"Artwork Generation",multiple:true},
   {key:"mockup",label:"Artwork Extraction",multiple:false},
   {key:"custom",label:"Custom Operation",multiple:false},
-  {key:"text",label:"Text (as text image)",multiple:false}
+  {key:"text",label:"Text (read wording from image)",multiple:false},
+  {key:"textimage",label:"Text + Image",multiple:false}
 ];
 var ncPath="",ncCustomerFolder="",ncArtworks=null,ncSelected={},ncCustomers=[],ncCustomerSet={},ncCustomerFilter="";
 var ncStatusInfo=null,ncRecent=[],ncFresh={},ncPrefill=null,ncMsg="",ncBusy=false;
@@ -2099,7 +2121,7 @@ function ncSendBar(){
     h+='<button class="nc-send-btn" data-nc-send="'+t.key+'"'+(ok?"":" disabled")+'>'+(ncBusy?"Sending…":"→ "+esc(t.label))+'</button>';
   }
   h+='</div>';
-  if(n>1)h+='<div class="nc-hint">Artwork Extraction, Custom Operation and Text take one file at a time.</div>';
+  if(n>1)h+='<div class="nc-hint">Only Artwork Generation takes several files; the others take one at a time.</div>';
   h+='<div class="nc-hint">Selected files are copied into this job. Nothing in Nextcloud is moved or changed.</div>';
   if(ncMsg)h+='<div class="blocker-msg">'+esc(ncMsg)+'</div>';
   return h+'</div>';
@@ -2135,7 +2157,13 @@ function ncSend(target){
       if(target==="artwork"){names.forEach(function(n){if(artworkFiles.indexOf(n)<0)artworkFiles.push(n)})}
       else if(target==="mockup")mockupImageFile=names[0];
       else if(target==="custom")customFile=names[0];
-      else if(target==="text")textImageFile=names[0];
+      else if(target==="text"){textMode="from_image";textImageFile=names[0]}
+      else if(target==="textimage"){
+        // Text + Image: hold the file and leave the mode UNSET so the operator
+        // picks element / style / replace before entering the wording.
+        textMode="";pendingImageFile=names[0];
+        referenceImageFile="";replaceImageFile="";
+      }
       // The vault path already says who the customer is and which artwork
       // number this is — no reason to make the operator retype it.
       ncPrefill={client:d.client||"",task_id:d.task_id||""};
@@ -2147,7 +2175,7 @@ function ncSend(target){
 }
 function applyNcPrefill(){
   if(!ncPrefill)return;
-  var map={text:["cn","ti"],mockup:["mcn","mti"],artwork:["acn","ati"],custom:["ccn","cti"]};
+  var map={text:["cn","ti"],textimage:["cn","ti"],mockup:["mcn","mti"],artwork:["acn","ati"],custom:["ccn","cti"]};
   var ids=map[currentWorkflow];if(!ids)return;
   var cn=$(ids[0]),ti=$(ids[1]);
   if(!cn&&!ti)return;
