@@ -153,13 +153,25 @@
       nav.appendChild(it);
     });
 
+    // Settings section. The "Users" item opens the admin user-management modal
+    // (window.openAdminUsers, defined in index.html). It is admin-only, so it
+    // stays hidden until /api/auth/me confirms the current user is an admin —
+    // without that gate the item did nothing on click, which read as "Settings
+    // does nothing".
     nav.appendChild(sectionLabel("Settings"));
-    var settingsItem = navItem("settings", "Settings", {});
-    settingsItem.addEventListener("click", function () {
+    var usersItem = navItem("users", "Users", {});
+    usersItem.style.display = "none";   // revealed for admins below
+    usersItem.addEventListener("click", function () {
       clearSidebarActive();
-      settingsItem.classList.add("active");
+      usersItem.classList.add("active");
+      if (typeof window.openAdminUsers === "function") window.openAdminUsers();
     });
-    nav.appendChild(settingsItem);
+    nav.appendChild(usersItem);
+    // Reveal for admins only.
+    fetch("/api/auth/me", { headers: { "Accept": "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { if (d && d.role === "admin") usersItem.style.display = ""; })
+      .catch(function () {});
 
     // "New Project" resets to the first workflow tab.
     var newBtn = sidebar.querySelector(".sb-newproject");
@@ -260,6 +272,17 @@
     document.getElementById("agentBannerBtn").addEventListener("click", function () { openAgentPanel(); });
 
     // --- Agent connection status: poll /api/status every 5s ---
+    // Relative "last seen" from an epoch-seconds timestamp.
+    function _agoText(epochSec) {
+      if (!epochSec) return "never seen";
+      var s = Math.max(0, Math.round(Date.now() / 1000 - epochSec));
+      if (s < 10) return "just now";
+      if (s < 60) return s + "s ago";
+      if (s < 3600) return Math.round(s / 60) + "m ago";
+      if (s < 86400) return Math.round(s / 3600) + "h ago";
+      return Math.round(s / 86400) + "d ago";
+    }
+
     function pollAgentStatus() {
       fetch("/api/status", { headers: { "Accept": "application/json" } })
         .then(function (r) { return r.ok ? r.json() : null; })
@@ -274,7 +297,12 @@
             pill.className = "agent-pill agent-pill-on";
             var nm = s.agent_name || "agent";
             var ver = s.agent_version ? "  v" + s.agent_version : "";
-            textEl.textContent = "Agent connected — " + nm + ver;
+            // Last-seen of the labelled agent, so "connected" can be sanity-
+            // checked at a glance (a stale heartbeat is now visible).
+            var seenTxt = "";
+            var la = (s.agents || []).filter(function (a) { return a.name === nm; })[0];
+            if (la && la.last_seen) seenTxt = "  (" + _agoText(la.last_seen) + ")";
+            textEl.textContent = "Agent connected — " + nm + ver + seenTxt;
             if (dl) dl.classList.remove("agent-dl-prominent");
             if (bnr) bnr.style.display = "none";
           } else {

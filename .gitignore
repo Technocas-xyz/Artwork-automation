@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 agent_tokens.json
+users.json
 downloads/
 dist/
 build/

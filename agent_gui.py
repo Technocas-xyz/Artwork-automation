@@ -47,6 +47,37 @@ def save_config(cfg: dict) -> None:
         print(f"[gui] could not save config: {exc}")
 
 
+# --- Password obfuscation (NOT encryption) ---------------------------------
+# The manager accepted storing the password on the designer's machine (see the
+# task summary). We at least keep it out of plain sight in the config file with
+# a reversible XOR+base64 scramble against a fixed local key. This is
+# obfuscation, not security: anyone with the file and this code can recover it.
+# It is deliberately never printed or logged.
+import base64 as _b64
+
+_OBF_KEY = b"artwork-agent-local-obfuscation-key"
+
+
+def _xor(data: bytes) -> bytes:
+    k = _OBF_KEY
+    return bytes(b ^ k[i % len(k)] for i, b in enumerate(data))
+
+
+def obfuscate_password(plain: str) -> str:
+    if not plain:
+        return ""
+    return _b64.b64encode(_xor(plain.encode("utf-8"))).decode("ascii")
+
+
+def deobfuscate_password(scrambled: str) -> str:
+    if not scrambled:
+        return ""
+    try:
+        return _xor(_b64.b64decode(scrambled.encode("ascii"))).decode("utf-8")
+    except Exception:
+        return ""
+
+
 # --- Tray icon drawing (coloured dot) ---
 def _make_icon(color: str):
     from PIL import Image, ImageDraw
@@ -77,8 +108,11 @@ class AgentGUI:
 
         cfg = load_config()
         self.server_var = tk.StringVar(value=cfg.get("server_url", DEFAULT_SERVER))
-        self.token_var = tk.StringVar(value=cfg.get("token", ""))
-        self.name_var = tk.StringVar(value=cfg.get("name", os.getenv("COMPUTERNAME", "designer")))
+        # Agent now signs in with the same email + password as the website.
+        self.email_var = tk.StringVar(value=cfg.get("email", ""))
+        self.password_var = tk.StringVar(value=deobfuscate_password(cfg.get("password_obf", "")))
+        # The token is obtained at Start by authenticating; not shown or entered.
+        self._token = ""
 
         self._events: queue.Queue = queue.Queue()
         self._stop_event = threading.Event()
@@ -113,11 +147,11 @@ class AgentGUI:
         ttk.Label(frm, text="Server URL").grid(row=0, column=0, sticky="w", **pad)
         ttk.Entry(frm, textvariable=self.server_var, width=40).grid(row=0, column=1, columnspan=2, sticky="we", **pad)
 
-        ttk.Label(frm, text="Agent token").grid(row=1, column=0, sticky="w", **pad)
-        ttk.Entry(frm, textvariable=self.token_var, width=40, show="*").grid(row=1, column=1, columnspan=2, sticky="we", **pad)
+        ttk.Label(frm, text="Email").grid(row=1, column=0, sticky="w", **pad)
+        ttk.Entry(frm, textvariable=self.email_var, width=40).grid(row=1, column=1, columnspan=2, sticky="we", **pad)
 
-        ttk.Label(frm, text="Your name").grid(row=2, column=0, sticky="w", **pad)
-        ttk.Entry(frm, textvariable=self.name_var, width=40).grid(row=2, column=1, columnspan=2, sticky="we", **pad)
+        ttk.Label(frm, text="Password").grid(row=2, column=0, sticky="w", **pad)
+        ttk.Entry(frm, textvariable=self.password_var, width=40, show="*").grid(row=2, column=1, columnspan=2, sticky="we", **pad)
 
         btns = ttk.Frame(frm)
         btns.grid(row=3, column=0, columnspan=3, sticky="we", pady=(10, 4))
@@ -168,32 +202,53 @@ class AgentGUI:
 
     # -------------------------------------------------- config
     def _persist(self):
+        # Persist the server URL + email, and the password OBFUSCATED (never in
+        # plain text). The password is not logged anywhere.
         save_config({"server_url": self.server_var.get().strip(),
-                     "token": self.token_var.get().strip(),
-                     "name": self.name_var.get().strip()})
+                     "email": self.email_var.get().strip(),
+                     "password_obf": obfuscate_password(self.password_var.get())})
 
-    def _apply_config_to_agent(self):
+    def _sign_in_get_token(self) -> bool:
+        """Authenticate email+password against the server and store the token.
+
+        Returns True on success. On failure shows the server's PLAIN message
+        (bad credentials vs disabled account) or a connection error, and returns
+        False. Persists settings (email + obfuscated password) regardless so the
+        designer does not retype them next launch."""
+        server = self.server_var.get().strip()
+        email = self.email_var.get().strip()
+        password = self.password_var.get()
+        if not email or not password:
+            messagebox.showwarning("Sign in", "Enter your email and password first.")
+            return False
         self._persist()
-        agent.configure(server_url=self.server_var.get().strip(),
-                        token=self.token_var.get().strip(),
-                        name=self.name_var.get().strip())
+        try:
+            self._token = agent.authenticate(server, email, password)
+        except agent.AuthError as exc:
+            self._token = ""
+            self._set_state("error", str(exc))
+            messagebox.showerror("Sign-in failed", str(exc))
+            return False
+        # Configure the agent with the freshly obtained token. The display name
+        # is the email (identity comes from the token; the name is just a label).
+        agent.configure(server_url=server, token=self._token, name=email)
+        return True
 
     # -------------------------------------------------- actions
     def _on_signin(self):
-        if not self.token_var.get().strip():
-            messagebox.showwarning("Token needed", "Paste your agent token first.")
+        # Authenticate first (email+password -> token), then open ChatGPT.
+        if not self._sign_in_get_token():
             return
-        self._apply_config_to_agent()
         self.signin_btn.config(state="disabled")
         self.status_var.set("Opening ChatGPT — sign in, then close the browser…")
         # Route to the single browser thread — never open a context on another thread.
         self._cmd_queue.put(("signin", None))
 
     def _on_start(self):
-        if not self.token_var.get().strip():
-            messagebox.showwarning("Token needed", "Paste your agent token first.")
+        # Authenticate first (email+password -> token). A disabled account or
+        # wrong password is rejected here with a plain message, before any work.
+        if not self._sign_in_get_token():
             return
-        self._apply_config_to_agent()
         self._stop_event.clear()
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")

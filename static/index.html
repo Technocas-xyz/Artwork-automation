@@ -105,7 +105,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 <link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
-<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="textimage">Text + Image</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
+<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="textimage">Text + Image</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><button id="adminUsersBtn" onclick="openAdminUsers()" style="display:none;font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:8px">Users</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
 <div class="columns">
 <div class="col" id="col1"></div>
 <div class="col" id="col2"></div>
@@ -138,6 +138,25 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
       <div id="asExisting" style="margin-top:18px"></div>
     </div>
     <div class="vm-foot"><span id="asMsg"></span><button class="vm-btn ghost" onclick="closeAgentSetup()">Close</button></div>
+  </div>
+</div>
+<div id="adminUsersOverlay" class="vm-overlay" style="display:none">
+  <div class="vm-modal" style="max-width:720px;width:100%;max-height:88vh;display:flex;flex-direction:column;background:var(--surface);border-radius:12px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+    <div class="vm-head"><h3>Users</h3><button class="vm-x" onclick="closeAdminUsers()">&times;</button></div>
+    <div class="vm-body">
+      <p class="vm-hint" style="margin-top:0">Create and manage the people who can sign in. Each user signs in to the agent with the email and password set here.</p>
+      <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:16px">
+        <div style="font-weight:600;font-size:.86rem;margin-bottom:8px">Create a user</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div><label>Email</label><input type="email" id="cuUser" autocomplete="off" placeholder="e.g. sahar@studio.com"></div>
+          <div><label>Password</label><input type="password" id="cuPass" autocomplete="new-password"></div>
+          <div><label>Role</label><select id="cuRole"><option value="designer">Designer</option><option value="admin">Admin</option></select></div>
+        </div>
+        <button class="vm-btn primary" style="margin-top:10px" onclick="adminCreateUser()">Create user</button>
+      </div>
+      <div id="auList"></div>
+    </div>
+    <div class="vm-foot"><span id="auMsg"></span><button class="vm-btn ghost" onclick="closeAdminUsers()">Close</button></div>
   </div>
 </div>
 <script>
@@ -531,7 +550,7 @@ function render(job){
     clr();var activeT=job.active_time?Math.round(job.active_time):0;
     var doneMsg=job.status==="done_with_errors"?'Done with some errors ('+fmt(activeT)+' processing time)':'All done! ('+fmt(activeT)+' processing time)';
     var doneClass=job.status==="done_with_errors"?"awaiting":"done";
-    statusArea.innerHTML='<div class="status-box '+doneClass+'">'+doneMsg+'</div>';
+    statusArea.innerHTML='<div class="status-box '+doneClass+'">'+doneMsg+'</div>'+createdByLine(job);
     if(job.workflow==="mockup")resultArea.innerHTML=renderMockupResults(job);
     else if(job.workflow==="artwork")resultArea.innerHTML=renderArtworkResults(job);
     else if(job.workflow==="custom")resultArea.innerHTML=renderCustomResults(job);
@@ -1723,6 +1742,13 @@ function stageThumbs(job,si){
   });
   return det;
 }
+// Attribution line shown under the done banner and in history. Empty when the
+// job carries no creator (e.g. legacy jobs made before multi-user).
+function createdByLine(job){
+  var n=job&&job.created_by_name;
+  if(!n)return "";
+  return '<div class="job-header" style="margin-bottom:8px">Created by '+esc(n)+'</div>';
+}
 function addHist(job){historyItems.unshift(job);historySection.style.display="block";renderHist()}
 function renderHist(){
   historyList.innerHTML="";
@@ -1737,14 +1763,16 @@ function renderHist(){
     // not have is what caused the 404s on stage1.png / stage2.png.
     var det=stageThumbs(job,si);
     var div=document.createElement("div");div.className="history-item";
-    div.innerHTML='<span class="hi-label">'+st+'</span> \u2014 '+esc(job.client)+' / '+esc(job.task_id)+' \u2014 '+desc+'<div class="history-detail" id="'+did+'">'+det+'</div>';
+    var byTag=job.created_by_name?' <span style="color:var(--muted)">· by '+esc(job.created_by_name)+'</span>':'';
+    div.innerHTML='<span class="hi-label">'+st+'</span> \u2014 '+esc(job.client)+' / '+esc(job.task_id)+' \u2014 '+desc+byTag+'<div class="history-detail" id="'+did+'">'+det+'</div>';
     div.onclick=function(){$(did).classList.toggle("open")};
     historyList.appendChild(div);
   });
 }
 setInterval(function(){fetch("/api/status").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(s){if(!s)return;var wasAlive=workerAlive;workerAlive=s.worker_alive;isLoggedIn=!!s.logged_in;workerStatus.innerHTML=agentBannerHtml(s);if(!s.worker_alive&&wasAlive){clr();var b=$("genBtn");if(b)b.disabled=true}updBtn()})},5000);
 // Auth: load user info and handle 401 globally
-fetch("/api/auth/me").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(d){if(d){var ui=$("userInfo");if(ui)ui.innerHTML='<span>'+d.username+'</span><a href="#" onclick="doLogout();return false" style="color:var(--accent);text-decoration:none;font-weight:600">Sign out</a>'}});
+var CURRENT_USER={username:"",display_name:"",role:""};
+fetch("/api/auth/me").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(d){if(d){CURRENT_USER=d;var ui=$("userInfo");if(ui)ui.innerHTML='<span>'+esc(d.display_name||d.username)+(d.role==="admin"?' · admin':'')+'</span><a href="#" onclick="doLogout();return false" style="color:var(--accent);text-decoration:none;font-weight:600">Sign out</a>';var ab=$("adminUsersBtn");if(ab)ab.style.display=(d.role==="admin")?"inline-block":"none"}});
 window.doLogout=function(){fetch("/api/auth/logout",{method:"POST"}).then(function(){window.location.href="/login"})};
 
 // === AGENT SETUP =========================================================
@@ -1806,6 +1834,87 @@ window.copyAgentField=function(id){
   function ok(){asMsg("Copied.","vm-ok")}
   if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(val).then(ok,function(){try{document.execCommand("copy");ok()}catch(e){}})}
   else{try{document.execCommand("copy");ok()}catch(e){}}
+};
+
+// === ADMIN: USER MANAGEMENT (admin only) ================================
+function auMsg(text,cls){var el=$("auMsg");if(!el)return;el.textContent=text||"";el.className=cls||""}
+function copyAdminField(id){
+  var el=$(id);if(!el)return;el.select();var val=el.value;
+  function ok(){auMsg("Copied.","vm-ok")}
+  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(val).then(ok,function(){try{document.execCommand("copy");ok()}catch(e){}})}
+  else{try{document.execCommand("copy");ok()}catch(e){}}
+}
+window.copyAdminField=copyAdminField;
+function auFmtLogin(sec){
+  if(!sec)return "never";
+  var s=Math.round(Date.now()/1000-sec);
+  if(s<60)return "just now";
+  if(s<3600)return Math.round(s/60)+"m ago";
+  if(s<86400)return Math.round(s/3600)+"h ago";
+  return Math.round(s/86400)+"d ago";
+}
+window.openAdminUsers=function(){
+  var ov=$("adminUsersOverlay");if(!ov)return;
+  ov.style.display="flex";auMsg("","");
+  loadAdminUsers();
+};
+window.closeAdminUsers=function(){var ov=$("adminUsersOverlay");if(ov)ov.style.display="none"};
+function loadAdminUsers(){
+  fetch("/api/admin/users").then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail||"Failed to load users")});return r.json()}).then(function(d){
+    var box=$("auList");if(!box)return;
+    var me=(d.me||"").toLowerCase();
+    var list=d.users||[];
+    if(!list.length){box.innerHTML='<div class="vm-hint">No users yet.</div>';return}
+    var h='<label style="margin-top:0">Users</label><div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">';
+    for(var i=0;i<list.length;i++){
+      var u=list[i];
+      var isSelf=(u.username||"").toLowerCase()===me;
+      var roleBadge=u.role==="admin"?'<span style="color:var(--accent);font-weight:600">admin</span>':'designer';
+      var status=u.disabled?'<span style="color:#dc2626;font-weight:600">disabled</span>':'<span style="color:#16a34a">active</span>';
+      h+='<div style="padding:10px;font-size:.8rem;'+(i?'border-top:1px solid var(--border)':'')+'">'
+        +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">'
+        +'<span><b>'+esc(u.display_name||u.username)+'</b> · '+roleBadge+' · '+status+'</span>'
+        +'<span style="color:var(--muted);font-size:.72rem">last login: '+auFmtLogin(u.last_login)+'</span></div>'
+        +'<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">';
+      // Disable/enable — an admin cannot disable themselves.
+      if(!isSelf){
+        h+='<button class="vm-btn ghost" style="font-size:.72rem;padding:4px 8px" onclick="adminToggleDisabled(\''+esc(u.username)+'\','+(u.disabled?'false':'true')+')">'+(u.disabled?'Enable':'Disable')+'</button>';
+      }
+      h+='<button class="vm-btn ghost" style="font-size:.72rem;padding:4px 8px" onclick="adminResetPassword(\''+esc(u.username)+'\')">Reset password</button>';
+      h+='</div></div>';
+    }
+    box.innerHTML=h+'</div>';
+  }).catch(function(e){auMsg(e.message,"vm-err")});
+}
+window.adminCreateUser=function(){
+  var email=($("cuUser").value||"").trim();
+  var pass=($("cuPass").value||"");
+  var role=$("cuRole").value;
+  if(!email||!pass){auMsg("Email and password are required.","vm-err");return}
+  auMsg("Creating…","");
+  // The username IS the email. display_name defaults to the email server-side.
+  fetch("/api/admin/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:email,password:pass,display_name:email,role:role})})
+    .then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail||"Create failed")});return r.json()})
+    .then(function(){
+      auMsg("User created — they can now sign in to the agent with this email and password.","vm-ok");
+      $("cuUser").value="";$("cuPass").value="";
+      loadAdminUsers();
+    }).catch(function(e){auMsg(e.message,"vm-err")});
+};
+window.adminToggleDisabled=function(username,disable){
+  fetch("/api/admin/users/"+encodeURIComponent(username)+"/disable",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({disabled:disable})})
+    .then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail||"Failed")});return r.json()})
+    .then(function(){auMsg(disable?"User disabled — their agent token is now invalid.":"User enabled.","vm-ok");loadAdminUsers()})
+    .catch(function(e){auMsg(e.message,"vm-err")});
+};
+window.adminResetPassword=function(username){
+  var pw=prompt("New password for "+username+":");
+  if(pw===null)return;
+  if(!pw.trim()){auMsg("Password cannot be empty.","vm-err");return}
+  fetch("/api/admin/users/"+encodeURIComponent(username)+"/reset-password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pw})})
+    .then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail||"Failed")});return r.json()})
+    .then(function(){auMsg("Password reset for "+username+".","vm-ok")})
+    .catch(function(e){auMsg(e.message,"vm-err")});
 };
 // Fetch the agent build via JS so a "not ready" (404) shows the friendly server
 // message in the modal instead of navigating the browser to raw JSON. On

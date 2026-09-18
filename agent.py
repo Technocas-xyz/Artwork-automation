@@ -109,6 +109,40 @@ def configure(server_url: str | None = None, token: str | None = None, name: str
         AGENT_NAME = name
     _HEADERS = {"Authorization": f"Bearer {AGENT_TOKEN}"}
 
+
+class AuthError(Exception):
+    """Raised when email+password sign-in fails, carrying a plain message."""
+
+
+def authenticate(server_url: str, email: str, password: str) -> str:
+    """Exchange the designer's email + password for their agent token.
+
+    Returns the token on success. Raises AuthError with a plain, designer-facing
+    message on failure — the server already distinguishes bad credentials from a
+    disabled account, and we surface a connection problem separately. The
+    password is only sent over the request body; it is never logged here."""
+    url = server_url.rstrip("/") + "/api/agent/authenticate"
+    try:
+        r = requests.post(url, json={"email": email, "password": password}, timeout=30)
+    except Exception as exc:
+        raise AuthError(f"Could not reach the server at {server_url}. Check the "
+                        f"server URL and your connection. ({exc})") from exc
+    if r.status_code == 200:
+        tok = (r.json() or {}).get("token") or ""
+        if not tok:
+            raise AuthError("Server accepted the sign-in but returned no token.")
+        return tok
+    # The server sends a plain, human message in `detail` for 401 (bad creds)
+    # and 403 (disabled). Surface it verbatim rather than a raw HTTP error.
+    detail = ""
+    try:
+        detail = (r.json() or {}).get("detail") or ""
+    except Exception:
+        pass
+    if not detail:
+        detail = f"Sign-in failed (HTTP {r.status_code})."
+    raise AuthError(detail)
+
 # Local working directories (mirror the server's ./input and ./output layout so
 # the unchanged workflow code keeps writing to INPUT_DIR / OUTPUT_DIR).
 _BASE = Path(tempfile.gettempdir()) / "artwork_agent"

@@ -38,6 +38,7 @@ from src.auth import (
     COOKIE_NAME, PUBLIC_PATHS, PUBLIC_PREFIXES,
 )
 from src.agent_tokens import token_name, get_or_create_for_name, touch_token, list_agents
+from src import users
 from src import nextcloud as nc
 from src import printshop
 from src.prompt_registry import (
@@ -62,6 +63,22 @@ from src.nc_live import watcher as nc_watcher
 app = FastAPI(title="Artwork Automation")
 
 
+def _cookie_user_active(username: str) -> bool:
+    """True if the cookie's username maps to an existing, non-disabled user.
+
+    Used by the middleware so a user disabled after login is shut out on their
+    very next request. The .env seed admin is treated as active even before it
+    is written into the store (migration safety)."""
+    try:
+        u = users.get_user(username)
+    except Exception:
+        u = None
+    if u is not None:
+        return not u.get("disabled")
+    # Seed-admin fallback: env admin not yet represented in the store.
+    return (username or "").strip().lower() == ((APP_USERNAME or "").strip().lower())
+
+
 # Auth middleware
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -76,18 +93,27 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Allow login page
         if path == "/login":
             return await call_next(request)
-        # Check auth
+        # Check auth. A valid cookie is necessary but not sufficient: a user
+        # DISABLED after their cookie was issued must be shut out at once, so we
+        # confirm the account still exists and is enabled (with the seed-admin
+        # fallback for the .env admin not yet in the store).
         user = get_current_user(request)
-        if not user:
-            # API calls get 401, page loads get redirect
-            if path.startswith("/api/"):
-                return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
-            return RedirectResponse("/login", status_code=302)
-        # Authenticated — continue
-        return await call_next(request)
+        if user and _cookie_user_active(user):
+            return await call_next(request)
+        # Not authenticated / disabled. API calls get 401, page loads redirect.
+        if path.startswith("/api/"):
+            return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+        return RedirectResponse("/login", status_code=302)
 
 
 app.add_middleware(AuthMiddleware)
+
+# Seed the admin account from .env on first run so nobody is locked out during
+# the move to multi-user login. Idempotent once any user exists.
+try:
+    users.ensure_seed_admin()
+except Exception as _seed_exc:  # never block startup on the seed
+    print(f"[users] seed skipped: {_seed_exc}")
 
 jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
@@ -137,6 +163,12 @@ VAULT_SAVE_SUBFOLDER = "AI Artwork"
 # ---------------------------------------------------------------------------
 AGENT_ONLINE_WINDOW = 90.0          # seconds since last request to count as "connected"
 AGENT_PROGRESS_TIMEOUT = 300.0      # 5 min without progress -> release the job
+# A RUNNING job proves the agent is alive even if a long ChatGPT turn delays the
+# next heartbeat — but only within this grace, never unlimited. A PAUSED
+# (awaiting_*) job proves nothing: it is waiting on a human, so the agent is
+# judged purely on its heartbeat. This is what stopped a shut-down PC whose job
+# sat at an awaiting_* pause from showing "connected" forever.
+AGENT_RUNNING_GRACE = 300.0         # 5 min: a running job extends presence this far past last_seen
 agents: dict[str, dict[str, Any]] = {}   # agent_id -> {name, registered_at, last_seen, logged_in}
 
 
@@ -148,16 +180,25 @@ def _online_agents() -> list[dict]:
     registrant. Callers that only need one representative can take the first
     entry; callers deciding availability should look at the whole list.
 
-    An agent that currently OWNS an active job (running or paused awaiting an
-    operator answer) is always counted online, regardless of last_seen. A busy
-    agent is provably alive; a transient run of failed progress syncs must not
-    make it look offline and trigger a spurious 503 from /api/generate — which
-    was the bug the heartbeat was meant to prevent."""
+    Presence is judged on the heartbeat (last_seen within AGENT_ONLINE_WINDOW).
+    A currently RUNNING job extends that by AGENT_RUNNING_GRACE, so a long
+    ChatGPT turn that delays the next heartbeat does not make a working agent
+    look offline (the spurious-503 bug the heartbeat was meant to prevent).
+
+    A job PAUSED at an awaiting_* status does NOT extend presence: it is waiting
+    on a human, could sit for hours, and tells us nothing about whether the
+    agent process is still alive. Counting a paused-job owner as online forever
+    was what kept a shut-down PC showing "connected" indefinitely."""
     now = time.time()
-    busy_ids = _busy_agent_ids()
-    live = [a for a in agents.values()
-            if now - a.get("last_seen", 0) <= AGENT_ONLINE_WINDOW
-            or a.get("id") in busy_ids]
+    running_ids = _running_agent_ids()
+    live = []
+    for a in agents.values():
+        seen = a.get("last_seen", 0)
+        if now - seen <= AGENT_ONLINE_WINDOW:
+            live.append(a)
+        elif a.get("id") in running_ids and now - seen <= AGENT_RUNNING_GRACE:
+            # Running a job and heartbeat is only a little stale — still alive.
+            live.append(a)
     live.sort(key=lambda a: a.get("last_seen", 0), reverse=True)
     return live
 
@@ -192,18 +233,43 @@ def _heartbeat(agent_id: str | None) -> None:
 
 
 def _requeue_stale_jobs() -> None:
-    """Release jobs whose claiming agent stopped sending progress."""
+    """Release held jobs back to the queue when their agent is gone.
+
+    Two triggers:
+      1. A RUNNING job that has gone silent longer than AGENT_PROGRESS_TIMEOUT
+         (the agent crashed/hung mid-turn).
+      2. ANY held job (running OR paused at awaiting_*) whose owning agent is no
+         longer online. A paused job's work lives in that agent's memory and
+         open browser, so if the agent is dead the job cannot be resumed — hand
+         it to another agent to re-run rather than leaving it stuck forever.
+    Either way the job returns to "queued" and shows as waiting for an agent."""
     now = time.time()
     with _jobs_lock:
+        online_ids = {a.get("id") for a in _online_agents()}
         for j in jobs.values():
-            if j.get("status") == "running" and j.get("claimed_by"):
+            status = j.get("status")
+            claimed_by = j.get("claimed_by")
+            if not claimed_by or status not in _AGENT_BUSY_STATUSES:
+                continue
+
+            reason = None
+            if status == "running":
                 last = j.get("last_progress_at") or j.get("claimed_at") or 0
                 if now - last > AGENT_PROGRESS_TIMEOUT and not j.get("awaiting_input"):
-                    print(f"[server] Releasing stale job {j['id']} (agent silent > {AGENT_PROGRESS_TIMEOUT}s)")
-                    j["status"] = "queued"
-                    j["claimed_by"] = None
-                    j["claimed_at"] = None
-                    j["stage_label"] = "Requeued — waiting for an agent"
+                    reason = f"agent silent > {AGENT_PROGRESS_TIMEOUT:.0f}s"
+            if reason is None and claimed_by not in online_ids:
+                # Owning agent has dropped offline (running past its grace, or
+                # paused with a stale heartbeat). Its in-memory job state is lost.
+                reason = "owning agent went offline"
+
+            if reason:
+                print(f"[server] Releasing job {j['id']} ({status}) — {reason}.")
+                j["status"] = "queued"
+                j["claimed_by"] = None
+                j["claimed_by_name"] = ""
+                j["claimed_at"] = None
+                j["awaiting_input"] = False
+                j["stage_label"] = "Requeued — waiting for an agent"
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -418,11 +484,27 @@ _AGENT_BUSY_STATUSES = (
 
 
 def _busy_agent_ids() -> set[str]:
-    """agent_ids currently holding a job (running or paused awaiting an answer)."""
+    """agent_ids currently holding a job (running or paused awaiting an answer).
+
+    Used for CLAIM gating (an agent holding any job — running or paused — must
+    not take a second job). NOT used for presence: see _running_agent_ids."""
     return {
         j.get("claimed_by")
         for j in jobs.values()
         if j.get("status") in _AGENT_BUSY_STATUSES and j.get("claimed_by")
+    }
+
+
+def _running_agent_ids() -> set[str]:
+    """agent_ids owning a job that is actively RUNNING (not paused).
+
+    Only a running job is proof the agent process is alive. A paused
+    (awaiting_*) job is waiting on a human and says nothing about the agent, so
+    it must not extend presence."""
+    return {
+        j.get("claimed_by")
+        for j in jobs.values()
+        if j.get("status") == "running" and j.get("claimed_by")
     }
 
 
@@ -454,17 +536,43 @@ class LoginRequest(BaseModel):
     password: str
 
 
+def _authenticate(username: str, password: str) -> dict | None:
+    """Validate a login against the users store, with a seed-admin fallback.
+
+    Primary path is the users store (multi-user). The fallback lets the .env
+    admin log in even if the store is somehow empty/unseeded, so nobody is
+    locked out during the migration — and only when that user does not already
+    exist in the store (the store is authoritative once it has the account)."""
+    u = users.verify(username, password)
+    if u:
+        return u
+    # Fallback: env admin, only if not represented in the store yet.
+    if (username or "").strip().lower() == (APP_USERNAME or "").strip().lower():
+        if users.get_user(username) is None and verify_password(password, APP_PASSWORD_HASH):
+            return {"username": (APP_USERNAME or "admin"),
+                    "display_name": APP_USERNAME or "Admin", "role": "admin",
+                    "disabled": False}
+    return None
+
+
 @app.post("/api/auth/login")
 def auth_login(req: LoginRequest, request: Request):
     ip = request.client.host if request.client else "unknown"
     if not check_rate_limit(ip):
         raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in 5 minutes.")
-    if req.username != APP_USERNAME or not verify_password(req.password, APP_PASSWORD_HASH):
+    user = _authenticate(req.username, req.password)
+    if not user:
         record_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid username or password.")
     record_success(ip)
-    cookie_value = sign_cookie(req.username)
-    response = JSONResponse(content={"ok": True, "username": req.username})
+    # Cookie identity stays the username; role/display are looked up per request
+    # from the store so a role change takes effect without re-login.
+    cookie_value = sign_cookie(user["username"])
+    response = JSONResponse(content={
+        "ok": True, "username": user["username"],
+        "display_name": user.get("display_name", user["username"]),
+        "role": user.get("role", "designer"),
+    })
     response.set_cookie(
         key=COOKIE_NAME, value=cookie_value,
         httponly=True, samesite="lax", max_age=86400 * 7,
@@ -479,12 +587,50 @@ def auth_logout():
     return response
 
 
+def _current_user_record(request: Request) -> dict | None:
+    """Resolve the cookie to a full user record (username, display_name, role,
+    disabled). Returns None if not authenticated or the account is disabled.
+
+    Falls back to a synthetic admin record for the .env seed admin when it is
+    not (yet) represented in the store, so the migration never locks anyone out.
+    Looking the record up per request means a role change or a disable takes
+    effect immediately, without forcing a re-login."""
+    username = get_current_user(request)
+    if not username:
+        return None
+    u = users.get_user(username)
+    if u is not None:
+        if u.get("disabled"):
+            return None
+        return u
+    # Not in store: only the env seed admin is allowed as a fallback identity.
+    if (username or "").strip().lower() == (APP_USERNAME or "").strip().lower():
+        return {"username": (APP_USERNAME or "admin"),
+                "display_name": APP_USERNAME or "Admin", "role": "admin",
+                "disabled": False}
+    return None
+
+
+def _require_admin(request: Request) -> dict:
+    """Return the current user record, or raise 403 unless they are an admin."""
+    u = _current_user_record(request)
+    if not u:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if u.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only.")
+    return u
+
+
 @app.get("/api/auth/me")
 def auth_me(request: Request):
-    user = get_current_user(request)
-    if not user:
+    u = _current_user_record(request)
+    if not u:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    return {"username": user}
+    return {
+        "username": u["username"],
+        "display_name": u.get("display_name", u["username"]),
+        "role": u.get("role", "designer"),
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -607,8 +753,14 @@ def artwork_info(file: str, dpi: int | None = None):
 
 
 @app.post("/api/generate")
-def create_job(req: GenerateRequest):
+def create_job(req: GenerateRequest, request: Request):
     print(f"[create_job] workflow={req.workflow!r} mockup_image={req.mockup_image!r} files={req.files} artwork_files={req.artwork_files}")
+    # Who is creating this job — recorded for attribution (shown in results and
+    # history). Everyone still sees all jobs; this is identity only, not a
+    # visibility restriction.
+    _creator = _current_user_record(request)
+    _created_by = _creator["username"] if _creator else ""
+    _created_by_name = (_creator.get("display_name") or _creator["username"]) if _creator else ""
     if _online_agent() is None:
         raise HTTPException(status_code=503, detail="No agent running. Start the agent on your PC to generate.")
     if not req.client.strip():
@@ -722,6 +874,9 @@ def create_job(req: GenerateRequest):
         "task_id": req.task_id.strip(), "images": [], "stage_images": {},
         "vault_folder": None, "error": None,
         "started_at": None, "finished_at": None, "created_at": time.time(),
+        # Attribution: which user created this job (identity only — everyone
+        # still sees all jobs). No leading underscore so it survives _public_job.
+        "created_by": _created_by, "created_by_name": _created_by_name,
         "stage": 0, "stage_label": "", "awaiting_input": False,
         "selection_prompt": "", "choices": [], "prompts": [],
         "extracted_text": "", "confirmed_text": "", "paused_at": None,
@@ -1323,7 +1478,10 @@ def get_status():
         "agents": [
             {"name": a.get("name", ""),
              "logged_in": bool(a.get("logged_in")),
-             "code_version": a.get("code_version") or "unknown"}
+             "code_version": a.get("code_version") or "unknown",
+             # Epoch seconds of the last heartbeat, so the UI can show and
+             # sanity-check "connected" at a glance.
+             "last_seen": a.get("last_seen", 0)}
             for a in live
         ],
     }
@@ -1361,22 +1519,29 @@ def session_confirm():
 
 @app.get("/api/my-agent-token")
 def my_agent_token(request: Request, agent_name: str = ""):
-    """Return (creating if needed) the stable agent token for a DESIGNER NAME.
+    """Return the logged-in user's OWN agent token.
 
-    Keyed on `agent_name` — the name each PC reports (defaults to its machine
-    name) — NOT on the website login. Every operator signs in as the same shared
-    account, so keying on the login handed everyone one token and two agents
-    collided on it. A distinct name yields a distinct token, so each PC gets its
-    own. Changing the name in the setup panel therefore surfaces a different
-    token, which is exactly what a second machine needs.
+    Tokens are now per USER (issued when the account is created). This returns
+    the caller's own token so they can paste it into their agent — on as many
+    machines as they like; the identity is the token, and each machine still
+    registers as its own agent entry. The `agent_name` query param is now just a
+    display label for the agent window and no longer selects the token.
+
+    Legacy fallback: an account that predates the users store (e.g. the .env
+    seed admin before it was written) falls back to a name-keyed token so it is
+    never left without one.
     """
-    if not get_current_user(request):
+    u = _current_user_record(request)
+    if not u:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    name = agent_name.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="A designer/agent name is required.")
-    token = get_or_create_for_name(name)
-    return {"token": token, "name": name, "server_url": str(request.base_url).rstrip("/")}
+    rec = users.get_user(u["username"])
+    if rec and rec.get("agent_token"):
+        token = rec["agent_token"]
+    else:
+        # Legacy / seed-admin-not-yet-in-store: fall back to a name-keyed token.
+        token = get_or_create_for_name(u.get("display_name") or u["username"])
+    label = (agent_name or "").strip() or u.get("display_name") or u["username"]
+    return {"token": token, "name": label, "server_url": str(request.base_url).rstrip("/")}
 
 
 @app.get("/api/agent-tokens")
@@ -1398,6 +1563,109 @@ def agent_tokens(request: Request):
         entry["code_version"] = ver_by_name.get(nm, "")
         out.append(entry)
     return {"agents": out}
+
+
+# ---------------------------------------------------------------------------
+# Admin: user management. All endpoints are admin-only (role=admin). The cookie
+# gate is already applied by AuthMiddleware; _require_admin adds the role check.
+# ---------------------------------------------------------------------------
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
+    role: str = "designer"
+
+
+class RoleRequest(BaseModel):
+    role: str
+
+
+class DisableRequest(BaseModel):
+    disabled: bool
+
+
+class PasswordRequest(BaseModel):
+    password: str
+
+
+@app.get("/api/admin/users")
+def admin_list_users(request: Request):
+    """List all users (no secrets) for the admin screen."""
+    me = _require_admin(request)
+    return {"users": users.list_users(), "me": me["username"]}
+
+
+@app.post("/api/admin/users")
+def admin_create_user(req: CreateUserRequest, request: Request):
+    """Create a user with an email + password. The agent token is still issued
+    and stored (the agent obtains it by signing in with the email+password), but
+    it is NO LONGER returned or displayed anywhere — designers authenticate with
+    their credentials, not a pasted token."""
+    _require_admin(request)
+    try:
+        users.create_user(
+            username=req.username, password=req.password,
+            display_name=req.display_name or req.username, role=req.role,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "username": (req.username or "").strip().lower()}
+
+
+@app.post("/api/admin/users/{username}/disable")
+def admin_set_disabled(username: str, req: DisableRequest, request: Request):
+    """Disable or re-enable a user. Disabling invalidates their agent token
+    immediately (user_for_token rejects a disabled user). An admin cannot
+    disable themselves."""
+    me = _require_admin(request)
+    if req.disabled and username.strip().lower() == me["username"].strip().lower():
+        raise HTTPException(status_code=400, detail="You cannot disable your own account.")
+    u = users.set_disabled(username, req.disabled)
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"ok": True, "username": u["username"], "disabled": u["disabled"]}
+
+
+@app.post("/api/admin/users/{username}/role")
+def admin_set_role(username: str, req: RoleRequest, request: Request):
+    """Change a user's role. An admin cannot demote themselves out of admin."""
+    me = _require_admin(request)
+    if (username.strip().lower() == me["username"].strip().lower()
+            and req.role != "admin"):
+        raise HTTPException(status_code=400, detail="You cannot remove your own admin role.")
+    try:
+        u = users.set_role(username, req.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"ok": True, "username": u["username"], "role": u["role"]}
+
+
+@app.post("/api/admin/users/{username}/reset-password")
+def admin_reset_password(username: str, req: PasswordRequest, request: Request):
+    """Set a new password for a user."""
+    _require_admin(request)
+    try:
+        u = users.reset_password(username, req.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"ok": True, "username": u["username"]}
+
+
+@app.post("/api/admin/users/{username}/regenerate-token")
+def admin_regenerate_token(username: str, request: Request):
+    """Replace a user's agent token. Returns the NEW token ONCE (the old one
+    stops working immediately)."""
+    _require_admin(request)
+    token = users.regenerate_token(username)
+    if not token:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"ok": True, "username": username.strip().lower(),
+            "agent_token": token, "token_shown_once": True}
 
 
 @app.get("/api/download/agent")
@@ -1502,20 +1770,84 @@ def agent_code_bundle(request: Request):
 # Declared BEFORE app.mount() so the static mount does not shadow them.
 # ---------------------------------------------------------------------------
 
+class AgentAuthRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/agent/authenticate")
+def agent_authenticate(req: AgentAuthRequest):
+    """Exchange a designer's email + password for their agent token.
+
+    The agent now signs in with the SAME credentials as the website instead of
+    a pasted token; on success it uses the returned token as its bearer for all
+    subsequent /api/agent/* calls. Failures are reported in plain terms — never
+    a raw HTTP error — and distinguish bad credentials from a disabled account.
+    The password is never logged or echoed back."""
+    token, reason = users.authenticate_agent(req.email, req.password)
+    if reason == "ok":
+        print(f"[agent-auth] {(req.email or '').strip().lower()!r} authenticated")
+        return {"token": token}
+    if reason == "disabled":
+        print(f"[agent-auth] {(req.email or '').strip().lower()!r} rejected: disabled")
+        raise HTTPException(
+            status_code=403,
+            detail="This account has been disabled. Ask an admin to re-enable it.",
+        )
+    # bad_credentials (unknown email or wrong password)
+    print(f"[agent-auth] {(req.email or '').strip().lower()!r} rejected: bad credentials")
+    raise HTTPException(
+        status_code=401,
+        detail="Email or password is incorrect.",
+    )
+
+
 def _require_agent(request: Request) -> str:
     """Validate the agent bearer token; return the designer name or raise 401.
 
-    Records the token's last-seen time so the admin setup panel can show which
-    designers are actually connected. Presence/heartbeat for job routing is
-    tracked per agent_id (below) — this touch is only for the "who's set up"
-    view and is deliberately independent of it."""
+    Thin wrapper over _require_agent_identity for the many callers that only
+    need the display name."""
+    return _require_agent_identity(request)["name"]
+
+
+def _bearer_token(request: Request) -> str:
     auth = request.headers.get("authorization", "")
-    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    return auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+
+
+def _require_agent_identity(request: Request) -> dict:
+    """Validate the agent bearer token and return WHO it belongs to.
+
+    Tokens are now PER USER (issued when an admin creates the user). Resolution
+    order:
+      1. users store — the authoritative source. A token belonging to a DISABLED
+         user resolves to None there, so that agent is rejected immediately with
+         no separate revocation step (a departed designer's agent stops working
+         the moment they are disabled).
+      2. legacy agent_tokens store — machine-name tokens issued before this
+         change, so existing agents keep working until re-issued.
+
+    Returns {"token", "username", "name"} where `name` is the display name.
+    Raises 401 for an unknown/missing token or a disabled user's token."""
+    token = _bearer_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
+
+    u = users.user_for_token(token)   # None if unknown OR disabled
+    if u is not None:
+        # Best-effort last-seen for the legacy admin panel is not needed here;
+        # the users store carries its own bookkeeping and per-agent presence is
+        # tracked by agent_id below.
+        return {"token": token,
+                "username": u.get("username", ""),
+                "name": u.get("display_name") or u.get("username") or "designer"}
+
+    # Legacy machine-name token fallback.
     name = token_name(token)
     if not name:
         raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
     touch_token(token)
-    return name
+    return {"token": token, "username": "", "name": name}
 
 
 # Job fields that must never be overwritten by the agent's posted copy — the
@@ -1685,17 +2017,27 @@ threading.Thread(target=prompt_registry.refresh, name="prompt-warmup", daemon=Tr
 
 @app.post("/api/agent/register")
 def agent_register(req: AgentRegisterRequest, request: Request):
-    name = _require_agent(request)
+    ident = _require_agent_identity(request)
+    # Identity now comes from the TOKEN (the user), not the self-reported name.
+    # The agent keeps its "Your name" field purely as a machine label for the
+    # fleet view; a person running two PCs registers two separate agent entries
+    # (agent_id is a fresh uuid per register), which we want — the fleet stays
+    # honest about how many machines are live.
     agent_id = uuid.uuid4().hex[:12]
+    machine_label = req.agent_name or ident["name"]
     agents[agent_id] = {
-        "id": agent_id, "name": req.agent_name or name,
+        "id": agent_id,
+        "name": machine_label,               # machine/display label for the fleet view
+        "username": ident.get("username", ""),  # the OWNING user (token identity)
+        "user_display": ident["name"],          # the user's display name
         "registered_at": time.time(), "last_seen": time.time(),
         "logged_in": req.logged_in,
         "code_version": (req.code_version or "").strip() or "unknown",
     }
-    print(f"[server] Agent registered: {req.agent_name!r} ({agent_id}) "
+    print(f"[server] Agent registered: machine={machine_label!r} "
+          f"user={ident.get('username') or '(legacy)'} ({agent_id}) "
           f"code {agents[agent_id]['code_version']}")
-    return {"agent_id": agent_id, "name": req.agent_name or name}
+    return {"agent_id": agent_id, "name": machine_label}
 
 
 @app.get("/api/agent/next-job")
