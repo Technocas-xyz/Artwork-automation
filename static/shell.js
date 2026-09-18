@@ -251,11 +251,10 @@
     }
 
     // --- Agent setup: there is a SINGLE panel now, the "Agent setup" modal
-    // defined in index.html (window.openAgentSetup). It asks for the designer's
-    // per-machine name, then shows that machine's token, the download link and
-    // the three setup steps. This shell no longer builds its own duplicate
-    // modal (which called /api/my-agent-token with no name and showed a blank
-    // token). All entry points delegate to that one modal.
+    // defined in index.html (window.openAgentSetup). It shows the download, the
+    // three setup steps, and the pre-fillable server URL. Designers sign in to
+    // the agent with their email + password (no tokens). All entry points
+    // delegate to that one modal.
     function openAgentPanel() {
       if (typeof window.openAgentSetup === "function") window.openAgentSetup();
     }

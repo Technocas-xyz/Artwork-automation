@@ -1591,9 +1591,29 @@ class PasswordRequest(BaseModel):
 
 @app.get("/api/admin/users")
 def admin_list_users(request: Request):
-    """List all users (no secrets) for the admin screen."""
+    """List all users (no secrets) for the admin screen, each annotated with
+    whether one of their agents is currently connected (and its last-seen time
+    and code version). This is the admin's fleet view — it used to live in the
+    designer-facing agent-setup dialog, which no longer shows any of it."""
     me = _require_admin(request)
-    return {"users": users.list_users(), "me": me["username"]}
+    # Most-recent online agent per owning user (a person may run several PCs).
+    agent_by_user: dict[str, dict] = {}
+    for a in _online_agents():
+        uname = (a.get("username") or "").strip().lower()
+        if not uname:
+            continue
+        prev = agent_by_user.get(uname)
+        if prev is None or (a.get("last_seen", 0) > prev.get("last_seen", 0)):
+            agent_by_user[uname] = a
+    out = []
+    for u in users.list_users():
+        u = dict(u)
+        a = agent_by_user.get((u.get("username") or "").strip().lower())
+        u["agent_online"] = a is not None
+        u["agent_last_seen"] = a.get("last_seen") if a else None
+        u["agent_code_version"] = (a.get("code_version") if a else "") or ""
+        out.append(u)
+    return {"users": out, "me": me["username"]}
 
 
 @app.post("/api/admin/users")

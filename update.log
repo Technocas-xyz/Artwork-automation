@@ -18,3 +18,19 @@
 2026-09-17 19:09:48 [update] apply_if_staged: applied OK; code version now 1.6.5
 2026-09-18 21:12:11 [update] check_and_stage: server 1.6.6 > local 1.6.5; downloading bundle
 2026-09-18 21:12:11 [update] check_and_stage: staged 1.6.6 into E:\AUTO-DEMO-LOCAL\artwork-automation\code_staging
+2026-09-18 23:04:53 [update] apply_if_staged: staged update present (local version 1.6.5); applying
+2026-09-18 23:04:53 [update] apply: staging found at E:\AUTO-DEMO-LOCAL\artwork-automation\code_staging
+2026-09-18 23:04:53 [update] apply: bundle validated (agent.py, agent_gui.py, src/, config/ present)
+2026-09-18 23:04:55 [update] apply: backup dir ready at E:\AUTO-DEMO-LOCAL\artwork-automation\code_backup
+2026-09-18 23:04:55 [update] apply: moved existing code/agent.py -> backup
+2026-09-18 23:04:56 [update] apply: placed new code/agent.py
+2026-09-18 23:04:56 [update] apply: moved existing code/agent_gui.py -> backup
+2026-09-18 23:04:56 [update] apply: placed new code/agent_gui.py
+2026-09-18 23:04:56 [update] apply: moved existing code/src -> backup
+2026-09-18 23:04:56 [update] apply: placed new code/src
+2026-09-18 23:04:57 [update] apply: moved existing code/config -> backup
+2026-09-18 23:04:57 [update] apply: placed new code/config
+2026-09-18 23:04:57 [update] apply: swap finished (4 entries: ['agent.py', 'agent_gui.py', 'src', 'config'])
+2026-09-18 23:04:57 [update] apply: wrote code/code_version.txt = 1.6.6
+2026-09-18 23:04:57 [update] apply: cleared staging
+2026-09-18 23:04:58 [update] apply_if_staged: applied OK; code version now 1.6.6

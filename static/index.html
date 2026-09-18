@@ -115,27 +115,18 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
   <div class="vm-modal" style="max-width:560px;width:100%;max-height:88vh;display:flex;flex-direction:column;background:var(--surface);border-radius:12px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)">
     <div class="vm-head"><h3>Run the agent on your PC</h3><button class="vm-x" onclick="closeAgentSetup()">&times;</button></div>
     <div class="vm-body">
-      <p class="vm-hint" style="margin-top:0">Generation runs in a real browser on your machine. Three steps, once. Each PC needs its own token.</p>
+      <p class="vm-hint" style="margin-top:0">Generation runs in a real browser on your machine. Three steps, once.</p>
       <ol style="margin:12px 0 0;padding-left:20px;font-size:.86rem;line-height:1.5">
         <li style="margin-bottom:12px"><b>Download &amp; unzip</b> the agent.<br>
           <button type="button" class="vm-btn primary" onclick="downloadAgent(this)" style="display:inline-block;margin-top:6px">Download ArtworkAgent.zip</button><br>
           <span class="vm-hint">Unzip anywhere, then run <b>ArtworkAgent.exe</b> from the unzipped folder.</span></li>
         <li style="margin-bottom:12px"><b>Run it</b>, then click <b>Sign in to ChatGPT</b> in its window and log in.</li>
-        <li style="margin-bottom:4px"><b>Get this PC's token</b> and paste it into the agent, then click <b>Start</b>.
-          <div style="margin-top:8px">
-            <label for="asName">Designer / machine name</label>
-            <input type="text" id="asName" autocomplete="off" placeholder="e.g. Studio-PC-2 or Jane">
-            <div class="vm-hint">A different name gets a different token, so two machines never share one. Change the name to switch to that PC's token.</div>
-            <div id="asTokenWrap" style="display:none;margin-top:12px">
-              <label>Server URL <span class="vm-hint" style="font-weight:400">(the agent pre-fills this)</span></label>
-              <div style="display:flex;gap:8px"><input type="text" id="asServer" readonly><button class="vm-btn ghost" onclick="copyAgentField('asServer')">Copy</button></div>
-              <label>Your token</label>
-              <div style="display:flex;gap:8px"><input type="text" id="asToken" readonly><button class="vm-btn ghost" onclick="copyAgentField('asToken')">Copy</button></div>
-            </div>
-          </div>
-        </li>
+        <li style="margin-bottom:4px"><b>Enter your email and password</b> — the same ones you use here — then click <b>Start</b>.</li>
       </ol>
-      <div id="asExisting" style="margin-top:18px"></div>
+      <div style="margin-top:16px">
+        <label>Server URL <span class="vm-hint" style="font-weight:400">(the agent pre-fills this)</span></label>
+        <div style="display:flex;gap:8px"><input type="text" id="asServer" readonly><button class="vm-btn ghost" onclick="copyAgentField('asServer')">Copy</button></div>
+      </div>
     </div>
     <div class="vm-foot"><span id="asMsg"></span><button class="vm-btn ghost" onclick="closeAgentSetup()">Close</button></div>
   </div>
@@ -1776,57 +1767,20 @@ fetch("/api/auth/me").then(function(r){if(r.status===401){window.location.href="
 window.doLogout=function(){fetch("/api/auth/logout",{method:"POST"}).then(function(){window.location.href="/login"})};
 
 // === AGENT SETUP =========================================================
-// Tokens are per-machine, keyed on the name each PC reports. The panel asks
-// for that name BEFORE showing a token and re-fetches when the name changes,
-// so every designer/PC gets its own distinct token (two machines never share
-// one). It also lists who is already set up, with a last-seen time.
-var _asDebounce=null,_asLastName="";
+// Designers sign in inside the agent window with their email + password (the
+// same credentials as this site). This dialog is now just download + the three
+// setup steps + the pre-fillable server URL — no tokens, no per-machine names.
+// Which agents are actually connected is admin info, shown in the Users screen.
 function asMsg(text,cls){var el=$("asMsg");if(!el)return;el.textContent=text||"";el.className=cls||""}
-function asFmtSeen(sec){
-  if(!sec)return "never connected";
-  var s=Math.round(Date.now()/1000-sec);
-  if(s<60)return "connected just now";
-  if(s<3600)return "seen "+Math.round(s/60)+"m ago";
-  if(s<86400)return "seen "+Math.round(s/3600)+"h ago";
-  return "seen "+Math.round(s/86400)+"d ago";
-}
 window.openAgentSetup=function(){
   var ov=$("agentSetupOverlay");if(!ov)return;
   ov.style.display="flex";
-  var input=$("asName");
-  var remembered="";try{remembered=localStorage.getItem("agentName")||""}catch(e){}
-  input.value=remembered;
-  input.oninput=function(){
-    if(_asDebounce)clearTimeout(_asDebounce);
-    _asDebounce=setTimeout(fetchAgentToken,400);
-  };
-  input.onkeydown=function(e){if(e.key==="Enter"){if(_asDebounce)clearTimeout(_asDebounce);fetchAgentToken()}};
   asMsg("","");
-  loadAgentList();
-  if(remembered.trim())fetchAgentToken();else{$("asTokenWrap").style.display="none";input.focus()}
+  // Designers now sign in with their email + password in the agent window; the
+  // only thing this dialog still carries is the server URL the agent pre-fills.
+  var srv=$("asServer");if(srv)srv.value=window.location.origin;
 };
 window.closeAgentSetup=function(){var ov=$("agentSetupOverlay");if(ov)ov.style.display="none"};
-function fetchAgentToken(){
-  var name=($("asName").value||"").trim();
-  // No name (or a failed/empty fetch): never show a blank token field with a
-  // Copy button — hide the token block and prompt for a name instead.
-  if(!name){$("asTokenWrap").style.display="none";asMsg("Enter your name above to get a token","vm-err");return}
-  if(name===_asLastName&&$("asTokenWrap").style.display!=="none")return;
-  asMsg("Loading token…","");
-  fetch("/api/my-agent-token?agent_name="+encodeURIComponent(name)).then(function(r){
-    if(!r.ok)return r.json().then(function(d){throw new Error(d.detail||"Failed to get token")});
-    return r.json();
-  }).then(function(d){
-    if(!d||!d.token){throw new Error("Enter your name above to get a token")}
-    _asLastName=name;
-    try{localStorage.setItem("agentName",name)}catch(e){}
-    $("asServer").value=d.server_url||window.location.origin;
-    $("asToken").value=d.token;
-    $("asTokenWrap").style.display="block";
-    asMsg("Token for \u201c"+d.name+"\u201d ready. Copy it into the agent.","vm-ok");
-    loadAgentList();
-  }).catch(function(e){$("asTokenWrap").style.display="none";asMsg(e.message,"vm-err")});
-}
 window.copyAgentField=function(id){
   var el=$(id);if(!el)return;
   el.select();
@@ -1871,10 +1825,20 @@ function loadAdminUsers(){
       var isSelf=(u.username||"").toLowerCase()===me;
       var roleBadge=u.role==="admin"?'<span style="color:var(--accent);font-weight:600">admin</span>':'designer';
       var status=u.disabled?'<span style="color:#dc2626;font-weight:600">disabled</span>':'<span style="color:#16a34a">active</span>';
+      // Connected-agent status (moved here from the designer setup dialog).
+      var agentLine;
+      if(u.agent_online){
+        var av=u.agent_code_version?(' \u00b7 v'+esc(u.agent_code_version)):'';
+        agentLine='<span style="color:#16a34a;font-weight:600">agent connected</span>'
+          +'<span style="color:var(--muted)"> \u00b7 '+esc(auFmtLogin(u.agent_last_seen))+av+'</span>';
+      }else{
+        agentLine='<span style="color:var(--muted)">no agent connected</span>';
+      }
       h+='<div style="padding:10px;font-size:.8rem;'+(i?'border-top:1px solid var(--border)':'')+'">'
         +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">'
         +'<span><b>'+esc(u.display_name||u.username)+'</b> · '+roleBadge+' · '+status+'</span>'
         +'<span style="color:var(--muted);font-size:.72rem">last login: '+auFmtLogin(u.last_login)+'</span></div>'
+        +'<div style="margin-top:3px;font-size:.74rem">'+agentLine+'</div>'
         +'<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">';
       // Disable/enable — an admin cannot disable themselves.
       if(!isSelf){
@@ -1945,25 +1909,6 @@ window.downloadAgent=function(btn){
     if(btn){btn.disabled=false;btn.textContent=orig}
   });
 };
-function loadAgentList(){
-  fetch("/api/agent-tokens").then(function(r){return r.ok?r.json():{agents:[]}}).then(function(d){
-    var box=$("asExisting");if(!box)return;
-    var list=d.agents||[];
-    if(!list.length){box.innerHTML='<div class="vm-hint">No agents set up yet.</div>';return}
-    var h='<label style="margin-top:0">Who\u2019s set up</label><div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">';
-    for(var i=0;i<list.length;i++){
-      var a=list[i];
-      // Show the running code version for a currently-connected agent, so a
-      // designer/admin can confirm a fix has landed without opening
-      // code_version.txt on the machine.
-      var ver=(a.online&&a.code_version)?(' \u00b7 <span style="color:var(--muted)">v'+esc(a.code_version)+'</span>'):'';
-      h+='<div style="display:flex;justify-content:space-between;gap:8px;padding:8px 10px;font-size:.8rem;'+(i?'border-top:1px solid var(--border)':'')+'">'
-        +'<span style="font-weight:600">'+esc(a.name||"(unnamed)")+ver+'</span>'
-        +'<span style="color:var(--muted)">'+esc(asFmtSeen(a.last_seen))+'</span></div>';
-    }
-    box.innerHTML=h+'</div>';
-  }).catch(function(){});
-}
 
 // === NEXTCLOUD VAULT BROWSER =============================================
 // Browse Leads 2.0, watch it live, and send a file straight into a workflow.
