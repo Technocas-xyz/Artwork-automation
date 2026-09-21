@@ -129,6 +129,20 @@ def customer_folder(rel_path: str, cfg: NextcloudConfig | None = None) -> str:
 
 _LEAD_PREFIX = re.compile(r"^\d{6}_")
 
+# Files we SENT to the customer: the CRM saves every mockup it sends into the
+# customer's `sent/` folder as `AW-XXX00-0000-OUT.jpg`. They are our output, not
+# material to work from, so the Studio does not offer them as input.
+_SENT_FOLDER = re.compile(r"^(sent|outgoing)$", re.IGNORECASE)
+_SENT_NAME = re.compile(r"-OUT\d*\.[A-Za-z0-9]+$", re.IGNORECASE)
+
+
+def is_sent_file(rel_path: str) -> bool:
+    """True for a mockup we sent (in a `sent/` folder, or named `...-OUT.ext`)."""
+    parts = [p for p in str(rel_path or "").replace("\\", "/").split("/") if p]
+    if not parts:
+        return False
+    return any(_SENT_FOLDER.match(p) for p in parts[:-1]) or bool(_SENT_NAME.search(parts[-1]))
+
 
 def display_name(folder: str) -> str:
     """`260902_Jeremy_Brown` -> `Jeremy Brown`.

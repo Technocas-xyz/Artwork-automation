@@ -132,6 +132,8 @@ class VaultWatcher:
             for entry in changed:
                 folder = entry.path.rsplit("/", 1)[0] if "/" in entry.path else cfg.root
                 self.dir_rev[folder] = rev
+                if nc.is_sent_file(entry.path):
+                    continue        # our own sent mockup, not an arrival
                 customer = nc.customer_folder(entry.path, cfg)
                 item = entry.as_dict()
                 item.update({
