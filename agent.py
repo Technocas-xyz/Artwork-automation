@@ -174,6 +174,7 @@ _HEADERS = {"Authorization": f"Bearer {AGENT_TOKEN}"}
 _current_job_id: str | None = None
 _current_job: dict | None = None
 _current_agent_id: str | None = None  # so every progress post carries the agent id (heartbeat)
+_current_watchdog = None              # diag.Watchdog for the running job (stall detection)
 _sync_stop = threading.Event()
 
 # --- Per-job console capture -------------------------------------------------
@@ -248,6 +249,13 @@ def report_warning(message: str) -> None:
     print(f"[warning] {message}")
     with _log_lock:
         _warn_buffer.append(str(message))
+    # Also record it as a diagnostic so it lands in agent_errors.log and the
+    # server view — these "nearly failed" signals are exactly what we want when
+    # tracing where a job got stuck. Never raises.
+    try:
+        diag.record_event("RETRY", str(message), job=_current_job)
+    except Exception:
+        pass
 
 
 def _reset_job_buffers() -> None:
@@ -339,6 +347,13 @@ def _sync_loop() -> None:
             _sync_job()
         except _CancelledError:
             pass  # the workflow thread will observe cancellation at its next pause/turn
+        # Feed the stall watchdog on every tick; it reads the job's current step
+        # and resets its clock when the step label changes.
+        try:
+            if _current_watchdog is not None:
+                _current_watchdog.heartbeat()
+        except Exception:
+            pass
         _sync_stop.wait(SYNC_INTERVAL)
 
 
@@ -610,6 +625,12 @@ def _record_stage_image(job: dict, key: str, data: bytes, filename: str,
         # that never reached the server.
         print(f"[stage-image] upload NOT confirmed for {filename}; "
               f"withholding {key} from stage_images until it is on the server")
+        try:
+            diag.upload_issue(f"Stage image upload not confirmed: {filename}",
+                              job=_current_job, step=key,
+                              detail="withheld from stage_images until on server")
+        except Exception:
+            pass
 
 
 def _open_chat_for(page: Any, job: dict) -> None:
@@ -1666,6 +1687,14 @@ def _handle_claimed_job(page: Any, claim: dict, logged_in: bool = True) -> None:
     sync_thread.start()
 
     _reset_job_buffers()
+    # Stall watchdog: writes a STALL diagnostic if a step makes no progress for
+    # longer than its expected time, without killing the job. The sync loop and
+    # the workflow's stage changes feed it heartbeats.
+    global _current_watchdog
+    try:
+        _current_watchdog = diag.Watchdog(job).start()
+    except Exception:
+        _current_watchdog = None
     print(f"[agent] running job {job_id} ({job.get('workflow')})")
     try:
         # If we claimed the job while signed out, pause for sign-in BEFORE any
@@ -1682,6 +1711,11 @@ def _handle_claimed_job(page: Any, claim: dict, logged_in: bool = True) -> None:
         # but the work done so far stays recorded/uploaded and visible; the job
         # is marked done_with_errors (not failed) so nothing is discarded.
         print(f"[agent] session expired mid-job {job_id}: {exc}")
+        try:
+            diag.session("ChatGPT session dropped mid-job; paused for sign-in.",
+                         job=job, detail=str(exc))
+        except Exception:
+            pass
         try:
             _wait_for_signin(job_id, page)
         except _CancelledError:
@@ -1704,6 +1738,12 @@ def _handle_claimed_job(page: Any, claim: dict, logged_in: bool = True) -> None:
         job["finished_at"] = time.time()
         _report_error(job_id, job, exc, tb)
     finally:
+        try:
+            if _current_watchdog is not None:
+                _current_watchdog.stop()
+        except Exception:
+            pass
+        _current_watchdog = None
         _sync_stop.set()
         sync_thread.join(timeout=5)
         # Upload outputs, then one final state sync so the terminal status lands.
@@ -1751,6 +1791,13 @@ def _report_error(job_id: str, job: dict, exc: Exception, tb: str) -> None:
         "timestamp": str(time.time()),
         "session_expired": "true" if isinstance(exc, _session_expired_types()) else "false",
     }
+    # Full-detail entry to the agent diagnostics log (local file + server), so
+    # the failure is captured with timestamp/job/step/traceback even if the
+    # /error post below cannot go through. Never raises.
+    try:
+        diag.error(exc, tb, job=job, job_id=job_id)
+    except Exception:
+        pass
     # Include the last of the captured console log inline with the error too.
     shot = _find_error_screenshot(job_id)
     try:

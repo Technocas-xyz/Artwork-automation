@@ -33,6 +33,24 @@ from src.postprocess import is_opaque_white_bg
 
 logger = logging.getLogger(__name__)
 
+# Diagnostics: record retries, fallbacks, timeouts and unconfirmed uploads so a
+# stuck job is traceable. Import defensively — a diagnostics problem must never
+# stop generation, and generator.py must stay importable if the module is absent.
+try:
+    from src import agent_diagnostics as _diag
+except Exception:  # pragma: no cover
+    _diag = None
+
+
+def _diag_event(fn: str, *args, **kw) -> None:
+    """Call a diag.<fn> convenience wrapper if diagnostics is available."""
+    if _diag is None:
+        return
+    try:
+        getattr(_diag, fn)(*args, **kw)
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -198,6 +216,8 @@ def send_text_turn(
             _ts("stop button appeared")
         except PlaywrightTimeout:
             _ts("stop button never appeared (reply may already be finishing)")
+            _diag_event("timeout", "Text turn: stop button never appeared within 15s",
+                        step=run_id, detail="continuing to completion wait")
 
         # Wait for the turn to settle. Short quiet period: a text answer streams
         # in a couple of seconds and then the stop button detaches. 1.5s of
@@ -723,8 +743,12 @@ def _enter_prompt(page: Page, prompt: str) -> None:
             return
         else:
             logger.info("_enter_prompt: paste produced %d chars, expected ~%d. Falling back to typing.", len(content), len(prompt))
+            _diag_event("fallback", "Prompt paste incomplete; fell back to typing",
+                        detail=f"pasted {len(content)} of ~{len(prompt)} chars")
     except Exception as exc:
         logger.info("_enter_prompt: paste failed (%s), falling back to typing.", exc)
+        _diag_event("fallback", "Prompt paste failed; fell back to typing",
+                    detail=str(exc))
 
     # Fallback: clear whatever partial paste left and type character by character
     page.click(PROMPT_BOX)
@@ -782,11 +806,16 @@ def _wait_for_upload_thumbnails(page: Page, image_paths, run_id: str = "upload")
         return
 
     # Retry the attach once — ChatGPT occasionally drops the first set_input_files.
+    _names = ", ".join(Path(p).name for p in image_paths) or "(no files)"
     logger.info("upload not confirmed after 60s; re-attaching files once")
+    _diag_event("upload_issue", "Upload not confirmed after 60s; re-attaching once",
+                step=run_id, detail=_names)
     try:
         page.set_input_files(FILE_INPUT, list(image_paths))
     except Exception as exc:
         logger.info("re-attach set_input_files failed: %s", exc)
+        _diag_event("retry", "Re-attach set_input_files failed",
+                    step=run_id, detail=str(exc))
 
     if _wait_until(_attached, timeout_ms=60_000):
         _log_upload_state(page, expected_count, "attached after retry")
@@ -796,6 +825,8 @@ def _wait_for_upload_thumbnails(page: Page, image_paths, run_id: str = "upload")
     _log_upload_state(page, expected_count, "FAILED")
     _save_error_screenshot(page, run_id)
     names = ", ".join(Path(p).name for p in image_paths) or "(no files)"
+    _diag_event("upload_issue", "Upload did not attach in the composer after retry",
+                step=run_id, detail=names)
     raise GenerationTimeoutError(
         f"Upload did not attach in the composer: {names}. "
         f"No blob thumbnail appeared and the send button never enabled."

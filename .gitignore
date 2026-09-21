@@ -4,6 +4,10 @@ __pycache__/
 *.pyc
 agent_tokens.json
 users.json
+agent_errors.log
+agent_errors.log.*
+agent_errors_queue.jsonl
+update.log
 downloads/
 dist/
 build/

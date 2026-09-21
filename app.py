@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import mimetypes
 import os
 import re
@@ -19,6 +20,7 @@ import threading
 import time
 import uuid
 import zipfile
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +132,27 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 # Per-job agent console log is kept in memory, capped so a long or chatty job
 # cannot grow the process without bound.
 AGENT_LOG_MAX_LINES = 400
+
+# --- Agent diagnostics (error/stall log entries uploaded by every agent) -----
+# Recent entries in memory for the admin view (bounded), plus an append-only
+# per-user file on disk so the whole log can be downloaded without touching the
+# designer's PC. Fields carry user + agent + job + step + traceback. Secrets are
+# already redacted on the agent; we redact again here defensively.
+DIAGNOSTICS_DIR = LOGS_DIR / "agent_diagnostics"
+DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+_diagnostics: deque = deque(maxlen=3000)     # newest appended at the right
+_diag_lock = threading.Lock()
+
+# Keys whose values must never be stored, even if an agent somehow sends them.
+_DIAG_DROP_KEYS = {"authorization", "password", "password_obf", "token",
+                   "agent_token", "secret", "api_key"}
+
+
+def _diag_safe_name(user: str) -> str:
+    """Filesystem-safe per-user log filename component."""
+    s = "".join(c if (c.isalnum() or c in ("-", "_", "@", ".")) else "_"
+                for c in (user or "unknown"))
+    return s[:120] or "unknown"
 
 
 def _append_agent_log(job: dict, lines: list[str]) -> None:
@@ -1688,10 +1711,82 @@ def admin_regenerate_token(username: str, request: Request):
             "agent_token": token, "token_shown_once": True}
 
 
+@app.get("/api/admin/diagnostics")
+def admin_diagnostics(request: Request, user: str = "", kind: str = "", limit: int = 200):
+    """Recent agent error/stall entries across all agents, newest first.
+
+    Filterable by user (substring, case-insensitive) and kind. Each entry is the
+    full record so the UI can expand it (traceback and all)."""
+    _require_admin(request)
+    u = (user or "").strip().lower()
+    k = (kind or "").strip().upper()
+    with _diag_lock:
+        items = list(_diagnostics)
+    out = []
+    for e in reversed(items):   # newest first
+        if u and u not in (e.get("username", "") + " " + e.get("agent_name", "")).lower():
+            continue
+        if k and (e.get("kind", "") or "").upper() != k:
+            continue
+        out.append(e)
+        if len(out) >= max(1, min(limit, 1000)):
+            break
+    # The set of users that have any diagnostics, for the filter dropdown.
+    with _diag_lock:
+        users_seen = sorted({e.get("username", "") for e in _diagnostics if e.get("username")})
+    return {"entries": out, "users": users_seen, "total": len(items)}
+
+
+@app.get("/api/admin/diagnostics/download")
+def admin_diagnostics_download(request: Request, user: str = ""):
+    """Download an agent's full diagnostics log as text — pull the whole file
+    without touching the designer's machine. With no `user`, concatenates all."""
+    _require_admin(request)
+    parts: list[str] = []
+    target = _diag_safe_name(user) if user.strip() else ""
+    try:
+        files = ([DIAGNOSTICS_DIR / (target + ".log")] if target
+                 else sorted(DIAGNOSTICS_DIR.glob("*.log")))
+        for p in files:
+            if p.exists():
+                parts.append(f"===== {p.stem} =====\n" + p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        parts.append(f"(error reading diagnostics logs: {exc})")
+    body = "\n".join(parts) if parts else "(no diagnostics recorded yet)"
+    fname = (f"agent_errors_{target}.log" if target else "agent_errors_all.log")
+    return Response(content=body, media_type="text/plain",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@app.get("/api/download/agent/status")
+def download_agent_status():
+    """Lightweight availability check for the agent build — no file body.
+
+    The agent ZIP is ~275 MB, so the UI must NOT fetch() it into memory. It
+    calls this first: if `available` is false it shows the friendly message; if
+    true it hands a normal browser download the real URL so the browser streams
+    it to disk with its own progress bar."""
+    zip_path = DOWNLOADS_DIR / AGENT_ZIP_NAME
+    exe_path = DOWNLOADS_DIR / AGENT_EXE_NAME
+    for p, name in ((zip_path, AGENT_ZIP_NAME), (exe_path, AGENT_EXE_NAME)):
+        if p.exists():
+            try:
+                size = p.stat().st_size
+            except Exception:
+                size = 0
+            return {"available": True, "filename": name, "size": size}
+    return {
+        "available": False,
+        "detail": "The agent download isn't ready yet. Please contact your "
+                  "administrator — it will be available here shortly.",
+    }
+
+
 @app.get("/api/download/agent")
 def download_agent():
     """Serve the built agent. Prefers the one-dir ZIP; falls back to a lone exe.
-    Operator auth enforced by middleware."""
+    Operator auth enforced by middleware. Large file — the browser streams this
+    to disk directly (a real navigation/link), never a fetch() into memory."""
     zip_path = DOWNLOADS_DIR / AGENT_ZIP_NAME
     if zip_path.exists():
         return FileResponse(
@@ -1820,6 +1915,70 @@ def agent_authenticate(req: AgentAuthRequest):
         status_code=401,
         detail="Email or password is incorrect.",
     )
+
+
+def _redact_diag(text: str) -> str:
+    """Defensive server-side redaction (the agent already redacts). Never store
+    a secret even if a future agent regresses."""
+    try:
+        from src.agent_diagnostics import _redact
+        return _redact(text)
+    except Exception:
+        return text
+
+
+@app.post("/api/agent/diagnostics")
+async def agent_diagnostics(request: Request):
+    """Ingest one diagnostic entry (error / timeout / stall / retry / fallback /
+    session / upload) uploaded by an agent as it happens.
+
+    Identity is taken from the TOKEN, not from the client-claimed fields, so an
+    entry is always truthfully attributed to the signed-in user + their agent.
+    Stored in a bounded in-memory ring for the admin view AND appended to a
+    per-user file on disk for the Download-log button. Secrets are re-redacted
+    defensively. Never stores authorization/password/token fields."""
+    ident = _require_agent_identity(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid diagnostics payload.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid diagnostics payload.")
+
+    # Drop any secret-bearing keys outright, and redact the free-text fields.
+    entry = {k: v for k, v in body.items() if k.lower() not in _DIAG_DROP_KEYS}
+    for f in ("message", "traceback", "step", "detail"):
+        if entry.get(f):
+            entry[f] = _redact_diag(str(entry[f]))
+
+    # Server-trusted attribution (overrides whatever the client claimed).
+    entry["username"] = ident.get("username") or ident.get("name") or ""
+    entry["agent_name"] = ident.get("name") or entry.get("agent_name") or ""
+    entry["received_at"] = time.time()
+    if not entry.get("time"):
+        entry["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    if not entry.get("kind"):
+        entry["kind"] = "ERROR"
+
+    with _diag_lock:
+        _diagnostics.append(entry)
+        # Append a one-line summary + optional traceback to the per-user file.
+        who = entry["username"] or entry["agent_name"] or "unknown"
+        line = (f"{entry.get('time')} [{entry.get('kind')}] "
+                f"job={entry.get('job_id') or '-'} wf={entry.get('workflow') or '-'} "
+                f"step={entry.get('step') or '-'}"
+                + (f" exc={entry.get('exc_type')}" if entry.get("exc_type") else "")
+                + (f" :: {entry.get('message')}" if entry.get("message") else "")
+                + (f" | {entry.get('detail')}" if entry.get("detail") else ""))
+        try:
+            with open(DIAGNOSTICS_DIR / (_diag_safe_name(who) + ".log"), "a",
+                      encoding="utf-8") as fh:
+                fh.write(line + "\n")
+                if entry.get("traceback"):
+                    fh.write(str(entry["traceback"]).rstrip() + "\n")
+        except Exception as exc:
+            print(f"[diag] could not append to per-user log: {exc}")
+    return {"ok": True}
 
 
 def _require_agent(request: Request) -> str:
