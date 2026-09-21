@@ -69,6 +69,7 @@ except Exception as _cmp_exc:  # cv2 absent in the packaged agent build
 from src.prompt_builder import build_prompt
 from src.vault import save_to_vault
 from src import self_update
+from src import agent_diagnostics as diag
 
 # The agent's running CODE version, surfaced to the server (and thence the web
 # UI + the agent window) so a designer never has to open code_version.txt to
@@ -108,6 +109,20 @@ def configure(server_url: str | None = None, token: str | None = None, name: str
     if name:
         AGENT_NAME = name
     _HEADERS = {"Authorization": f"Bearer {AGENT_TOKEN}"}
+    # Give diagnostics a way to reach the server (its authenticated poster) and
+    # who we are. `name` is the email the designer signed in with (the GUI passes
+    # it), so it doubles as the username tag. Wrapped so a diagnostics hiccup
+    # never breaks configure().
+    try:
+        diag.configure(
+            username=(name or AGENT_NAME),
+            agent_name=AGENT_NAME,
+            code_version=AGENT_CODE_VERSION,
+            post=lambda path, json=None: _post(path, json=json),
+        )
+        diag.flush()   # opportunistically drain any entries queued while offline
+    except Exception:
+        pass
 
 
 class AuthError(Exception):
