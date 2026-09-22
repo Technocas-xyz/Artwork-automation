@@ -195,22 +195,50 @@ def main() -> None:
     # Folder size (what the designer unzips to).
     folder_bytes = sum(f.stat().st_size for f in app_dir.rglob("*") if f.is_file())
 
-    # Zip the one-dir app for distribution.
-    import shutil
-    zip_base = root / "dist" / "ArtworkAgent"
-    print("[build] zipping the app folder for distribution…")
-    zip_path = Path(shutil.make_archive(str(zip_base), "zip", root_dir=str(root / "dist"), base_dir="ArtworkAgent"))
-    zip_bytes = zip_path.stat().st_size
+    # Zip the one-dir app as the RUNTIME-ONLY archive: Chromium + Python + the
+    # bootstrap, with _internal/code_baseline/ STRIPPED OUT. The server injects
+    # the current code at download time (into _internal/code_baseline/), so this
+    # runtime zip does NOT need rebuilding per release — only when the bootstrap,
+    # Chromium, or a bundled Python package changes. See the note below.
+    import zipfile
+    runtime_zip = root / "dist" / "ArtworkAgent_runtime.zip"
+    baseline_prefix = "ArtworkAgent/_internal/code_baseline/"
+    baseline_dir_entry = "ArtworkAgent/_internal/code_baseline"
+    print("[build] zipping the RUNTIME-ONLY archive (code_baseline stripped)…")
+    if runtime_zip.exists():
+        runtime_zip.unlink()
+    dist_root = root / "dist"
+    skipped = 0
+    with zipfile.ZipFile(runtime_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(app_dir.rglob("*")):
+            if not f.is_file():
+                continue
+            arc = "ArtworkAgent/" + str(f.relative_to(app_dir)).replace(os.sep, "/")
+            if arc == baseline_dir_entry or arc.startswith(baseline_prefix):
+                skipped += 1
+                continue
+            zf.write(f, arc)
+    zip_bytes = runtime_zip.stat().st_size
 
     print()
     print(f"[build] DONE (one-dir): {app_dir}")
-    print(f"[build] unpacked folder: {folder_bytes:,} bytes  (~{folder_bytes/(1024*1024):.0f} MB)")
-    print(f"[build] download ZIP:    {zip_path}")
-    print(f"[build] zip size:        {zip_bytes:,} bytes  (~{zip_bytes/(1024*1024):.0f} MB)")
-    print("[build] copy dist/ArtworkAgent.zip into the server's downloads/ folder to publish it.")
-    print("[build] NOTE: this full ZIP is for FIRST INSTALL only. After that,")
-    print("[build]       designers self-update code via /api/agent/code-bundle —")
-    print("[build]       just bump AGENT_CODE_VERSION in config/agent_version.py.")
+    print(f"[build] unpacked folder:  {folder_bytes:,} bytes  (~{folder_bytes/(1024*1024):.0f} MB)")
+    print(f"[build] runtime ZIP:      {runtime_zip}")
+    print(f"[build] runtime zip size: {zip_bytes:,} bytes  (~{zip_bytes/(1024*1024):.0f} MB)  "
+          f"({skipped} code_baseline file(s) stripped)")
+    print()
+    print("[build] PUBLISH: copy dist/ArtworkAgent_runtime.zip into the server's")
+    print("[build]          downloads/ folder. The server assembles the full")
+    print("[build]          download (runtime + CURRENT code) on demand, cached")
+    print("[build]          per AGENT_CODE_VERSION — so every deploy serves")
+    print("[build]          current code with NO rebuild.")
+    print()
+    print("[build] WHEN TO RERUN build_agent.py (rare): only when the RUNTIME")
+    print("[build]   changes — i.e. agent_bootstrap.py, the bundled Chromium")
+    print("[build]   (Playwright update), or a bundled Python package/dependency")
+    print("[build]   in requirements changes. A normal code release does NOT")
+    print("[build]   need a rebuild: just bump AGENT_CODE_VERSION in")
+    print("[build]   config/agent_version.py and deploy the server.")
 
 
 if __name__ == "__main__":

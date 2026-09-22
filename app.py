@@ -171,6 +171,25 @@ def _append_agent_log(job: dict, lines: list[str]) -> None:
 AGENT_ZIP_NAME = "ArtworkAgent.zip"
 AGENT_EXE_NAME = "ArtworkAgent.exe"
 
+# --- Download assembly ------------------------------------------------------
+# The download used to be a single ~275 MB ZIP built by hand on a Windows box
+# and uploaded per release, so it went stale (a new designer got old code they
+# could not even log into). Now the server assembles it at download time:
+#   * RUNTIME zip (stored once, rebuilt only when the bootstrap / Chromium / a
+#     bundled Python package changes) — the one-dir app with code_baseline
+#     STRIPPED OUT. build_agent.py produces this.
+#   * CODE (from the working tree, current every deploy) written into
+#     _internal/code_baseline/ with code_version.txt = AGENT_CODE_VERSION.
+# The assembled zip is cached on disk keyed on AGENT_CODE_VERSION (built once
+# per release, streamed thereafter). Runtime candidates in preference order:
+AGENT_RUNTIME_ZIP_NAMES = ("ArtworkAgent_runtime.zip", "ArtworkAgent-runtime.zip")
+# Where assembled per-version downloads are cached.
+ASSEMBLED_DIR = Path("./downloads/_assembled")
+# The path INSIDE the zip that holds the read-only baseline code the bootstrap
+# copies to the writable code/ folder on first launch.
+_ZIP_APP_ROOT = "ArtworkAgent"
+_ZIP_CODE_BASELINE = f"{_ZIP_APP_ROOT}/_internal/code_baseline"
+
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 # Broader than ALLOWED_EXTENSIONS: these are shown in the per-customer artwork
 # grid (Nextcloud renders previews for them) even though only the four above can
@@ -1799,6 +1818,78 @@ def admin_diagnostics_download(request: Request, user: str = ""):
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+def _runtime_zip_path() -> Path | None:
+    """The stored runtime-only zip (Chromium + Python, code_baseline stripped),
+    if present. Falls back to a legacy full ArtworkAgent.zip so an old upload
+    still serves until the runtime zip is produced."""
+    for name in AGENT_RUNTIME_ZIP_NAMES:
+        p = DOWNLOADS_DIR / name
+        if p.exists():
+            return p
+    legacy = DOWNLOADS_DIR / AGENT_ZIP_NAME
+    return legacy if legacy.exists() else None
+
+
+_assemble_lock = threading.Lock()
+
+
+def _assembled_zip_path() -> Path | None:
+    """Return the path to the full agent zip for the CURRENT code version,
+    assembling it once (runtime + current working-tree code) if not cached.
+
+    Assembly writes to a temp file then atomically renames into the cache, so a
+    concurrent download never sees a half-written zip and we never hold 275 MB
+    in memory. Returns None if there is no runtime zip to build from."""
+    runtime = _runtime_zip_path()
+    if runtime is None:
+        return None
+    ASSEMBLED_DIR.mkdir(parents=True, exist_ok=True)
+    ver = (AGENT_CODE_VERSION or "0.0.0").strip()
+    # Key the cache on version AND the runtime zip's mtime, so replacing the
+    # runtime (new Chromium/bootstrap) invalidates the cache without a rename.
+    try:
+        rt_mtime = int(runtime.stat().st_mtime)
+    except Exception:
+        rt_mtime = 0
+    out = ASSEMBLED_DIR / f"ArtworkAgent_{ver}_{rt_mtime}.zip"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+
+    with _assemble_lock:
+        if out.exists() and out.stat().st_size > 0:   # built while we waited
+            return out
+        tmp = out.with_suffix(".zip.part")
+        try:
+            with zipfile.ZipFile(runtime, "r") as rzip, \
+                 zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as ozip:
+                # 1) Copy the runtime, dropping any stale code_baseline it may
+                #    still carry (a legacy full zip does; a proper runtime zip
+                #    does not — harmless either way).
+                skip = _ZIP_CODE_BASELINE + "/"
+                for item in rzip.infolist():
+                    if item.filename == _ZIP_CODE_BASELINE or item.filename.startswith(skip):
+                        continue
+                    # Stream each member (no full-file buffering of big binaries).
+                    with rzip.open(item) as src:
+                        ozip.writestr(item, src.read())
+                # 2) Write the CURRENT code into _internal/code_baseline/ using
+                #    the SAME selector as the self-update bundle, so first
+                #    install and self-update ship identical code.
+                for srcp, arc in _iter_agent_code_files():
+                    ozip.write(srcp, f"{_ZIP_CODE_BASELINE}/{arc}")
+                # 3) Stamp the baseline version the bootstrap starts from.
+                ozip.writestr(f"{_ZIP_CODE_BASELINE}/code_version.txt",
+                              (AGENT_CODE_VERSION or "0.0.0").strip())
+            tmp.replace(out)
+        except Exception:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+            raise
+    return out
+
+
 @app.get("/api/download/agent/status")
 def download_agent_status():
     """Lightweight availability check for the agent build — no file body.
@@ -1807,15 +1898,8 @@ def download_agent_status():
     calls this first: if `available` is false it shows the friendly message; if
     true it hands a normal browser download the real URL so the browser streams
     it to disk with its own progress bar."""
-    zip_path = DOWNLOADS_DIR / AGENT_ZIP_NAME
-    exe_path = DOWNLOADS_DIR / AGENT_EXE_NAME
-    for p, name in ((zip_path, AGENT_ZIP_NAME), (exe_path, AGENT_EXE_NAME)):
-        if p.exists():
-            try:
-                size = p.stat().st_size
-            except Exception:
-                size = 0
-            return {"available": True, "filename": name, "size": size}
+    if _runtime_zip_path() is not None:
+        return {"available": True, "filename": AGENT_ZIP_NAME}
     return {
         "available": False,
         "detail": "The agent download isn't ready yet. Please contact your "
@@ -1825,28 +1909,27 @@ def download_agent_status():
 
 @app.get("/api/download/agent")
 def download_agent():
-    """Serve the built agent. Prefers the one-dir ZIP; falls back to a lone exe.
-    Operator auth enforced by middleware. Large file — the browser streams this
-    to disk directly (a real navigation/link), never a fetch() into memory."""
-    zip_path = DOWNLOADS_DIR / AGENT_ZIP_NAME
-    if zip_path.exists():
+    """Serve the full agent build, ASSEMBLED at download time from the stored
+    runtime zip + the CURRENT working-tree code — so every deploy automatically
+    serves current code and nobody rebuilds/uploads a zip per release.
+
+    The assembled zip is cached per AGENT_CODE_VERSION and streamed from disk
+    (FileResponse), never built in memory."""
+    try:
+        assembled = _assembled_zip_path()
+    except Exception as exc:
+        print(f"[download] assembly failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail="Couldn't prepare the agent download. Please contact your administrator.")
+    if assembled is not None and assembled.exists():
         return FileResponse(
-            str(zip_path),
+            str(assembled),
             media_type="application/zip",
             filename=AGENT_ZIP_NAME,
             headers={"Content-Disposition": f'attachment; filename="{AGENT_ZIP_NAME}"'},
         )
-    exe_path = DOWNLOADS_DIR / AGENT_EXE_NAME
-    if exe_path.exists():
-        return FileResponse(
-            str(exe_path),
-            media_type="application/vnd.microsoft.portable-executable",
-            filename=AGENT_EXE_NAME,
-            headers={"Content-Disposition": f'attachment; filename="{AGENT_EXE_NAME}"'},
-        )
-    # Designer-facing: no dev instructions (build_agent.bat means nothing to
-    # them). The UI catches this and shows the friendly message in the modal
-    # rather than navigating the browser to raw JSON.
+    # No runtime zip stored yet.
     raise HTTPException(
         status_code=404,
         detail="The agent download isn't ready yet. Please contact your administrator — it will be available here shortly.",
@@ -1868,31 +1951,45 @@ _BUNDLE_EXCLUDE_DIRS = {"__pycache__", ".git", "build", "dist", ".venv"}
 _BUNDLE_EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
 
 
+def _iter_agent_code_files():
+    """Yield (source_path, arcname) for every file that makes up the agent's
+    CODE — agent.py, agent_gui.py and the src/ and config/ trees, excluding
+    caches/artefacts. `arcname` is the path RELATIVE to the code root (e.g.
+    "agent.py", "src/generator.py").
+
+    This is the single source of truth for "which files are the agent's code",
+    used by BOTH the code-only self-update bundle AND the full-download
+    assembler, so a designer's first install and every self-update thereafter
+    ship byte-for-byte the same set."""
+    root = Path(__file__).parent
+    for fname in _AGENT_CODE_FILES:
+        p = root / fname
+        if p.is_file():
+            yield p, fname
+    for dname in _AGENT_CODE_DIRS:
+        base = root / dname
+        if not base.is_dir():
+            continue
+        for p in sorted(base.rglob("*")):
+            if not p.is_file():
+                continue
+            if any(part in _BUNDLE_EXCLUDE_DIRS for part in p.relative_to(root).parts):
+                continue
+            if p.suffix.lower() in _BUNDLE_EXCLUDE_SUFFIXES:
+                continue
+            yield p, str(p.relative_to(root)).replace(os.sep, "/")
+
+
 def _build_code_bundle() -> bytes:
     """Build the code-only update zip on the fly from the working tree.
 
     Contains agent.py, agent_gui.py and the src/ and config/ trees — the exact
     set an agent imports — and nothing else. Deterministic-ish (sorted) so the
     same tree yields the same archive."""
-    root = Path(__file__).parent
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fname in _AGENT_CODE_FILES:
-            p = root / fname
-            if p.is_file():
-                zf.write(p, fname)
-        for dname in _AGENT_CODE_DIRS:
-            base = root / dname
-            if not base.is_dir():
-                continue
-            for p in sorted(base.rglob("*")):
-                if not p.is_file():
-                    continue
-                if any(part in _BUNDLE_EXCLUDE_DIRS for part in p.relative_to(root).parts):
-                    continue
-                if p.suffix.lower() in _BUNDLE_EXCLUDE_SUFFIXES:
-                    continue
-                zf.write(p, str(p.relative_to(root)).replace(os.sep, "/"))
+        for src, arc in _iter_agent_code_files():
+            zf.write(src, arc)
     return buf.getvalue()
 
 

@@ -49,8 +49,16 @@ full ZIP if the browser runtime itself changes (rare) or you're setting up a new
 PC.
 
 > Admin note: to publish new agent code, bump `AGENT_CODE_VERSION` in
-> `config/agent_version.py` on the server. Deployed agents pick it up
-> automatically via `/api/agent/code-bundle`.
+> `config/agent_version.py` and deploy the server. That's the whole release:
+> - **Existing agents** self-update automatically via `/api/agent/code-bundle`.
+> - **New downloads** are assembled on the fly — the server combines the stored
+>   runtime zip with the *current* code, so a new designer always gets the
+>   latest version. No per-release rebuild or upload.
+>
+> You only rerun `build_agent.py` and re-publish `dist/ArtworkAgent_runtime.zip`
+> into `downloads/` when the **runtime** changes (the bootstrap
+> `agent_bootstrap.py`, the bundled Chromium/Playwright, or a bundled Python
+> dependency) — rare. A normal code release needs none of that.
 
 ---
 
