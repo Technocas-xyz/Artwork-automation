@@ -175,6 +175,60 @@ var currentTypedText="",replaceNewText="",replaceTargetText="";  // preserved ac
 var referenceImageFile="",imageModeText="";  // UC-3: reference image + wording for image_element/image_style
 var pendingImageFile="";  // Text+Image file sent from the vault before a mode is picked
 var currentWorkflow="nextcloud";
+
+// --- Client name / job number survive every re-render --------------------
+// Every workflow's col2 is rebuilt on toggles / mode switches, which used to
+// wipe the client + job inputs (and any prompt the operator edited). We keep
+// them in state, update on each keystroke, and restore after every render. The
+// client/job inputs differ by workflow but hold the SAME job metadata, so one
+// shared pair of values is correct.
+var jobClient="",jobTask="";
+// The client/job input ids per workflow (text and textimage share col2).
+var _CT_IDS={text:["cn","ti"],textimage:["cn","ti"],mockup:["mcn","mti"],
+             artwork:["acn","ati"],custom:["ccn","cti"]};
+function _ctInputs(){
+  var ids=_CT_IDS[currentWorkflow];if(!ids)return [null,null];
+  return [$(ids[0]),$(ids[1])];
+}
+// Read the live inputs into state (call BEFORE a re-render / on each keystroke).
+function saveClientTask(){
+  var io=_ctInputs();
+  if(io[0])jobClient=io[0].value;
+  if(io[1])jobTask=io[1].value;
+}
+// Write state back into whatever client/job inputs exist (call AFTER a render).
+function restoreClientTask(){
+  var io=_ctInputs();
+  if(io[0]&&jobClient)io[0].value=jobClient;
+  if(io[1]&&jobTask)io[1].value=jobTask;
+}
+// Wire an input pair so typing keeps state live (used by every col2 renderer).
+function wireClientTask(clientId,taskId,updFn){
+  var c=$(clientId),t=$(taskId);
+  if(c){c.value=jobClient;c.oninput=function(){jobClient=c.value;if(updFn)updFn()}}
+  if(t){t.value=jobTask;t.oninput=function(){jobTask=t.value;if(updFn)updFn()}}
+}
+
+// --- Edited prompts survive re-renders -----------------------------------
+// A prompt textarea the operator edited must not reset to the server default on
+// the next toggle/render. We remember edits keyed by the textarea's id; a
+// renderer seeds the box with the remembered value if present, else the
+// default, and wires an oninput to remember future edits.
+var _promptEdits={};
+function seedPromptText(id,defaultVal){
+  return (id in _promptEdits)?_promptEdits[id]:(defaultVal||"");
+}
+// After a render, wire every prompt textarea inside `root` (or document) so
+// edits are remembered. Any <textarea data-prompt-id> opts in.
+function wirePromptEdits(root){
+  var scope=root||document;
+  var tas=scope.querySelectorAll('textarea[data-prompt-id]');
+  Array.prototype.forEach.call(tas,function(ta){
+    var id=ta.getAttribute('data-prompt-id');
+    if(id in _promptEdits)ta.value=_promptEdits[id];
+    ta.oninput=function(){_promptEdits[id]=ta.value};
+  });
+}
 // --- Arriving from the Design Studio --------------------------------------
 // The studio's vault sends one file over by link. psAsset is that file's row in
 // PrintShop's index: we never act on it here, we only hand it back when saving
@@ -321,6 +375,7 @@ function renderCol1(){
   tabs+='</div>';
   col1.innerHTML='<div class="col-title">'+title+'</div>'+tabs+'<div id="tmodePanel"></div>';
   col1.querySelectorAll(".tmode-tab").forEach(function(b){b.onclick=function(){
+    saveClientTask();   // keep client/job across the mode-switch re-render
     textMode=b.dataset.tmode;
     // A Text + Image file sent from the vault is held until a mode is chosen;
     // now route it into the variable that mode actually reads from.
@@ -397,19 +452,23 @@ function renderCol2(){
     // Two editable prompts: collage (step 1) and final (step 2). No colour step.
     promptBlock=''
       +'<div class="edit-toggle" id="tplTog">Edit prompt for step 1 (variations)</div>'
-      +'<div class="edit-body" id="tplBody"><textarea id="tplRC">'+esc(DT.replace_collage||"")+'</textarea><div class="tpl-error" id="tplErr"></div></div>'
+      +'<div class="edit-body" id="tplBody"><textarea id="tplRC" data-prompt-id="tplRC">'+esc(seedPromptText("tplRC",DT.replace_collage))+'</textarea><div class="tpl-error" id="tplErr"></div></div>'
       +'<div class="edit-toggle" id="tplTog2">Edit prompt for step 2 (final)</div>'
-      +'<div class="edit-body" id="tplBody2"><textarea id="tplRF">'+esc(DT.replace_final||"")+'</textarea><div class="tpl-error" id="tplErr2"></div></div>';
+      +'<div class="edit-body" id="tplBody2"><textarea id="tplRF" data-prompt-id="tplRF">'+esc(seedPromptText("tplRF",DT.replace_final))+'</textarea><div class="tpl-error" id="tplErr2"></div></div>';
   }else{
     // Step-1 template depends on the mode; steps 2/3 are edited in the pause
     // panels (renderAwaiting), same as typed/from_image.
     var step1Tpl=DT.turn1||"";
     if(textMode==="image_element")step1Tpl=DT.image_element_collage||"";
     else if(textMode==="image_style")step1Tpl=DT.image_style_collage||"";
-    promptBlock='<div class="edit-toggle" id="tplTog">Edit prompt for step 1</div><div class="edit-body" id="tplBody"><textarea id="tpl1">'+esc(step1Tpl)+'</textarea><div class="tpl-error" id="tplErr"></div></div>';
+    // Key the remembered edit per mode so an edit made in one mode doesn't leak
+    // into another mode's (different) default template.
+    var tpl1Id="tpl1__"+textMode;
+    promptBlock='<div class="edit-toggle" id="tplTog">Edit prompt for step 1</div><div class="edit-body" id="tplBody"><textarea id="tpl1" data-prompt-id="'+tpl1Id+'">'+esc(seedPromptText(tpl1Id,step1Tpl))+'</textarea><div class="tpl-error" id="tplErr"></div></div>';
   }
   col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="cn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="ti" placeholder="e.g. JOB-0042"></div>'+promptBlock+'<button class="gen-btn" id="genBtn" disabled>Generate</button><div class="blocker-msg" id="blkMsg"></div>';
-  $("cn").oninput=updBtn;$("ti").oninput=updBtn;
+  wireClientTask("cn","ti",updBtn);
+  wirePromptEdits(col2);
   $("tplTog").onclick=function(){$("tplTog").classList.toggle("open");$("tplBody").classList.toggle("open")};
   var t2=$("tplTog2");if(t2)t2.onclick=function(){t2.classList.toggle("open");$("tplBody2").classList.toggle("open")};
   $("genBtn").onclick=submitJob;
@@ -739,8 +798,9 @@ function upMockup(file){
   fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){mockupImageFile=d.saved[0].name;$("mdzPrev").innerHTML='<img src="/input/'+mockupImageFile+'" style="max-height:180px">';updMockupBtn()}}).catch(function(e){$("mdzErr").textContent=e.message});
 }
 function renderMockupCol2(){
-  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="mcn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="mti" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="mTplTog">Edit detection prompt</div><div class="edit-body" id="mTplBody"><textarea id="tplExtract">'+esc(DT.extract||"")+'</textarea><div class="tpl-error" id="mTplErr"></div></div><div class="edit-toggle" id="mAdvTog">Advanced settings</div><div class="edit-body" id="mAdvBody"><div class="field-group"><label>Manual grid override (leave 0 for ChatGPT auto-detect)</label></div><div style="display:flex;gap:8px"><div class="field-group"><label>Cols</label><input type="number" id="mCols" value="0" min="0" max="10"></div><div class="field-group"><label>Rows</label><input type="number" id="mRows" value="0" min="0" max="10"></div></div><div class="field-group"><label>Padding (px around each design)</label><input type="number" id="mPad" value="0" min="0" max="50"></div></div><button class="gen-btn" id="mGenBtn" disabled>Extract Artworks</button><div class="blocker-msg" id="mBlkMsg"></div>';
-  $("mcn").oninput=updMockupBtn;$("mti").oninput=updMockupBtn;
+  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="mcn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="mti" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="mTplTog">Edit detection prompt</div><div class="edit-body" id="mTplBody"><textarea id="tplExtract" data-prompt-id="tplExtract">'+esc(seedPromptText("tplExtract",DT.extract))+'</textarea><div class="tpl-error" id="mTplErr"></div></div><div class="edit-toggle" id="mAdvTog">Advanced settings</div><div class="edit-body" id="mAdvBody"><div class="field-group"><label>Manual grid override (leave 0 for ChatGPT auto-detect)</label></div><div style="display:flex;gap:8px"><div class="field-group"><label>Cols</label><input type="number" id="mCols" value="0" min="0" max="10"></div><div class="field-group"><label>Rows</label><input type="number" id="mRows" value="0" min="0" max="10"></div></div><div class="field-group"><label>Padding (px around each design)</label><input type="number" id="mPad" value="0" min="0" max="50"></div></div><button class="gen-btn" id="mGenBtn" disabled>Extract Artworks</button><div class="blocker-msg" id="mBlkMsg"></div>';
+  wireClientTask("mcn","mti",updMockupBtn);
+  wirePromptEdits(col2);
   $("mTplTog").onclick=function(){$("mTplTog").classList.toggle("open");$("mTplBody").classList.toggle("open")};
   $("mAdvTog").onclick=function(){$("mAdvTog").classList.toggle("open");$("mAdvBody").classList.toggle("open")};
   $("mGenBtn").onclick=submitMockupJob;
@@ -805,8 +865,9 @@ function renderArtworkList(){
 window.removeArtwork=function(idx){artworkFiles.splice(idx,1);renderArtworkList();updArtworkBtn()};
 function renderArtworkCol2(){
   var artTpl=DT.artwork||DT.artwork_regen||"Regenerate this artwork as a clean final version suitable for DTF garment printing.";
-  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="acn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="ati" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="aTplTog">Edit regeneration prompt</div><div class="edit-body" id="aTplBody"><textarea id="tplArtRegen">'+esc(artTpl)+'</textarea></div><button class="gen-btn" id="aGenBtn" disabled>Generate</button><div class="blocker-msg" id="aBlkMsg"></div>';
-  $("acn").oninput=updArtworkBtn;$("ati").oninput=updArtworkBtn;
+  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="acn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="ati" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="aTplTog">Edit regeneration prompt</div><div class="edit-body" id="aTplBody"><textarea id="tplArtRegen" data-prompt-id="tplArtRegen">'+esc(seedPromptText("tplArtRegen",artTpl))+'</textarea></div><button class="gen-btn" id="aGenBtn" disabled>Generate</button><div class="blocker-msg" id="aBlkMsg"></div>';
+  wireClientTask("acn","ati",updArtworkBtn);
+  wirePromptEdits(col2);
   $("aTplTog").onclick=function(){$("aTplTog").classList.toggle("open");$("aTplBody").classList.toggle("open")};
   $("aGenBtn").onclick=submitArtworkJob;
   checkStatus();
@@ -927,16 +988,16 @@ function renderCustomCol2(){
         html+='<div class="edit-toggle" onclick="event.stopPropagation();this.classList.toggle(\'open\');this.nextElementSibling.classList.toggle(\'open\')">Edit prompts</div>';
         html+='<div class="edit-body" onclick="event.stopPropagation()">';
         html+='<div style="font-size:.72rem;font-weight:600;margin-bottom:4px">Step A \u2014 detect objects</div>';
-        html+='<textarea id="cTplDetect_'+op.key+'">'+esc(tDetect)+'</textarea>';
+        html+='<textarea id="cTplDetect_'+op.key+'" data-prompt-id="cTplDetect_'+op.key+'">'+esc(seedPromptText("cTplDetect_"+op.key,tDetect))+'</textarea>';
         html+='<div style="font-size:.72rem;font-weight:600;margin:8px 0 4px">Step B \u2014 apply colours</div>';
-        html+='<textarea id="cTplApply_'+op.key+'">'+esc(tApply)+'</textarea>';
+        html+='<textarea id="cTplApply_'+op.key+'" data-prompt-id="cTplApply_'+op.key+'">'+esc(seedPromptText("cTplApply_"+op.key,tApply))+'</textarea>';
         html+='</div>';
       } else {
         // Single-turn ChatGPT operation: template comes directly from the server object — no key construction.
         var tplVal=op.template||"";
         if(!tplVal)console.warn("[custom] Empty template for operation:",op.key);
         html+='<div class="edit-toggle" onclick="event.stopPropagation();this.classList.toggle(\'open\');this.nextElementSibling.classList.toggle(\'open\')">Edit prompt</div>';
-        html+='<div class="edit-body" onclick="event.stopPropagation()"><textarea id="cTpl_'+op.key+'">'+esc(tplVal)+'</textarea></div>';
+        html+='<div class="edit-body" onclick="event.stopPropagation()"><textarea id="cTpl_'+op.key+'" data-prompt-id="cTpl_'+op.key+'">'+esc(seedPromptText("cTpl_"+op.key,tplVal))+'</textarea></div>';
       }
     }
     html+='</div>';
@@ -949,11 +1010,14 @@ function renderCustomCol2(){
   html+='<div class="blocker-msg" id="cBlkMsg"></div>';
   col2.innerHTML=html;
   renderCustomWarnings();
-  $("ccn").oninput=updCustomBtn;$("cti").oninput=updCustomBtn;
+  // Client/job + edited prompts survive the re-render on every op toggle.
+  wireClientTask("ccn","cti",updCustomBtn);
+  wirePromptEdits(col2);
   $("cGenBtn").onclick=submitCustomJob;
   updCustomBtn();
 }
 window.toggleCustomOp=function(key){
+  saveClientTask();               // keep typed client/job across the re-render
   var idx=customOps.indexOf(key);
   if(idx>=0)customOps.splice(idx,1);else customOps.push(key);
   renderCustomCol2();
@@ -2286,12 +2350,11 @@ function ncSend(target){
 }
 function applyNcPrefill(){
   if(!ncPrefill)return;
-  var map={text:["cn","ti"],textimage:["cn","ti"],mockup:["mcn","mti"],artwork:["acn","ati"],custom:["ccn","cti"]};
-  var ids=map[currentWorkflow];if(!ids)return;
-  var cn=$(ids[0]),ti=$(ids[1]);
-  if(!cn&&!ti)return;
-  if(cn&&!cn.value.trim()&&ncPrefill.client)cn.value=ncPrefill.client;
-  if(ti&&!ti.value.trim()&&ncPrefill.task_id)ti.value=ncPrefill.task_id;
+  // Put the prefill into shared state so it survives every subsequent re-render
+  // (op toggles, mode switches), then reflect it into the current inputs.
+  if(ncPrefill.client&&!jobClient)jobClient=ncPrefill.client;
+  if(ncPrefill.task_id&&!jobTask)jobTask=ncPrefill.task_id;
+  restoreClientTask();
   ncPrefill=null;
   updBtn();updMockupBtn();updArtworkBtn();updCustomBtn();
 }
