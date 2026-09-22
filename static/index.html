@@ -456,7 +456,14 @@ function submitJob(){
     body.template_turn1=tpl1?tpl1.value:"";
   }
   $("genBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";lastStage=-1;lastImgKey="";
-  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){saveActiveJob(d.job_id);pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("genBtn").disabled=false});
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("genBtn").disabled=false});
+}
+// After a job is created: track it, start polling, and if the server queued it
+// behind the user's own in-flight job, say so plainly.
+function onJobCreated(d){
+  saveActiveJob(d.job_id);
+  if(d&&d.queued_note){statusArea.innerHTML='<div class="status-box awaiting">'+esc(d.queued_note)+'</div>'}
+  pollJob(d.job_id);
 }
 var isLoggedIn=false;
 function agentBannerHtml(s){
@@ -757,7 +764,7 @@ function submitMockupJob(){
   var body={workflow:"mockup",mockup_image:mockupImageFile,extract_mode:mode,grid_cols:cols||4,grid_rows:rows||2,client:$("mcn").value.trim(),task_id:$("mti").value.trim(),text:"",text_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:tplExt?tplExt.value:"",template_regen:""};
   console.log("[submitMockupJob] body:",body);
   $("mGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
-  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){saveActiveJob(d.job_id);pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("mGenBtn").disabled=false});
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("mGenBtn").disabled=false});
 }
 
 // === ARTWORK GENERATION WORKFLOW UI ===
@@ -818,7 +825,7 @@ function submitArtworkJob(){
   var body={workflow:"artwork",artwork_files:artworkFiles,client:$("acn").value.trim(),task_id:$("ati").value.trim(),template_regen:tpl?tpl.value:"",text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
   console.log("[submitArtworkJob] artworkFiles:",artworkFiles,"body:",body);
   $("aGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
-  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){saveActiveJob(d.job_id);pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("aGenBtn").disabled=false});
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("aGenBtn").disabled=false});
 }
 
 // === CUSTOM OPERATION WORKFLOW UI ===
@@ -1009,7 +1016,7 @@ function submitCustomJob(){
   }
   var body={workflow:"custom",artwork_files:[customFile],custom_operations:customOps,custom_prompts:prompts,aspect_dpi:customDpi,halftone_settings:halftone,blackout_settings:blackout,client:$("ccn").value.trim(),task_id:$("cti").value.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
   $("cGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
-  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){saveActiveJob(d.job_id);pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("cGenBtn").disabled=false});
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("cGenBtn").disabled=false});
 }
 
 function doAcceptCrops(jid){

@@ -545,6 +545,38 @@ def _free_agent_exists() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Per-USER routing. Every job records who created it (created_by = username) and
+# every agent authenticates as a user (agents[id]["username"]). A job must only
+# ever run on an agent belonging to its creator, and one user's busy agent must
+# never block another user. These helpers make availability a per-user question.
+# ---------------------------------------------------------------------------
+
+def _norm_user(u: str) -> str:
+    return (u or "").strip().lower()
+
+
+def _online_agents_for_user(username: str) -> list[dict]:
+    """Online agents owned by `username` (a user may run several PCs)."""
+    u = _norm_user(username)
+    if not u:
+        return []
+    return [a for a in _online_agents() if _norm_user(a.get("username")) == u]
+
+
+def _user_has_online_agent(username: str) -> bool:
+    return len(_online_agents_for_user(username)) > 0
+
+
+def _user_has_free_agent(username: str) -> bool:
+    """True if the user has an online agent that is not already holding a job.
+
+    Either of a user's PCs may take that user's jobs, so we only need ONE of
+    their online agents to be free."""
+    busy = _busy_agent_ids()
+    return any(a.get("id") not in busy for a in _online_agents_for_user(username))
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -784,17 +816,20 @@ def create_job(req: GenerateRequest, request: Request):
     _creator = _current_user_record(request)
     _created_by = _creator["username"] if _creator else ""
     _created_by_name = (_creator.get("display_name") or _creator["username"]) if _creator else ""
-    if _online_agent() is None:
-        raise HTTPException(status_code=503, detail="No agent running. Start the agent on your PC to generate.")
+    # A job only ever runs on an agent belonging to its creator, so the check is
+    # per USER, not the whole fleet: THIS user must have their own agent online.
+    if not _user_has_online_agent(_created_by):
+        raise HTTPException(
+            status_code=503,
+            detail="Your agent isn't running. Start the agent on your PC to generate.")
     if not req.client.strip():
         raise HTTPException(status_code=400, detail="Client name is required.")
     if not req.task_id.strip():
         raise HTTPException(status_code=400, detail="Job number is required.")
-    # Per-agent limit: refuse only when every online agent is already busy, not
-    # merely because some other designer's job exists. A queued job will be
-    # picked up by whichever agent frees up next.
-    if not _free_agent_exists():
-        raise HTTPException(status_code=409, detail="All agents are busy. Wait for one to finish, or start another agent.")
+    # The user's agent is online. If it is busy with their OWN earlier job we do
+    # NOT refuse — we queue this one and say so plainly; their agent picks it up
+    # when it finishes. Another user's busy agent never enters this decision.
+    _agent_busy_with_own = not _user_has_free_agent(_created_by)
 
     if req.workflow == "text":
         if req.text_mode == "replace":
@@ -946,7 +981,11 @@ def create_job(req: GenerateRequest, request: Request):
         # Agent claim tracking
         "claimed_by": None, "claimed_by_name": "", "claimed_at": None, "last_progress_at": None,
     }
-    return {"job_id": job_id}
+    resp = {"job_id": job_id}
+    if _agent_busy_with_own:
+        # Queued behind the user's own in-flight job on their agent.
+        resp["queued_note"] = "Waiting for your agent to finish your current job."
+    return resp
 
 
 @app.post("/api/jobs/{job_id}/select")
@@ -1459,37 +1498,39 @@ def open_folder(req: OpenFolderRequest):
 
 
 @app.get("/api/status")
-def get_status():
+def get_status(request: Request):
     _requeue_stale_jobs()
-    live = _online_agents()
-    # `worker_alive`/`logged_in` keys are kept for the existing UI: they now mean
-    # "at least one agent is connected" and "at least one connected agent reports
-    # a signed-in ChatGPT session". With multiple designers we count the whole
-    # fleet, not just the newest registrant.
+    # The header reflects the LOGGED-IN USER's OWN agents — not the whole fleet.
+    # A designer only cares whether THEIR agent is up and whether THEIR agent is
+    # free to take THEIR next job. One user's busy agent must never make another
+    # user's header say "busy". (Admins see the whole fleet in Settings, which
+    # uses the separate /api/admin/* endpoints.)
+    me = _current_user_record(request)
+    my_user = me["username"] if me else ""
+    live = _online_agents_for_user(my_user)
     online = len(live) > 0
     logged_in = _any_agent_logged_in(live)
     # Prefer a signed-in agent's name for the header label; else the newest.
     label_agent = next((a for a in live if a.get("logged_in")), live[0] if live else None)
-    # Per-agent limit: a new job can start whenever SOME online agent is free.
-    # We no longer advertise a single global "blocking_job_id" — that latched
-    # every browser onto one designer's job and blocked the rest. Instead we
-    # report who is busy so the UI can show which agent is on each job without
-    # blocking anyone else.
     busy = _busy_agent_ids()
+    # Active jobs shown to this user: their own in-flight jobs.
     active_jobs = [
         {"job_id": j.get("id"), "status": j.get("status"),
          "agent": j.get("claimed_by_name") or "", "agent_id": j.get("claimed_by")}
-        for j in jobs.values() if j.get("status") in _AGENT_BUSY_STATUSES
+        for j in jobs.values()
+        if j.get("status") in _AGENT_BUSY_STATUSES
+        and _norm_user(j.get("created_by")) == _norm_user(my_user)
     ]
     return {
         # Retained for backward-compat, but always null now: the client tracks
         # its own job locally and must not adopt another designer's job.
         "blocking_job_id": None,
-        "free_agent": _free_agent_exists(),
-        "busy_agent_count": len(busy),
+        # Can THIS user start a job now — do they have a free agent of their own?
+        "free_agent": _user_has_free_agent(my_user),
+        "busy_agent_count": sum(1 for a in live if a.get("id") in busy),
         "active_jobs": active_jobs,
         "worker_alive": online,
-        "worker_error": "" if online else "No agent running - start the agent on your PC to generate.",
+        "worker_error": "" if online else "Your agent isn't running. Start the agent on your PC to generate.",
         "logged_in": logged_in,
         "agent_connected": online,
         "agent_count": len(live),
@@ -2221,23 +2262,37 @@ def agent_register(req: AgentRegisterRequest, request: Request):
 
 @app.get("/api/agent/next-job")
 def agent_next_job(request: Request, agent_id: str, logged_in: bool = False, code_version: str = ""):
-    _require_agent(request)
+    ident = _require_agent_identity(request)
+    agent_user = _norm_user(ident.get("username"))
     a = agents.get(agent_id)
     if a:
         a["last_seen"] = time.time()
         a["logged_in"] = logged_in
         if code_version.strip():
             a["code_version"] = code_version.strip()
+        # Keep the owning user current on the in-memory agent entry (it was set
+        # at register; refresh defensively in case identity resolution changed).
+        if agent_user:
+            a["username"] = ident.get("username")
     _requeue_stale_jobs()
-    # Claim the oldest queued job atomically. An agent holds at most one job at
-    # a time, so if this agent is already running/paused on one, it takes
-    # nothing new — the busy check and the claim happen under the same lock so
-    # two rapid polls can't both slip a job onto one agent.
+    # Claim the oldest queued job THAT THIS USER CREATED, atomically. A job only
+    # ever runs on an agent belonging to its creator — an agent never sees
+    # another user's jobs. An agent holds at most one job at a time, so if this
+    # agent is already running/paused on one, it takes nothing new. The busy
+    # check and the claim happen under the same lock so two rapid polls can't
+    # both slip a job onto one agent.
     with _jobs_lock:
         if agent_id in _busy_agent_ids():
             return Response(status_code=204)
+
+        def _mine(j: dict) -> bool:
+            owner = _norm_user(j.get("created_by"))
+            # New jobs always carry created_by. A legacy job with none is not
+            # owned by anyone, so let any agent take it rather than strand it.
+            return owner == agent_user or owner == ""
+
         queued = sorted(
-            [j for j in jobs.values() if j.get("status") == "queued"],
+            [j for j in jobs.values() if j.get("status") == "queued" and _mine(j)],
             key=lambda j: j.get("created_at", 0),
         )
         if not queued:
