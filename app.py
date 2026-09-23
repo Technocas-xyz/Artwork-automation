@@ -3036,6 +3036,46 @@ def printshop_designs(customer: str = ""):
         raise HTTPException(status_code=exc.status, detail=str(exc))
 
 
+@app.get("/api/printshop/thumb")
+def printshop_thumb(id: str = "", v: str = "", w: int = 96, h: int = 96):
+    """Proxy a design's thumbnail from PrintShop by asset id.
+
+    The vault token must never reach the browser: this plain-HTTP-by-IP app
+    would leak it in any URL the page loads. So the page requests the thumbnail
+    from here BY ID, and the token travels only host-to-host inside
+    printshop.thumb(). The `v=<preview_key>` param is the file's etag — it makes
+    each version a distinct URL, so the response is safe to cache immutably; it
+    is otherwise unused server-side. Cookie-authed by the global middleware,
+    like the other /api/printshop/* routes.
+    """
+    # Validate the id is a real UUID — never forward arbitrary strings upstream.
+    try:
+        uuid.UUID(str(id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid asset id.")
+    # Clamp the requested size to a sane range.
+    try:
+        w = max(32, min(512, int(w)))
+        h = max(32, min(512, int(h)))
+    except (ValueError, TypeError):
+        w, h = 96, 96
+    try:
+        content, mime = printshop.thumb(id, w, h)
+    except printshop.PrintshopError as exc:
+        # Pass PrintShop's status through (404 for a gone asset) so the page
+        # shows its neutral placeholder rather than a broken image.
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    return Response(
+        content=content,
+        media_type=mime,
+        headers={
+            # Safe to cache hard: the URL carries v=<preview_key> (the etag), so
+            # a changed file is a new URL.
+            "Cache-Control": "private, max-age=604800, immutable",
+        },
+    )
+
+
 @app.post("/api/printshop/save-vault")
 def printshop_save_vault(req: PrintshopVaultSaveRequest):
     """Generated file ko customer ke folder me, shop ki naming ke saath rakho.

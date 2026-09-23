@@ -168,6 +168,38 @@ def list_designs(key: str) -> list:
     return data.get("rows") or []
 
 
+def thumb(asset_id: str, w: int, h: int) -> tuple[bytes, str]:
+    """Fetch a design's thumbnail bytes from PrintShop by asset id.
+
+    Returns (image_bytes, mime). The vault token travels only in this
+    host-to-host request over the docker bridge — never in a URL the browser
+    sees. Raises PrintshopError (carrying PrintShop's status, e.g. 404 for a
+    deleted asset) so the proxy route can pass the status through and the page
+    can show a neutral placeholder instead of a broken image.
+    """
+    if not str(asset_id or "").strip():
+        raise PrintshopError("No design was chosen for the thumbnail.", 400)
+    try:
+        response = requests.get(
+            f"{BACKEND}/api/artworks/studio/thumb",
+            params={"token": vault_token(), "id": str(asset_id), "w": int(w), "h": int(h)},
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        raise PrintshopError(f"PrintShop could not be reached: {exc}") from exc
+    if not response.ok:
+        # Bubble PrintShop's status up (404 when the asset is gone) so the proxy
+        # returns the same and the frontend shows its placeholder.
+        message = f"PrintShop said {response.status_code}."
+        try:
+            message = (response.json() or {}).get("message") or message
+        except ValueError:
+            pass
+        raise PrintshopError(message, response.status_code)
+    mime = response.headers.get("content-type") or "image/png"
+    return response.content, mime
+
+
 def upload_to_vault(key: str, lifecycle: str, attach_to: str,
                     file_name: str, data: bytes, mime: str) -> dict:
     """Add a generated file to a customer's folder under the shop's naming.

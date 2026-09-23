@@ -80,6 +80,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .nc-file.arrived{box-shadow:0 0 0 2px var(--accent,#6366f1),0 6px 20px rgba(99,102,241,.25)}
 .nc-arrived{position:absolute;top:4px;left:4px;z-index:2;background:var(--accent,#6366f1);color:#fff;font-size:8px;font-weight:700;letter-spacing:.04em;padding:2px 5px;border-radius:4px}
 .vm-modal{background:var(--surface);border-radius:var(--radius);width:100%;max-width:420px;box-shadow:0 12px 40px rgba(0,0,0,.25);overflow:hidden;display:flex;flex-direction:column;max-height:90vh}
+.vm-modal.vm-wide{max-width:520px}
 .vm-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
 .vm-head h3{font-size:.95rem;font-weight:700}.vm-head .vm-x{cursor:pointer;font-size:1.2rem;color:var(--muted);line-height:1;border:none;background:none}
 .vm-body{padding:16px 18px;overflow-y:auto}
@@ -96,6 +97,34 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .vm-btn.ghost{background:var(--surface);border:1px solid var(--border);color:var(--text)}
 .vm-err{color:#dc2626;font-size:.78rem;margin-right:auto}
 .vm-ok{color:#059669;font-size:.78rem;margin-right:auto;font-weight:600}
+/* Save-to-Vault design picker: a searchable thumbnail list, like the Design
+   Studio "which design is this for?" chooser. Theme-var driven so it works in
+   light and dark; the selected tint uses color-mix on the accent (rgba
+   fallback for old engines). */
+.vm-req{color:#dc2626;font-size:.64rem;font-weight:700;letter-spacing:.04em;margin-left:6px;vertical-align:middle}
+.vm-dsearch{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:.84rem;font-family:inherit;background:var(--surface);color:var(--text);margin-bottom:6px}
+.vm-dpick{border:1px solid var(--border);border-radius:8px;max-height:300px;overflow-y:auto;background:var(--surface)}
+.vm-drow{display:flex;align-items:center;gap:10px;padding:7px 9px;cursor:pointer;border-bottom:1px solid var(--border);border-left:3px solid transparent}
+.vm-drow:last-child{border-bottom:none}
+.vm-drow:hover{background:rgba(127,127,127,.08)}
+.vm-drow.sel{border-left-color:var(--accent);background:rgba(37,99,235,.10);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.vm-drow:focus{outline:none}
+.vm-dthumb{width:44px;height:44px;flex:0 0 44px;object-fit:contain;border:1px solid var(--border);border-radius:6px;background:repeating-conic-gradient(rgba(127,127,127,.12) 0% 25%,transparent 0% 50%) 50%/10px 10px}
+.vm-dph{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:1rem}
+.vm-dmeta{min-width:0;flex:1}
+.vm-dcode{font-size:.82rem;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vm-dfile{font-size:.72rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vm-dnote{padding:12px;font-size:.78rem;color:var(--muted);text-align:center}
+/* Coloured lifecycle chips (values unchanged): REF/SRC blue, WRK orange,
+   FNL purple, FNLA green — matching the Design Studio palette. */
+.vm-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:2px}
+.vm-chip{padding:6px 11px;font-size:.76rem;font-weight:700;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--text);cursor:pointer;transition:.12s}
+.vm-chip:hover{border-color:var(--muted)}
+.vm-chip.sel{color:#fff;border-color:transparent}
+.vm-chip[data-k="REF"].sel,.vm-chip[data-k="SRC"].sel{background:#2563eb}
+.vm-chip[data-k="WRK"].sel{background:#d97706}
+.vm-chip[data-k="FNL"].sel{background:#7c3aed}
+.vm-chip[data-k="FNLA"].sel{background:#059669}
 .toast-wrap{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:1100;display:flex;flex-direction:column;gap:8px;align-items:center}
 .toast{padding:10px 18px;border-radius:8px;font-size:.82rem;font-weight:600;color:#fff;box-shadow:0 6px 20px rgba(0,0,0,.2);animation:toastIn .2s ease}
 .toast.ok{background:#059669}.toast.err{background:#dc2626}
@@ -1574,7 +1603,7 @@ function vaultRenderModal(name,client,task){
   var ov=document.createElement("div");
   ov.className="vm-overlay";ov.id="vaultModal";
   ov.innerHTML=
-    '<div class="vm-modal" role="dialog" aria-modal="true">'
+    '<div class="vm-modal vm-wide" role="dialog" aria-modal="true">'
     +'<div class="vm-head"><h3>☁ Save to Artwork Vault</h3><button class="vm-x" id="vmX" title="Close">×</button></div>'
     +'<div class="vm-body">'
       +'<div class="vm-preview"><img src="/api/output/'+esc(name)+'" alt=""><div class="vm-hint">Saving into the chosen customer’s <b>AI Artwork</b> folder in the vault.</div></div>'
@@ -1591,16 +1620,18 @@ function vaultRenderModal(name,client,task){
       +'<select id="vmCustomer" size="1"></select>'
       +'<div class="vm-hint" id="vmCustHint"></div>'
       +'<label>Type</label>'
-      +'<select id="vmKind">'
-        +'<option value="SRC">Source — a new design</option>'
-        +'<option value="REF">Reference — a new design</option>'
-        +'<option value="WRK">Work — continues an existing design</option>'
-        +'<option value="FNL">Final — continues an existing design</option>'
-        +'<option value="FNLA">Final Approved — continues an existing design</option>'
-      +'</select>'
+      +'<div class="vm-chips" id="vmKindChips" role="radiogroup" aria-label="Type">'
+        +'<button type="button" class="vm-chip" data-k="SRC" title="Source — a new design">SRC</button>'
+        +'<button type="button" class="vm-chip" data-k="REF" title="Reference — a new design">REF</button>'
+        +'<button type="button" class="vm-chip" data-k="WRK" title="Work — continues an existing design">WRK</button>'
+        +'<button type="button" class="vm-chip" data-k="FNL" title="Final — continues an existing design">FNL</button>'
+        +'<button type="button" class="vm-chip" data-k="FNLA" title="Final Approved — continues an existing design">FNLA</button>'
+      +'</div>'
+      +'<div class="vm-hint" id="vmKindDesc"></div>'
       +'<div id="vmAttachWrap" style="display:none">'
-        +'<label>Which design?</label>'
-        +'<select id="vmAttach"><option value="">Loading…</option></select>'
+        +'<label id="vmAttachLabel">Which design?<span class="vm-req">REQUIRED</span></label>'
+        +'<input type="text" id="vmDSearch" class="vm-dsearch" placeholder="Search designs" autocomplete="off">'
+        +'<div class="vm-dpick" id="vmAttach" role="listbox" aria-label="Choose the design this file belongs to"></div>'
       +'</div>'
       +'<div class="vm-hint" id="vmNameHint"></div>'
     +'</div>'
@@ -1627,45 +1658,141 @@ function vaultRenderModal(name,client,task){
   $("vmX").onclick=vaultCloseModal;$("vmCancel").onclick=vaultCloseModal;
   ov.addEventListener("click",function(e){if(e.target===ov)vaultCloseModal()});
   document.addEventListener("keydown",function esc2(e){if(e.key==="Escape"){vaultCloseModal();document.removeEventListener("keydown",esc2)}});
-  // Kaun si qismein mojooda design ke saath jurti hain. REF aur SRC naya design
-  // shuru karte hain, isliye un ke liye kuch chunna nahi hota.
+  // WRK/FNL/FNLA continue an existing design, so they need one picked; SRC/REF
+  // start a new design and hide the picker.
   var ATTACHES={WRK:1,FNL:1,FNLA:1};
-  var kindEl=$("vmKind"),attachWrap=$("vmAttachWrap"),attachEl=$("vmAttach"),hintEl=$("vmNameHint");
-  var designs=null,designsFor="";
+  var KIND_LABEL={WRK:"WRK",FNL:"FNL",FNLA:"FNLA"};
+  var attachWrap=$("vmAttachWrap"),attachEl=$("vmAttach"),hintEl=$("vmNameHint");
+  var searchEl=$("vmDSearch"),labelEl=$("vmAttachLabel"),descEl=$("vmKindDesc");
+  var chipsWrap=$("vmKindChips");
+  var designs=null,designsFor="",attachId="",kind="SRC",filterText="";
 
+  // A code the modal was opened against — Design Studio handoff (psCode) or an
+  // AW-<CLIENT>-<NNNN> code in the source file name — used to pre-select a row.
+  var preferCode="";
+  (function(){
+    if(psCode){preferCode=psCode.toUpperCase();return}
+    var m=/(AW-[A-Za-z0-9]+-\d{3,})/i.exec(name||"");
+    if(m)preferCode=m[1].toUpperCase();
+  })();
+
+  function thumbSrc(x){
+    return "/api/printshop/thumb?id="+encodeURIComponent(x.id)
+      +"&v="+encodeURIComponent(x.preview_key||"")+"&w=96&h=96";
+  }
+  function selectedDesign(){
+    return designs&&designs.filter(function(x){return x.id===attachId})[0];
+  }
   function paintHint(){
-    var k=kindEl.value;
-    if(!ATTACHES[k]){hintEl.textContent="PrintShop will give this the next free number for this client, then name it AW-<client>-<number>-"+k+"."; return}
-    var d=designs&&designs.filter(function(x){return x.id===attachEl.value})[0];
-    hintEl.textContent=d?("Saves as "+d.artwork_code+"-"+k+" — the same design, a new stage.")
+    if(!ATTACHES[kind]){hintEl.textContent="PrintShop will give this the next free number for this client, then name it AW-<client>-<number>-"+kind+"."; return}
+    var d=selectedDesign();
+    hintEl.textContent=d?("Saves as "+d.artwork_code+"-"+kind+" — the same design, a new stage.")
                         :"Pick the design this file belongs to; it keeps that design's number.";
   }
+  function paintKind(){
+    // Reflect selection on the chips + the short "what it does" line.
+    Array.prototype.forEach.call(chipsWrap.querySelectorAll(".vm-chip"),function(b){
+      var on=b.getAttribute("data-k")===kind;
+      b.classList.toggle("sel",on);b.setAttribute("aria-checked",on?"true":"false");
+    });
+    descEl.textContent=ATTACHES[kind]?"Continues an existing design.":"Starts a new design.";
+    if(labelEl)labelEl.innerHTML="Which design is this "+KIND_LABEL[kind]+" for?<span class=\"vm-req\">REQUIRED</span>";
+  }
+  // A single row (or a full-width note) inside the scrollable list.
+  function rowNote(text){return '<div class="vm-dnote">'+esc(text)+'</div>'}
+  function renderRows(){
+    if(!designs){attachEl.innerHTML=rowNote("Loading\u2026");return}
+    if(!designs.length){attachEl.innerHTML=rowNote("This customer has no design yet — use Source or Reference");return}
+    var q=filterText.trim().toLowerCase();
+    var list=q?designs.filter(function(x){
+      return (x.artwork_code||"").toLowerCase().indexOf(q)>=0
+          || (x.file_name||"").toLowerCase().indexOf(q)>=0;
+    }):designs;
+    if(!list.length){attachEl.innerHTML=rowNote("No designs match \u201c"+filterText+"\u201d");return}
+    var h="";
+    for(var i=0;i<list.length;i++){
+      var x=list[i],on=x.id===attachId;
+      h+='<div class="vm-drow'+(on?" sel":"")+'" role="option" tabindex="'+(on?"0":"-1")+'"'
+        +' aria-selected="'+(on?"true":"false")+'" data-id="'+esc(x.id)+'">'
+        +'<img class="vm-dthumb" loading="lazy" decoding="async" alt="" '
+          +'src="'+esc(thumbSrc(x))+'" '
+          +'onerror="this.onerror=null;this.replaceWith(Object.assign(document.createElement(\'div\'),{className:\'vm-dthumb vm-dph\',textContent:\'\\uD83D\\uDDBC\'}))">'
+        +'<div class="vm-dmeta"><div class="vm-dcode">'+esc(x.artwork_code||"(no code)")+'</div>'
+          +'<div class="vm-dfile">'+esc(x.file_name||"")+'</div></div>'
+        +'</div>';
+    }
+    attachEl.innerHTML=h;
+  }
+  function selectId(id,scroll){
+    attachId=id||"";
+    // Toggle row state without a full re-render so lazy thumbs don't reload.
+    Array.prototype.forEach.call(attachEl.querySelectorAll(".vm-drow"),function(r){
+      var on=r.getAttribute("data-id")===attachId;
+      r.classList.toggle("sel",on);r.setAttribute("aria-selected",on?"true":"false");
+      r.tabIndex=on?0:-1;
+      if(on&&scroll)r.scrollIntoView({block:"nearest"});
+    });
+    paintHint();
+  }
+  function preselect(){
+    if(!designs||!designs.length)return;
+    if(attachId&&selectedDesign())return;   // keep an existing valid pick
+    var match=preferCode&&designs.filter(function(x){return (x.artwork_code||"").toUpperCase()===preferCode})[0];
+    if(match)selectId(match.id,true);
+  }
+  // Keyboard: Up/Down move focus between rows, Enter selects the focused row.
+  attachEl.addEventListener("keydown",function(e){
+    var rows=Array.prototype.slice.call(attachEl.querySelectorAll(".vm-drow"));
+    if(!rows.length)return;
+    var cur=document.activeElement&&document.activeElement.classList&&document.activeElement.classList.contains("vm-drow")?rows.indexOf(document.activeElement):-1;
+    if(e.key==="ArrowDown"||e.key==="ArrowUp"){
+      e.preventDefault();
+      var ni=cur<0?0:cur+(e.key==="ArrowDown"?1:-1);
+      ni=Math.max(0,Math.min(rows.length-1,ni));
+      rows[ni].focus();rows[ni].scrollIntoView({block:"nearest"});
+    }else if(e.key==="Enter"||e.key===" "){
+      e.preventDefault();
+      var t=document.activeElement;
+      if(t&&t.classList&&t.classList.contains("vm-drow"))selectId(t.getAttribute("data-id"),false);
+    }
+  });
+  attachEl.addEventListener("click",function(e){
+    var row=e.target.closest?e.target.closest(".vm-drow"):null;
+    if(row)selectId(row.getAttribute("data-id"),false);
+  });
 
   function loadDesigns(){
     var cust=selEl.value;
-    if(!ATTACHES[kindEl.value]){attachWrap.style.display="none";paintHint();return}
+    if(!ATTACHES[kind]){attachWrap.style.display="none";paintHint();return}
     attachWrap.style.display="";
-    if(!cust){attachEl.innerHTML='<option value="">Select a customer first</option>';paintHint();return}
-    if(designsFor===cust&&designs){paintHint();return}
-    attachEl.innerHTML='<option value="">Loading…</option>';
+    if(!cust){designs=null;attachEl.innerHTML=rowNote("Select a customer first");paintHint();return}
+    if(designsFor===cust&&designs){renderRows();preselect();paintHint();return}
+    designs=null;renderRows();  // shows "Loading…"
     fetch("/api/printshop/designs?customer="+encodeURIComponent(cust))
       .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||"Could not load designs");return d})})
       .then(function(d){
         designs=d.rows||[];designsFor=cust;
-        attachEl.innerHTML=designs.length
-          ? designs.map(function(x){return '<option value="'+esc(x.id)+'">'+esc(x.artwork_code)+' — '+esc(x.file_name)+'</option>'}).join("")
-          : '<option value="">This customer has no design yet — use Source or Reference</option>';
-        paintHint();
+        renderRows();preselect();paintHint();
       })
-      .catch(function(e){attachEl.innerHTML='<option value="">'+esc(e.message)+'</option>';paintHint()});
+      .catch(function(e){designs=[];attachEl.innerHTML=rowNote(e.message);paintHint()});
   }
 
-  kindEl.onchange=loadDesigns;
-  attachEl.onchange=paintHint;
-  selEl.addEventListener("change",function(){designs=null;designsFor="";loadDesigns()});
-  loadDesigns();
+  // Type chips — clicking one sets the lifecycle, clears the picker selection
+  // and reloads (SRC/REF just hide it).
+  chipsWrap.addEventListener("click",function(e){
+    var b=e.target.closest?e.target.closest(".vm-chip"):null;
+    if(!b)return;
+    kind=b.getAttribute("data-k");
+    attachId="";filterText="";if(searchEl)searchEl.value="";
+    paintKind();loadDesigns();
+  });
+  if(searchEl)searchEl.oninput=function(){filterText=searchEl.value;renderRows();};
+  // Changing customer clears the current designs + selection and reloads.
+  selEl.addEventListener("change",function(){designs=null;designsFor="";attachId="";filterText="";if(searchEl)searchEl.value="";loadDesigns()});
 
-  $("vmSave").onclick=function(){vaultDoSave(name,selEl.value,kindEl.value,attachEl.value)};
+  paintKind();loadDesigns();
+
+  $("vmSave").onclick=function(){vaultDoSave(name,selEl.value,kind,attachId)};
   if($("vmWrk"))$("vmWrk").onclick=function(){psSaveWrk(name)};
   setTimeout(function(){filterEl.focus()},30);
 }
