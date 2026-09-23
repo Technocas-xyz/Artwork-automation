@@ -87,6 +87,35 @@ PROMPT_KEYS: dict[str, str] = {
     "JOB_OPTION_UPSCALE_CLEANUP": "AIS.EDIT.UPSCALE_CLEANUP",
 }
 
+# Every live prompt under this prefix is a one-step Custom operation (artwork in,
+# image out) with no code change: publish AIS.CUSTOM_OPERATIONS.<NAME> in Prompt
+# Management and it appears on the Custom screen within a minute. Such a prompt
+# must not use {{placeholders}}; nothing here would fill them.
+DYNAMIC_PREFIX = "AIS.CUSTOM_OPERATIONS."
+DYNAMIC_OP_PREFIX = "pm_"          # the operation key the UI and agent use
+_DYNAMIC_NAME = "PM_OP:"           # template name: PM_OP:<prompt key>
+_SAFE_SUFFIX = re.compile(r"^[A-Z0-9_]{1,80}$")
+
+
+def is_dynamic(name: str) -> bool:
+    return name.startswith(_DYNAMIC_NAME)
+
+
+def dynamic_op_key(prompt_key: str) -> str | None:
+    suffix = prompt_key[len(DYNAMIC_PREFIX):] if prompt_key.startswith(DYNAMIC_PREFIX) else ""
+    return DYNAMIC_OP_PREFIX + suffix.lower() if _SAFE_SUFFIX.match(suffix) else None
+
+
+def dynamic_name(op_key: str) -> str:
+    """pm_foo_bar → PM_OP:AIS.CUSTOM_OPERATIONS.FOO_BAR"""
+    return _DYNAMIC_NAME + DYNAMIC_PREFIX + op_key[len(DYNAMIC_OP_PREFIX):].upper()
+
+
+def key_for(name: str) -> str | None:
+    """The Prompt Management key behind a template name."""
+    return name[len(_DYNAMIC_NAME):] if is_dynamic(name) else PROMPT_KEYS.get(name)
+
+
 # Which prompts each workflow can use, for the per-job snapshot and the run log.
 WORKFLOW_PROMPTS: dict[str, list[str]] = {
     # Default (superset) for the Text workflow: the typed/from-image turns plus
@@ -168,6 +197,8 @@ def is_composed(name: str) -> bool:
 
 
 def _builtin(name: str) -> str:
+    if is_dynamic(name):
+        return ""   # a Prompt Management operation has no built-in text
     if name == "BASE_INSTRUCTION":
         from src.prompt_builder import BASE_INSTRUCTION
         return BASE_INSTRUCTION
@@ -189,6 +220,9 @@ class PromptRegistry:
         # Every template text handed out per name, so a job carrying one of them
         # back (the web UI pre-fills its prompt boxes) is not counted as edited.
         self._served: dict[str, set[str]] = {}
+        self._manifest_sent = ""
+        self._manifest_at = 0.0
+        self._warned: set[tuple] = set()
 
     # ── fetching ────────────────────────────────────────────────────────────
     def _load_disk(self) -> dict[str, Any] | None:
@@ -217,7 +251,7 @@ class PromptRegistry:
         try:
             r = requests.get(
                 f"{BACKEND}/api/ai/prompts",
-                params={"keys": ",".join(sorted(set(PROMPT_KEYS.values())))},
+                params={"keys": ",".join(sorted(set(PROMPT_KEYS.values()))), "prefix": DYNAMIC_PREFIX},
                 headers={"x-decoinks-sso-secret": _secret()},
                 timeout=5,
             )
@@ -250,7 +284,7 @@ class PromptRegistry:
     def template(self, name: str) -> tuple[str, dict[str, Any]]:
         """The template to run for `name`, and where it came from."""
         builtin = _builtin(name)
-        key = PROMPT_KEYS.get(name)
+        key = key_for(name)
         meta: dict[str, Any] = {"name": name, "key": key, "version_id": None, "version": None, "source": "built_in"}
         if not key:
             return builtin, meta
@@ -258,14 +292,25 @@ class PromptRegistry:
         text = (p or {}).get("text") or ""
         if not text.strip():
             return builtin, meta
+        if is_dynamic(name):
+            # Sent to ChatGPT exactly as written, never through str.format.
+            if _VAR.search(text):
+                meta["rejected"] = {"unknown": sorted(set(_VAR.findall(text))), "missing": []}
+                return "", meta
+            meta.update(version_id=p["version"]["id"], version=p["version"].get("number"), source="managed")
+            self._remember(name, text)
+            return text, meta
         tpl = to_python_template(text)
         have, need = template_fields(tpl), template_fields(builtin)
         if have != need:
             # The code fills exactly these placeholders. An extra one would crash
             # str.format mid-job; a missing one would silently drop the designer's
             # input (the text, the chosen number, the colour changes).
-            print(f"[prompts] {key} v{p['version'].get('number')} has placeholders {sorted(have)}, "
-                  f"but {name} fills {sorted(need)}; using the built-in text")
+            warn = (key, p["version"].get("id"))
+            if warn not in self._warned:
+                self._warned.add(warn)
+                print(f"[prompts] {key} v{p['version'].get('number')} has placeholders {sorted(have)}, "
+                      f"but {name} fills {sorted(need)}; using the built-in text")
             meta["rejected"] = {"unknown": sorted(have - need), "missing": sorted(need - have)}
             self._remember(name, builtin)
             return builtin, meta
@@ -296,6 +341,56 @@ class PromptRegistry:
             templates[name], meta[name] = self.template(name)
         return {"templates": templates, "meta": meta}
 
+    def dynamic_operations(self) -> list[dict[str, Any]]:
+        """Custom operations published in Prompt Management, in the Custom screen's shape."""
+        ops = []
+        prompts = self.refresh().get("prompts") or {}
+        for key in sorted(prompts):
+            op_key = dynamic_op_key(key)
+            if not op_key:
+                continue
+            text, meta = self.template(dynamic_name(op_key))
+            if meta["source"] != "managed":
+                continue
+            p = prompts[key]
+            ops.append({"key": op_key, "label": (p.get("name") or op_key)[:80],
+                        "desc": (p.get("description") or "From Prompt Management")[:200],
+                        "template": text, "prompt_key": key, "from_prompt_management": True})
+        return ops
+
+    def manifest(self) -> list[dict[str, Any]]:
+        """What this app reads and runs, for Decoinks to check publishes against."""
+        rows = []
+        names = list(PROMPT_KEYS) + [dynamic_name(o["key"]) for o in self.dynamic_operations()]
+        for name in names:
+            _, meta = self.template(name)
+            rows.append({
+                "prompt_key": key_for(name), "template_name": name,
+                "placeholders": [] if is_dynamic(name) else sorted(template_fields(_builtin(name))),
+                "running": {k: meta.get(k) for k in ("version", "version_id", "source", "rejected") if meta.get(k) is not None},
+            })
+        rows.append({"prompt_key": DYNAMIC_PREFIX + "*", "template_name": "PM_OP:*",
+                     "label": "New Custom operation", "placeholders": [], "running": {}})
+        return rows
+
+    def publish_manifest(self, force: bool = False) -> None:
+        """Tell Decoinks what is running. Only when it changed, or every 10 minutes."""
+        if not _secret():
+            return
+        rows = self.manifest()
+        digest = json.dumps(rows, sort_keys=True)
+        if not force and digest == self._manifest_sent and time.time() - self._manifest_at < 600:
+            return
+        try:
+            r = requests.put(f"{BACKEND}/api/ai/apps/{SOURCE_APP}/prompts", json={"prompts": rows},
+                             headers={"x-decoinks-sso-secret": _secret()}, timeout=10)
+            if r.status_code >= 400:
+                print(f"[prompts] Decoinks refused the manifest ({r.status_code}): {r.text[:300]}")
+                return
+            self._manifest_sent, self._manifest_at = digest, time.time()
+        except Exception as exc:
+            print(f"[prompts] could not send the manifest: {exc}")
+
     def status(self) -> dict[str, Any]:
         data = self._data or {}
         return {
@@ -317,6 +412,8 @@ def prompt_names_for_job(workflow: str, custom_operations: list[str] | None = No
     if workflow == "custom":
         names: list[str] = []
         for op in custom_operations or []:
+            if op.startswith(DYNAMIC_OP_PREFIX):
+                names.append(dynamic_name(op))
             names.extend(CUSTOM_OPERATION_PROMPTS.get(op, []))
         return names
     if not workflow and options:

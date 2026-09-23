@@ -103,5 +103,32 @@ check("build_prompt uses the managed base and option blocks",
 check("parameterised options still need {value}",
       all("{value}" in JOB_OPTIONS[k] and template_fields(JOB_OPTIONS[k]) == {"value"} for k in PARAMETERISED_OPTIONS))
 
+# 7. A prompt published in the Custom Operations module becomes an operation, no code change.
+from src.prompt_registry import dynamic_name, key_for  # noqa: E402
+reg4 = fake_registry({**same,
+                      "AIS.CUSTOM_OPERATIONS.SEPIA_TONE": "Make it sepia. Keep {braces} literal.",
+                      "AIS.CUSTOM_OPERATIONS.BAD_ONE": "Uses {{colour}}, which nothing fills",
+                      "AIS.CUSTOM_OPERATIONS.bad-key": "Unsafe key"})
+reg4._data["prompts"]["AIS.CUSTOM_OPERATIONS.SEPIA_TONE"]["name"] = "Sepia Tone"
+ops = reg4.dynamic_operations()
+check("a published Custom Operations prompt is listed as an operation",
+      [o["key"] for o in ops] == ["pm_sepia_tone"] and ops[0]["label"] == "Sepia Tone", ops)
+check("its text is sent exactly as written", ops[0]["template"] == "Make it sepia. Keep {braces} literal.")
+check("one with {{placeholders}} is not offered", all(o["key"] != "pm_bad_one" for o in ops))
+check("job names map back to the key", key_for(dynamic_name("pm_sepia_tone")) == "AIS.CUSTOM_OPERATIONS.SEPIA_TONE")
+check("custom job with a Prompt Management op",
+      prompt_names_for_job("custom", ["pm_sepia_tone", "aspect_ratio"]) ==
+      ["PM_OP:AIS.CUSTOM_OPERATIONS.SEPIA_TONE", "CUSTOM_ASPECT_ADVICE", "CUSTOM_ASPECT_BASELINE", "CUSTOM_ASPECT_REGENERATE"])
+check("unedited op text is not counted as an edit",
+      reg4.is_unedited(dynamic_name("pm_sepia_tone"), "Make it sepia. Keep {braces} literal."))
+
+# 8. The manifest Decoinks checks publishes against.
+man = {r["prompt_key"]: r for r in reg4.manifest()}
+check("manifest lists every mapped key plus live ops and the pattern",
+      set(PROMPT_KEYS.values()) | {"AIS.CUSTOM_OPERATIONS.SEPIA_TONE", "AIS.CUSTOM_OPERATIONS.*"} == set(man), sorted(man))
+check("manifest placeholders are what the code fills",
+      man["AIS.EDIT.RECOLOUR"]["placeholders"] == ["value"] and man["AIS.CUSTOM_OPERATIONS.SEPIA_TONE"]["placeholders"] == [])
+check("manifest says what is running", man["AIS.TEXT.COLLAGE"]["running"]["source"] == "managed")
+
 print("\nRESULT:", "ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}")
 sys.exit(1 if FAILS else 0)
