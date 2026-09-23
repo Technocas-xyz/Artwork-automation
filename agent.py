@@ -1216,8 +1216,14 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     job["vault_folder"] = str(run_dir)
 
-    # Sort operations into fixed execution order
-    ordered_ops = [op for op in CUSTOM_OPERATIONS_ORDER if op in operations]
+    # Sort operations into fixed execution order. Operations published in Prompt
+    # Management (pm_*) are single-step and run in the order ticked, before
+    # Aspect Ratio, which always runs last.
+    ordered_ops = [op for op in CUSTOM_OPERATIONS_ORDER if op in operations and op != "aspect_ratio"]
+    ordered_ops += [op for op in operations if op.startswith("pm_") and op not in ordered_ops]
+    if "aspect_ratio" in operations:
+        ordered_ops.append("aspect_ratio")
+    op_labels = dict(CUSTOM_OPERATIONS_LABELS, **(job.get("custom_operation_labels") or {}))
     total = len(ordered_ops)
     job["stage_label"] = f"Running {total} operation(s)"
 
@@ -1247,7 +1253,7 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
 
     for i, op in enumerate(ordered_ops, 1):
         job["stage"] = i
-        label = CUSTOM_OPERATIONS_LABELS.get(op, op)
+        label = op_labels.get(op, op)
         job["stage_label"] = f"Step {i} of {total} \u2014 {label}"
         print(f"[custom] Step {i}/{total}: {op} | input: {current_image_path}")
 

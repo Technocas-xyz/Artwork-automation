@@ -46,7 +46,8 @@ from src import printshop
 from src.prompt_registry import (
     registry as prompt_registry, prompt_names_for_job, report_runs,
     PROMPT_KEYS, SOURCE_APP as PROMPT_SOURCE_APP, MODEL as PROMPT_MODEL,
-    is_composed as is_prompt_block,
+    is_composed as is_prompt_block, key_for as prompt_key_for, is_dynamic as is_dynamic_prompt,
+    dynamic_name, DYNAMIC_OP_PREFIX,
 )
 from src.nc_live import watcher as nc_watcher
 
@@ -788,23 +789,38 @@ def get_templates():
 
 @app.get("/api/custom-operations")
 def get_custom_operations():
-    """The custom operations list, each carrying the live text of its prompts."""
+    """The custom operations list, each carrying the live text of its prompts.
+
+    Operations published in Prompt Management's Custom Operations module are
+    added before Aspect Ratio (which always runs last), with no code change."""
     ops = []
     for op in CUSTOM_OPERATIONS:
         op = dict(op)
         for field, name in _CUSTOM_OP_TEMPLATES.get(op["key"], {}).items():
             op[field] = _live_template(name)
         ops.append(op)
-    return ops
+    at = next((i for i, o in enumerate(ops) if o["key"] == "aspect_ratio"), len(ops))
+    return ops[:at] + prompt_registry.dynamic_operations() + ops[at:]
+
+
+def _version_at_least(version: str | None, minimum: str) -> bool:
+    from src.self_update import is_newer
+    v = (version or "").strip()
+    return bool(v) and v != "unknown" and not is_newer(minimum, v)
+
+
+# Agents older than this skip operations they do not know by name.
+MIN_AGENT_FOR_PM_OPERATIONS = "1.7.0"
 
 
 @app.get("/api/prompt-status")
 def prompt_status():
     """Is Prompt Management reachable, and which live versions is this server using?"""
     status = prompt_registry.status()
+    names = list(PROMPT_KEYS) + [dynamic_name(o["key"]) for o in prompt_registry.dynamic_operations()]
     status["prompts"] = {
         name: {k: meta.get(k) for k in ("key", "version", "source", "rejected") if meta.get(k) is not None}
-        for name, meta in prompt_registry.snapshot(list(PROMPT_KEYS))["meta"].items()
+        for name, meta in prompt_registry.snapshot(names)["meta"].items()
     }
     return status
 
@@ -895,6 +911,15 @@ def create_job(req: GenerateRequest, request: Request):
             raise HTTPException(status_code=400, detail="Upload an artwork file.")
         if not req.custom_operations:
             raise HTTPException(status_code=400, detail="Select at least one operation.")
+        dyn_ops = {o["key"]: o for o in prompt_registry.dynamic_operations()}
+        pm_ops = [op for op in req.custom_operations if op.startswith(DYNAMIC_OP_PREFIX)]
+        gone = [op for op in pm_ops if op not in dyn_ops]
+        if gone:
+            raise HTTPException(status_code=409, detail="An operation you ticked is no longer published in Prompt Management. Reload the page.")
+        if pm_ops and not any(_version_at_least(a.get("code_version"), MIN_AGENT_FOR_PM_OPERATIONS)
+                              for a in _online_agents_for_user(_created_by)):
+            raise HTTPException(status_code=409, detail="Your Artwork Agent is updating to run Prompt Management operations. Try again in a minute.")
+        custom_op_labels = {op: dyn_ops[op]["label"] for op in pm_ops}
     else:
         if not req.files:
             raise HTTPException(status_code=400, detail="Select at least one image.")
@@ -941,6 +966,9 @@ def create_job(req: GenerateRequest, request: Request):
     for ui_key, name in _CUSTOM_PROMPT_KEYS.items():
         if name in live:
             custom_prompts[ui_key] = _pick(name, (custom_prompts.get(ui_key) or "").strip())
+    for op in req.custom_operations if req.workflow == "custom" else []:
+        if op.startswith(DYNAMIC_OP_PREFIX) and live.get(dynamic_name(op)):
+            custom_prompts[op] = _pick(dynamic_name(op), (custom_prompts.get(op) or "").strip())
 
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
@@ -987,6 +1015,7 @@ def create_job(req: GenerateRequest, request: Request):
         "selected_crops": [], "final_names": [], "chosen_numbers": [],
         "artwork_files": req.artwork_files, "artwork_errors": [],
         "custom_operations": req.custom_operations, "custom_prompts": custom_prompts,
+        "custom_operation_labels": custom_op_labels if req.workflow == "custom" else {},
         "aspect_dpi": req.aspect_dpi, "aspect_info": None, "aspect_recommendations": "",
         "aspect_target": None, "aspect_method": "pad", "aspect_similarity": None,
         "aspect_original_file": "", "aspect_original_features": None,
@@ -2259,6 +2288,8 @@ def _used_template(job: dict, name: str) -> str:
         "TEXT_IMAGE_STYLE_COLLAGE": job.get("template_turn1"),
     }
     by_field.update({name_: custom.get(ui_key) for ui_key, name_ in _CUSTOM_PROMPT_KEYS.items()})
+    by_field.update({dynamic_name(op): custom.get(op) for op in (job.get("custom_operations") or [])
+                     if op.startswith(DYNAMIC_OP_PREFIX)})
     return by_field.get(name) or (job.get("managed_prompts") or {}).get(name) or ""
 
 
@@ -2289,7 +2320,8 @@ def _report_prompt_runs(job: dict) -> None:
             candidates = [t for t in (_used_template(job, name), (job.get("managed_prompts") or {}).get(name)) if t]
             matched: list[str] = []
             for tpl in candidates:
-                pat = _template_pattern(tpl)
+                # A Prompt Management operation is sent exactly as written, braces and all.
+                pat = re.compile(re.escape(tpl)) if is_dynamic_prompt(name) else _template_pattern(tpl)
                 # A base/option block is one part of the composed prompt, so look inside it.
                 hit = (lambda p: pat.search(p)) if is_prompt_block(name) else (lambda p: pat.fullmatch(p))
                 matched = [p for p in sent if pat and hit(p)]
@@ -2299,7 +2331,7 @@ def _report_prompt_runs(job: dict) -> None:
                 continue  # this prompt never reached ChatGPT in this job
             meta = meta_all.get(name) or {}
             runs.append({
-                "prompt_key": PROMPT_KEYS[name],
+                "prompt_key": prompt_key_for(name),
                 "prompt_version_id": meta.get("version_id"),
                 "source_app": PROMPT_SOURCE_APP,
                 "external_ref": job_id,
@@ -2328,8 +2360,22 @@ def _report_prompt_runs(job: dict) -> None:
         print(f"[prompts] could not build the run log for job {job_id}: {exc}")
 
 
-# Warm the prompt cache so the first page load already shows the live text.
-threading.Thread(target=prompt_registry.refresh, name="prompt-warmup", daemon=True).start()
+def _prompt_sync_loop() -> None:
+    """Keep the live prompts warm and tell Decoinks what this server is running.
+
+    Runs once a minute whether or not anyone uses the app, so a version published
+    in Prompt Management shows as running (or refused) there without waiting for
+    a job, and new Custom operations appear on the next page load."""
+    while True:
+        try:
+            prompt_registry.refresh()
+            prompt_registry.publish_manifest()
+        except Exception as exc:
+            print(f"[prompts] sync loop: {exc}")
+        time.sleep(60)
+
+
+threading.Thread(target=_prompt_sync_loop, name="prompt-sync", daemon=True).start()
 
 
 @app.post("/api/agent/register")
