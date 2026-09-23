@@ -17,4 +17,7 @@ services:
       # Agent bearer tokens and the packaged agent download must outlive a
       # rebuild, or every designer's agent loses auth and the download 404s.
       - ./agent_tokens.json:/app/agent_tokens.json
+      # Same reasoning for the user store: a rebuild would otherwise wipe every
+      # designer account and re-seed only the .env admin.
+      - ./users.json:/app/users.json
       - ./downloads:/app/downloads
