@@ -70,6 +70,17 @@ PROMPT_KEYS: dict[str, str] = {
     "CUSTOM_ASPECT_ADVICE": "AIS.RATIO.PLAN",
     "CUSTOM_ASPECT_BASELINE": "AIS.RATIO.BASELINE",
     "CUSTOM_ASPECT_REGENERATE": "AIS.RATIO.REGENERATE",
+    # Artwork Identification: list objects (or colour groups), then regenerate
+    # with per-row edits.
+    "IDENTIFY_OBJECTS": "AIS.IDENTIFY.OBJECTS",
+    "IDENTIFY_COLOR_GROUPS": "AIS.IDENTIFY.COLOR_GROUPS",
+    "IDENTIFY_REGENERATE": "AIS.IDENTIFY.REGENERATE",
+    # Print Ready QA (UC-8): measurements are local; this is the one ChatGPT turn.
+    "PRINTREADY_REVIEW": "AIS.PRINTREADY.REVIEW",
+    # Colorways (UC-6): recommend garment colours, mockup per colour, adapt per colour.
+    "COLORWAY_SUGGEST": "AIS.COLORWAY.SUGGEST",
+    "COLORWAY_MOCKUP": "AIS.COLORWAY.MOCKUP",
+    "COLORWAY_ADAPT": "AIS.COLORWAY.ADAPT",
     # In config/workflows.py and kept in the library, but no screen sends them yet.
     "EXTRACT_BOXES": "AIS.EXTRACT.BOXES",
     "EXTRACT_ARTWORKS": "AIS.EXTRACT.SEPARATE",
@@ -126,6 +137,9 @@ WORKFLOW_PROMPTS: dict[str, list[str]] = {
              "TEXT_IMAGE_ELEMENT_COLLAGE", "TEXT_IMAGE_STYLE_COLLAGE"],
     "mockup": ["EXTRACT_CONTACT_SHEET", "EXTRACT_SINGLE"],
     "artwork": ["ARTWORK_REGENERATE"],
+    "identify": ["IDENTIFY_OBJECTS", "IDENTIFY_COLOR_GROUPS", "IDENTIFY_REGENERATE"],
+    "printready": ["PRINTREADY_REVIEW"],
+    "colorway": ["COLORWAY_SUGGEST", "COLORWAY_MOCKUP", "COLORWAY_ADAPT"],
 }
 
 # The prompts each Text input mode actually runs.

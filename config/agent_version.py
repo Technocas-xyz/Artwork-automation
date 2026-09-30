@@ -10,5 +10,6 @@ falling back to a plain tuple-of-ints comparison.
 """
 from __future__ import annotations
 
-AGENT_CODE_VERSION = "1.7.0"
+AGENT_CODE_VERSION = "1.11.1"
+
 

@@ -1,8 +1,8 @@
 {
-  "exported_at": "2026-09-15T12:28:34.877109+00:00",
+  "exported_at": "2026-09-29T12:49:00.965746+00:00",
   "project": "artwork-automation",
   "note": "Each row is one prompt at version 1. Only the active version of a prompt should be fetched at runtime. Rows with active=false are retired - kept for history, not for production.",
-  "count": 23,
+  "count": 32,
   "prompts": [
     {
       "key": "artwork_regenerate",
@@ -12,6 +12,48 @@
       "purpose": "Clean up a supplied artwork for DTF printing",
       "template": "Regenerate this artwork as a clean final version suitable for DTF garment printing.\n\nRequirements:\n- Keep the design identical - do not change the layout, letterforms, colours, or illustration style\n- Preserve all text exactly as it appears, including accented characters and any numbers such as verse or scripture references\n- Clean sharp edges, no gradients, no thin fragile strokes\n- Transparent background, PNG\n- The design only, centred with even margins",
       "placeholders": [],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "colorway_suggest",
+      "constant": "COLORWAY_SUGGEST",
+      "workflow": "colorway",
+      "step": 1,
+      "purpose": "Recommend garment colours for the artwork, given its dominant colours",
+      "template": "You are advising on garment colours for a DTF print.\n\nThe artwork's dominant colours are:\n\n{colours}\n\nRecommend the garment colours this artwork will look best on.\n\nFor each recommendation give the garment colour, and one sentence on why it\n\nworks - contrast against the artwork, how the design will read on that fabric,\n\nand anything that will disappear or clash.\n\nAlso name any garment colour this artwork should NOT go on, and why.\n\nCover both light and dark garments. Give 4 to 6 recommendations.\n\nPlain text, no markdown, no preamble.",
+      "placeholders": [
+        "colours"
+      ],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "colorway_mockup",
+      "constant": "COLORWAY_MOCKUP",
+      "workflow": "colorway",
+      "step": 2,
+      "purpose": "Mock up the artwork on a chosen garment colour",
+      "template": "Show this artwork printed on a {garment_colour} t-shirt.\n\nRequirements:\n\n- A plain {garment_colour} t-shirt, front view, flat or on a plain background\n\n- The artwork printed on the chest at a realistic size and position\n\n- Reproduce the artwork as closely as you can - same colours, same layout,\n\n  same detail\n\n- No model, no branding, no extra text\n\n- Even lighting, no heavy shadows over the print",
+      "placeholders": [
+        "garment_colour"
+      ],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "colorway_adapt",
+      "constant": "COLORWAY_ADAPT",
+      "workflow": "colorway",
+      "step": 3,
+      "purpose": "Adapt the artwork to read well on a chosen garment colour",
+      "template": "Adapt this artwork so it prints well on a {garment_colour}\n\ngarment.\n\nRequirements:\n\n- Keep the design recognisably the same - same layout, letterforms,\n\n  illustration and composition\n\n- Adjust only what is needed to read on {garment_colour} fabric: outlines,\n\n  contrast, and any colour that would disappear against it\n\n- Do not add new elements or remove existing ones\n\n- Transparent background, PNG\n\n- The design only, centred with even margins\n\n- Clean sharp edges suitable for DTF garment printing",
+      "placeholders": [
+        "garment_colour"
+      ],
       "version": 1,
       "active": true,
       "source": "config/workflows.py"
@@ -170,6 +212,45 @@
       "source": "config/workflows.py"
     },
     {
+      "key": "identify_color_groups",
+      "constant": "IDENTIFY_COLOR_GROUPS",
+      "workflow": "identify",
+      "step": 1,
+      "purpose": "List distinct colour groups (colour mode; usually computed locally)",
+      "template": "Look at this artwork and list every distinct colour group in it.\n\nA colour group is all the areas sharing one colour, even when they belong to different elements. Include outlines, fills, text colours, background colours and shadow tones.\n\nUse short names that identify each group clearly, for example \"Red lettering\", \"Dark blue background\", \"Gold outlines\", \"Skin tones\".\n\nReply with ONLY a plain numbered list in this format:\n1. Colour group name\n2. Colour group name\n3. Colour group name\n\nNo explanation, no headings, no hex codes, no extra text.",
+      "placeholders": [],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "identify_objects",
+      "constant": "IDENTIFY_OBJECTS",
+      "workflow": "identify",
+      "step": 1,
+      "purpose": "List objects as JSON with grid cells (object mode)",
+      "template": "A labelled 10x10 grid has been drawn over this artwork to help you describe where things are. Columns are lettered A to J from left to right; rows are numbered 1 to 10 from top to bottom. So the top-left cell is A1 and the bottom-right cell is J10. The grid is only a reference overlay — ignore it as part of the artwork.\n\nList the main objects and elements in the artwork — the things a person would actually want to change. List whole, meaningful elements: each subject, object, piece of text, logo, and distinct background element. Do NOT break a single subject into its parts (a lion is one item called \"Lion\", never its mane, eyes, paws or tail separately). Aim for roughly 5 to 15 items.\n\nFor each object, give the grid cells it mainly sits in. Use only the cells that the object actually covers; if you are unsure, give your best estimate of the few cells at its centre rather than listing many.\n\nReply with ONLY a JSON array and nothing else — no prose, no explanation, no markdown code fences. Each element is an object with: \"id\" (1-based integer), \"name\" (short label), and \"cells\" (array of cell strings). Exactly this shape:\n\n[\n  {{\"id\": 1, \"name\": \"Lion\", \"cells\": [\"D4\", \"E5\"]}},\n  {{\"id\": 2, \"name\": \"Team name text\", \"cells\": [\"C8\", \"D8\", \"E8\"]}}\n]\n\nOutput the JSON array only.",
+      "placeholders": [],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "identify_regenerate",
+      "constant": "IDENTIFY_REGENERATE",
+      "workflow": "identify",
+      "step": 2,
+      "purpose": "Reproduce the artwork with only the operator's per-object changes",
+      "template": "Reproduce this artwork exactly as it is, with ONLY the following specific changes applied.\n\nThis is a reproduction task, not a new artwork. Keep everything that is not named in the change list below exactly as it appears in the original: the background, scenery, all other subjects, the composition, framing, colour palette, lighting, artistic style, and every element not named in a change. Preserve all text that is not being changed, including accented characters.\n\nDo not simplify the scene. Do not remove anything that was not asked to be removed. The result must be recognisably the same artwork, changed only in the ways listed.\n\nEach change below names the object by its number and name, so you know exactly which element it refers to. Apply the changes to those objects only:\n\n{changes}\n\nIf a change is impossible without altering other parts, make the smallest possible alteration and keep everything else.\n\nOutput requirements (do not let these change the content above):\n- {background}\n- Clean sharp edges suitable for DTF garment printing",
+      "placeholders": [
+        "background",
+        "changes"
+      ],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
       "key": "extract_artworks",
       "constant": "EXTRACT_ARTWORKS",
       "workflow": "mockup",
@@ -235,6 +316,20 @@
       "source": "config/workflows.py"
     },
     {
+      "key": "printready_review",
+      "constant": "PRINTREADY_REVIEW",
+      "workflow": "printready",
+      "step": 1,
+      "purpose": "Printer's assessment of a DTF artwork, given local measurements",
+      "template": "You are reviewing artwork for DTF garment printing.\n\nHere are the measurements taken from the file:\n\n{measurements}\n\nLook at the artwork alongside these numbers and give a printer's assessment.\n\nCover:\n\n- Whether this will print cleanly on a garment, and on which garment colours\n\n- Any element that is too fine, too thin or too small to survive the transfer\n\n- Whether the text will remain legible at the stated print size\n\n- Anything the measurements cannot see: awkward composition, elements that\n\n  will disappear against fabric, detail that will fill in\n\n- What specifically to fix, in order of importance\n\nBe concrete. Name the element you mean. Do not repeat the numbers back - I\n\nhave them. If the artwork is print ready, say so plainly.\n\nPlain text, no markdown, no preamble.",
+      "placeholders": [
+        "measurements"
+      ],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
       "key": "text_turn_0",
       "constant": "TEXT_TURN_0",
       "workflow": "text",
@@ -242,6 +337,34 @@
       "purpose": "Read the wording out of an uploaded image",
       "template": "Look at this image and extract the exact text content from it.\n\nReply with ONLY the text, nothing else. No explanation, no quotes, no formatting. If there are multiple lines, preserve the line breaks.",
       "placeholders": [],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "text_image_element_collage",
+      "constant": "TEXT_IMAGE_ELEMENT_COLLAGE",
+      "workflow": "text",
+      "step": 1,
+      "purpose": "Wording + reference image as an element, 8 variations",
+      "template": "Create a single collage image containing 8 different design variations that combine the uploaded image with the wording \"{text}\".\n\nRequirements:\n- The uploaded image must appear as part of each design. Reproduce it as closely as you can - same subject, same character, same detail\n- Vary how the image and wording are arranged: above, below, behind, wrapped, integrated into the lettering\n- Vary the typography across the 8 so the client has a real choice\n- Arrange them in a 4 wide x 2 tall grid\n- Number each variation 1 to 8, placed directly below it, outside the design\n- Plain white background for the whole collage\n- Designs must be suitable for DTF garment printing: clean edges, no thin fragile strokes, no gradients",
+      "placeholders": [
+        "text"
+      ],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "text_image_style_collage",
+      "constant": "TEXT_IMAGE_STYLE_COLLAGE",
+      "workflow": "text",
+      "step": 1,
+      "purpose": "Wording styled after a reference image, 8 variations",
+      "template": "Create a single collage image containing 8 different text design variations of the wording \"{text}\", styled after the uploaded image.\n\nRequirements:\n- Take the visual style from the uploaded image: its colour character, texture, era, mood and lettering treatment\n- Do NOT include the uploaded image itself, or any part of its subject matter, in the designs. Only the wording appears\n- Vary the typography across the 8 within that style\n- Arrange them in a 4 wide x 2 tall grid\n- Number each variation 1 to 8, placed directly below it, outside the design\n- Plain white background for the whole collage\n- Designs must be suitable for DTF garment printing: clean edges, no thin fragile strokes, no gradients",
+      "placeholders": [
+        "text"
+      ],
       "version": 1,
       "active": true,
       "source": "config/workflows.py"

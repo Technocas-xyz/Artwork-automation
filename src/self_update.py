@@ -114,6 +114,26 @@ def code_dir() -> Path:
     return app_dir()
 
 
+def updates_allowed() -> tuple[bool, str]:
+    """Whether self-update may touch the live code, with a reason when it may not.
+
+    Self-update swaps whole top-level entries (agent.py, agent_gui.py, src/,
+    config/) under code_dir(). In a PACKAGED install code_dir() is a dedicated
+    <app>/code folder that holds nothing but the updatable bundle, so swapping it
+    is safe. In a SOURCE checkout code_dir() IS the project root — the developer's
+    working tree, git repo and all — and swapping src/ and config/ there silently
+    destroys uncommitted work (this is exactly what wiped generator.py and
+    workflows.py: an older staged bundle replaced the whole src/ and config/
+    directories in the checkout).
+
+    So updates are allowed ONLY when frozen. When running from source we refuse
+    and say why; the caller logs it and leaves the working tree untouched."""
+    if not is_frozen():
+        return False, ("running from source (code_dir resolves to the project "
+                       "checkout); self-update only applies to a packaged install")
+    return True, ""
+
+
 def profiles_root() -> Path:
     """Fixed, writable root for browser profiles, as an ABSOLUTE path derived
     from the app directory — never relative to the current working directory.
@@ -341,6 +361,15 @@ def apply_staged(staging: Path | None = None) -> None:
     Only the managed top-level entries are touched; profiles/, .env, etc. are
     left alone. The version file is written LAST, only after a clean swap, so a
     present code/code_version.txt reliably means "fully applied"."""
+    # HARD BACKSTOP: never swap code over a source checkout. code_dir() there is
+    # the project root, so applying would rename src/ and config/ out of the
+    # working tree (destroying uncommitted edits). Refuse before touching a
+    # single file, whatever left a staging dir behind.
+    ok, why = updates_allowed()
+    if not ok:
+        log(f"apply: REFUSED — {why}; leaving code and staging untouched")
+        raise RuntimeError(f"self-update refused: {why}")
+
     staging = staging or (app_dir() / _STAGING_NAME)
     if not staging.is_dir():
         raise RuntimeError(f"no staged update to apply at {staging}")
@@ -472,6 +501,16 @@ def check(server_url: str, token: str) -> UpdateStatus:
 def check_and_stage(server_url: str, token: str) -> UpdateStatus:
     """Check and, if newer, download+stage the bundle ready to apply. Never
     raises; a failure leaves the current code untouched and records the error."""
+    # In a source checkout there is nothing to safely update — refuse to even
+    # download a bundle, so a dev machine never accumulates a code_staging/ that
+    # a later apply could try to swap over the working tree.
+    ok, why = updates_allowed()
+    if not ok:
+        st = check(server_url, token)
+        st.staged = False
+        st.reason = "not_supported"
+        log(f"check_and_stage: skipped — {why}")
+        return st
     st = check(server_url, token)
     if st.error or not st.update_available:
         return st
@@ -494,6 +533,14 @@ def apply_if_staged() -> UpdateStatus:
     """Apply a previously staged update. Never raises."""
     st = UpdateStatus()
     st.local_version = read_local_version()
+    # Never apply over a source checkout (would clobber the working tree). Log
+    # once if a stale staging dir is present so it is visible, then no-op.
+    ok, why = updates_allowed()
+    if not ok:
+        if (app_dir() / _STAGING_NAME).is_dir():
+            log(f"apply_if_staged: staged update present but REFUSED — {why}; "
+                f"leaving the checkout untouched (delete {_STAGING_NAME}/ to silence)")
+        return st
     staging = app_dir() / _STAGING_NAME
     if not staging.is_dir():
         return st  # nothing staged; no-op

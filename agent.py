@@ -16,7 +16,9 @@ Setup: see SETUP.md. Needs a .env beside this file with:
 from __future__ import annotations
 
 import io
+import json
 import os
+import re
 import sys
 import time
 import shutil
@@ -38,18 +40,27 @@ from config.workflows import (
     CUSTOM_RECONSTRUCT, CUSTOM_REMOVE_BACKGROUND, CUSTOM_HALO_REMOVAL,
     CUSTOM_BLACK_OUT, CUSTOM_HALF_TONE, CUSTOM_DETECT_OBJECTS, CUSTOM_CHANGE_COLOR,
     CUSTOM_ASPECT_ADVICE, CUSTOM_ASPECT_BASELINE, CUSTOM_ASPECT_REGENERATE,
+    IDENTIFY_OBJECTS, IDENTIFY_COLOR_GROUPS, IDENTIFY_REGENERATE,
+    PRINTREADY_REVIEW,
+    COLORWAY_SUGGEST, COLORWAY_MOCKUP, COLORWAY_ADAPT,
     normalise_ratio, CUSTOM_OPERATIONS_ORDER, CUSTOM_OPERATIONS_LABELS,
 )
+from config.selectors import PROJECT_URL_DEFAULT
 from src.aspect import image_info, fit_to_ratio
 from src.browser import launch_context, is_logged_in
 from src.generator import (
     generate, open_chat, rename_chat, send_turn, send_text_turn,
     get_last_text_reply, get_boxes, extract_artwork_images,
+    check_project_urls, dump_page_controls,
 )
 from src.postprocess import (
     is_opaque_white_bg, remove_white_background,
     black_out, half_tone,
 )
+# Local annotation for the Artwork Identification workflow. Pillow-only helpers
+# ONLY — colour_groups() needs cv2 (absent in the packaged agent build) and runs
+# server-side, so it is deliberately NOT imported here.
+from src.annotate import grid_overlay, cells_to_bbox, draw_badges, has_transparency
 # similarity / extract_features live in src.compare (which needs cv2). The
 # packaged agent build EXCLUDES cv2 because the aspect-ratio *comparison* is a
 # server-side concern; the agent only produces the images. Import them
@@ -227,6 +238,41 @@ _logging.basicConfig(level=_logging.INFO, format="%(message)s", stream=sys.stdou
 for _noisy in ("httpx", "httpcore", "urllib3", "PIL", "asyncio"):
     _logging.getLogger(_noisy).setLevel(_logging.WARNING)
 
+# Route generator/selector diagnostics to a persistent file beside the exe so
+# reply-read failures can be read after the fact without scrolling a terminal.
+# reply_diag.log holds per-turn read attempts, strip notices, and the full
+# diagnostic dump. agent_errors.log is already written by agent_diagnostics;
+# this adds the SAME lines from src.generator to a second file so both are
+# in the same directory and a single "logs/" folder holds everything.
+try:
+    from logging.handlers import RotatingFileHandler as _RFH
+    from pathlib import Path as _Path
+
+    def _add_file_handler(logger_name: str, filename: str) -> None:
+        _log_dir = _Path(__file__).resolve().parent / "logs"
+        try:
+            _log_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return
+        _lg = _logging.getLogger(logger_name)
+        _lg.setLevel(_logging.INFO)
+        # Avoid adding duplicate handlers if agent restarts in the same process.
+        if any(isinstance(h, _RFH) and filename in getattr(h, "baseFilename", "")
+               for h in _lg.handlers):
+            return
+        try:
+            _h = _RFH(str(_log_dir / filename), maxBytes=2 * 1024 * 1024,
+                      backupCount=3, encoding="utf-8")
+            _h.setFormatter(_logging.Formatter("%(asctime)s %(message)s",
+                                               datefmt="%H:%M:%S"))
+            _lg.addHandler(_h)
+        except Exception:
+            pass
+
+    _add_file_handler("src.generator", "reply_diag.log")
+except Exception:
+    pass
+
 
 def _drain_log() -> list[str]:
     """Return and clear the buffered console lines pending upload."""
@@ -300,6 +346,25 @@ _AGENT_OWNED_FIELDS = (
     "aspect_baseline_file", "aspect_baseline_features",
     "aspect_similarity", "vault_folder", "crop_names", "crop_count",
     "crop_warnings", "extracted_text",
+    # Artwork Identification. Object mode: structured objects with a per-object
+    # bbox hint (or None -> no pin), the grid overlay + badged annotated images,
+    # whether the JSON parse succeeded, and whether the art has transparency
+    # (drives the regenerate background clause). Colour mode: the local k-means
+    # groups (computed server-side). identify_objects/_raw are kept as the
+    # plain-text fallback when JSON parsing fails.
+    "identify_objects", "identify_objects_raw",
+    "identify_objects_struct", "identify_annotated_file", "identify_grid_file",
+    "identify_parse_ok", "identify_has_transparency", "identify_colour_groups",
+    "identify_original_file", "identify_final_file", "identify_similarity",
+    # Print Ready QA (UC-8): the ChatGPT written judgement + the file it was run
+    # on. printready_report/_measurements are set by the SERVER at job creation,
+    # so they are NOT agent-owned and must not be echoed back here.
+    "printready_assessment", "printready_original_file",
+    # Colorways (UC-6): recommendations (raw + parsed + avoid list), the per-colour
+    # mockups (+ local previews) and the per-colour adaptations. colorway_colours
+    # is set by the SERVER at job creation, so it is NOT echoed back here.
+    "colorway_recommend_raw", "colorway_recommend_parsed", "colorway_avoid",
+    "colorway_mockups", "colorway_adapted", "colorway_original_file",
 )
 
 
@@ -362,6 +427,8 @@ def _sync_loop() -> None:
 _ANSWER_FIELDS = (
     "confirmed_text", "_retry_extract", "choices", "chosen_numbers", "selected_crops",
     "object_color_choices", "aspect_target", "aspect_method",
+    "object_instructions",
+    "colorway_selected", "colorway_adapt_selected",
     "template_turn2", "template_turn3",
     "_regenerate", "_regen_template",
     "_reextract", "_reextract_mode", "_reextract_cols",
@@ -375,6 +442,19 @@ _PAUSE_FIELDS = (
     "aspect_baseline_file", "aspect_baseline_features",
     "stage_images", "images", "crop_names", "crop_count", "crop_warnings",
     "prompts", "template_turn2", "template_turn3",
+    # Artwork Identification pause: the structured objects (with bbox hints), the
+    # badged annotated image + grid, the colour groups (colour mode), plus the
+    # plain-text fallback list/raw reply and the original file, and whether the
+    # art is transparent (so the UI can preview the right background).
+    "identify_objects", "identify_objects_raw",
+    "identify_objects_struct", "identify_annotated_file", "identify_grid_file",
+    "identify_parse_ok", "identify_has_transparency", "identify_colour_groups",
+    "identify_original_file",
+    # Colorways pause metadata the operator UI needs: the extracted colours, the
+    # recommendations (raw + parsed + avoid), and (at pause 2) the mockups.
+    "colorway_colours", "colorway_has_transparency", "colorway_original_file",
+    "colorway_recommend_raw", "colorway_recommend_parsed", "colorway_avoid",
+    "colorway_mockups",
 )
 
 
@@ -744,7 +824,7 @@ def _run_text_replace(page: Any, job: dict[str, Any], run_dir, run_number: int) 
         job.setdefault("prompts", []).append(prompt1)
         _track_start(job)
         images1 = send_turn(page, prompt=prompt1, image_paths=[design_path],
-                            run_id=f"{job_id}_replace_collage_{attempt}")
+                            run_id=f"{job_id}_replace_collage_{attempt}", require_images=True)
         _track_end(job)
         _rename_chat_once(page, job)
 
@@ -896,7 +976,7 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
         # Image modes attach the client reference on turn 1 only; every other
         # mode (and every later turn) is a text-only follow-up in the same chat.
         turn1_images = [str(INPUT_DIR / reference_image)] if reference_image else None
-        images1 = send_turn(page, prompt=prompt1, image_paths=turn1_images, run_id=f"{job_id}_t1_{attempt}")
+        images1 = send_turn(page, prompt=prompt1, image_paths=turn1_images, run_id=f"{job_id}_t1_{attempt}", require_images=True)
         _track_end(job)
         _rename_chat_once(page, job)
 
@@ -943,7 +1023,7 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
         prompt2 = tpl_turn2.format(n=style_choice)
         job.setdefault("prompts", []).append(prompt2)
         _track_start(job)
-        images2 = send_turn(page, prompt=prompt2, image_paths=None, run_id=f"{job_id}_t2_{attempt}")
+        images2 = send_turn(page, prompt=prompt2, image_paths=None, run_id=f"{job_id}_t2_{attempt}", require_images=True)
         _track_end(job)
 
         if images2:
@@ -1662,7 +1742,755 @@ def _all_recorded_names(job: dict) -> set[str]:
             names.add(step["file"])
     if job.get("aspect_baseline_file"):
         names.add(job["aspect_baseline_file"])
+    if job.get("identify_final_file"):
+        names.add(job["identify_final_file"])
+    if job.get("identify_original_file"):
+        names.add(job["identify_original_file"])
+    if job.get("identify_annotated_file"):
+        names.add(job["identify_annotated_file"])
+    if job.get("identify_grid_file"):
+        names.add(job["identify_grid_file"])
     return names
+
+
+# A list line, tolerant of the shapes ChatGPT actually returns:
+#   "1. Name"  "2) Name"  "3 - Name"  "- Name"  "* Name"  "• Name"
+# i.e. an optional numbered OR bulleted marker, then the name. The name is
+# captured and markdown/quotes are stripped afterwards.
+_LIST_LINE = re.compile(
+    r"""^\s*
+        (?:                     # a leading list marker, either:
+            \d+\s*[\.\)\-:]     #   a number followed by . ) - or :
+          | [-*\u2022\u2013]    #   or a bullet: - * • –
+        )
+        \s*(.+?)\s*$            # the item text
+    """,
+    re.VERBOSE,
+)
+
+
+def _clean_list_item(name: str) -> str:
+    """Strip markdown emphasis, code ticks, wrapping quotes and a trailing
+    colon/description separator from a parsed list item.
+
+    ChatGPT decorates items in every combination — **bold**, `code`, "quoted",
+    'Name — description'. We keep the readable name and drop the chrome, but
+    KEEP inner quotes when they are part of the name (e.g. the design text
+    "PRINT ON DEMAND"), only removing quotes that wrap the whole item."""
+    s = (name or "").strip()
+    # Drop surrounding markdown bold/italic markers repeatedly (**, __, *, _).
+    prev = None
+    while prev != s:
+        prev = s
+        for mark in ("**", "__", "*", "_", "`"):
+            if len(s) > 2 * len(mark) and s.startswith(mark) and s.endswith(mark):
+                s = s[len(mark):-len(mark)].strip()
+    # Remove a quote pair only if it wraps the ENTIRE item (so inner quotes,
+    # like the design's wording, survive).
+    for q in ('"', "'", "\u201c\u201d", "\u2018\u2019"):
+        open_q, close_q = (q[0], q[-1])
+        if len(s) >= 2 and s.startswith(open_q) and s.endswith(close_q) and s.count(open_q) == 1:
+            s = s[1:-1].strip()
+    return s
+
+
+def _parse_numbered_list(text: str) -> list[str]:
+    """Parse a numbered or bulleted list into item names, tolerating markdown.
+
+    Returns [] if no list lines are found (the caller then keeps the raw reply
+    so the operator still sees what ChatGPT said)."""
+    out: list[str] = []
+    for line in (text or "").splitlines():
+        m = _LIST_LINE.match(line)
+        if not m:
+            continue
+        name = _clean_list_item(m.group(1))
+        if name:
+            out.append(name)
+    return out
+
+
+def _parse_identify_json(reply: str) -> list[dict] | None:
+    """Parse ChatGPT's object reply into [{id, name, cells}], tolerating the
+    ways it fails to return clean JSON.
+
+    This is the FOURTH format we've asked ChatGPT for and it has never complied
+    reliably, so parsing must be forgiving and must NEVER be a dead end:
+      - strip ``` / ```json code fences,
+      - pull out the first [...] array if it wrapped the JSON in prose,
+      - coerce id/name/cells into the expected shape.
+    Returns None on any failure; the caller logs the RAW reply and falls back to
+    the plain-text numbered list (with no pins). We log so the prompt can be
+    tightened against what ChatGPT actually sent."""
+    if not reply or not reply.strip():
+        return None
+    text = reply.strip()
+    # Strip markdown code fences (```json ... ``` or ``` ... ```).
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    # If prose surrounds the array, grab the outermost [...] span.
+    if not text.startswith("["):
+        start, end = text.find("["), text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+    def _coerce(item, i):
+        """Coerce one parsed dict into {id,name,cells}; None if unusable."""
+        if not isinstance(item, dict):
+            return None
+        name = str(item.get("name", "")).strip()
+        if not name:
+            return None
+        try:
+            oid = int(item.get("id", i))
+        except (TypeError, ValueError):
+            oid = i
+        cells_raw = item.get("cells", [])
+        cells = [str(c).strip() for c in cells_raw if str(c).strip()] if isinstance(cells_raw, list) else []
+        return {"id": oid, "name": name, "cells": cells}
+
+    data = None
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = None
+
+    if isinstance(data, list):
+        out = [c for i, item in enumerate(data, 1) if (c := _coerce(item, i))]
+        if out:
+            return out
+
+    # SALVAGE: the reply was not valid JSON (commonly TRUNCATED mid-array because
+    # we read while ChatGPT was still streaming). Recover every COMPLETE {...}
+    # object individually so a cut-off reply still yields the finished items. A
+    # trailing partial object simply won't match / won't parse and is dropped.
+    salvaged: list[dict] = []
+    # Match balanced single-level {...} blocks (object bodies contain no nested
+    # braces in this schema: id/name/cells-of-strings).
+    for j, m in enumerate(re.finditer(r"\{[^{}]*\}", text), start=1):
+        frag = m.group(0)
+        try:
+            obj = json.loads(frag)
+        except Exception:
+            continue
+        c = _coerce(obj, j)
+        if c:
+            salvaged.append(c)
+    if salvaged:
+        # Renumber sequentially in case a mid-array object was the one truncated.
+        for idx, o in enumerate(salvaged, start=1):
+            o["id"] = o.get("id") or idx
+        print(f"[identify] JSON parse failed; SALVAGED {len(salvaged)} complete object(s) "
+              f"from a malformed/truncated reply.")
+        return salvaged
+    return None
+
+
+def _identify_bg_clause(transparent: bool) -> str:
+    """The {background} clause for IDENTIFY_REGENERATE, chosen from the original.
+
+    Transparent art must stay transparent; opaque art must keep its original
+    background rather than being turned transparent (the old prompt always asked
+    for transparency and wiped full-scene backgrounds)."""
+    if transparent:
+        return "Transparent background, PNG"
+    return ("Keep the original background exactly as it is in the original artwork — "
+            "do NOT make it transparent or replace it")
+
+
+def _run_identify_workflow(page: Any, job: dict[str, Any]) -> None:
+    """Artwork Identification. All annotation is LOCAL — we never ask ChatGPT to
+    draw on the image (it redraws the artwork).
+
+    Object mode:
+        - draw a labelled 10x10 grid over a COPY of the artwork (local),
+        - send that grid copy to ChatGPT asking for ONLY JSON [{id,name,cells}],
+        - parse robustly (fences/prose tolerated); on failure log the raw reply
+          and fall back to a plain-text list with no pins,
+        - turn each object's cells into a bbox HINT (dropped if unreliable) and
+          draw numbered badges on the ORIGINAL image,
+        - PAUSE for per-object instructions, then regenerate.
+    Colour mode:
+        - colour groups are computed locally with k-means SERVER-SIDE (the
+          packaged agent has no cv2), so there is NO ChatGPT listing turn here;
+          the agent pauses straight away using the server-provided groups.
+    Regenerate: {changes} references each object by number AND name; {background}
+    keeps the original background unless the art is transparent.
+    """
+    job_id = job["id"]
+    client = job["client"]
+    task_id = job["task_id"]
+    artwork_file = job.get("artwork_files", [""])[0]
+
+    from src.vault import VAULT_DIR
+    task_dir = VAULT_DIR / client / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    existing_runs = [d for d in task_dir.iterdir() if d.is_dir() and d.name.startswith("run_")]
+    run_number = len(existing_runs) + 1
+    run_dir = task_dir / f"run_{run_number}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    job["vault_folder"] = str(run_dir)
+
+    current_image_path = str(INPUT_DIR / artwork_file)
+    if not artwork_file or not Path(current_image_path).exists():
+        job["status"] = "failed"
+        job["error"] = f"Input file not found: {artwork_file!r}"
+        job["finished_at"] = time.time()
+        return
+
+    # Local pixel geometry, shown as it is for Custom Operation.
+    try:
+        job["aspect_info"] = image_info(current_image_path, dpi_override=job.get("aspect_dpi") or None)
+    except Exception as exc:
+        print(f"[identify] image_info failed: {exc}")
+    # Record the ORIGINAL upload for the results comparison, and whether it has
+    # transparency (drives the regenerate background clause).
+    original_data = Path(current_image_path).read_bytes()
+    job["identify_original_file"] = Path(current_image_path).name
+    try:
+        transparent = has_transparency(original_data)
+    except Exception as exc:
+        print(f"[identify] transparency check failed, assuming opaque: {exc}")
+        transparent = False
+    job["identify_has_transparency"] = transparent
+
+    # Open the chat once up front — both modes need it for the regenerate turn.
+    _track_start(job)
+    _open_chat_for(page, job)
+    _track_end(job)
+
+    mode = (job.get("identify_mode") or "object").strip().lower()
+
+    if mode == "colour":
+        # No ChatGPT listing turn — the colour groups were computed locally
+        # server-side (k-means) and arrive on the job. The agent just pauses for
+        # the operator to assign changes to each group.
+        job["stage"] = 1
+        job["stage_label"] = "Colour groups ready"
+        groups = job.get("identify_colour_groups") or []
+        print(f"[identify] colour mode: {len(groups)} colour group(s) from the server.")
+    else:
+        # --- Turn 1: local grid overlay -> ChatGPT names objects by grid cell ---
+        job["stage"] = 1
+        job["stage_label"] = "Identifying objects in the artwork"
+        # Draw the labelled grid over a COPY and send THAT to ChatGPT (never the
+        # original). Publish it too so the operator can see what ChatGPT saw.
+        try:
+            grid_bytes = grid_overlay(original_data)
+            grid_name = f"{job_id}_grid.png"
+            _record_stage_image(job, "grid", grid_bytes, grid_name)
+            job["identify_grid_file"] = grid_name
+            grid_path = str(OUTPUT_DIR / grid_name)
+        except Exception as exc:
+            print(f"[identify] grid overlay failed, sending the plain image: {exc}")
+            grid_path = current_image_path
+
+        # The object prompt's built-in text has DOUBLED braces (the JSON example
+        # is a literal in a str.format template). .format() collapses {{->{ so
+        # ChatGPT sees valid single-brace JSON. A managed override may already be
+        # single-brace, so guard the format call.
+        # Resolve the list-objects prompt and record WHERE it came from, so a
+        # stale DB copy (e.g. the old plain-list prompt still in Decoinks) is
+        # obvious in the log rather than a mystery.
+        _managed = (job.get("managed_prompts") or {}).get("IDENTIFY_OBJECTS")
+        if job.get("template_identify"):
+            _src = "operator-edit (template_identify)"
+            detect_prompt = job["template_identify"]
+        elif _managed:
+            _src = "Decoinks DB (managed_prompts[IDENTIFY_OBJECTS])"
+            detect_prompt = _managed
+        else:
+            _src = "built-in fallback (config/workflows.IDENTIFY_OBJECTS)"
+            detect_prompt = IDENTIFY_OBJECTS
+        try:
+            detect_prompt = detect_prompt.format()
+        except (KeyError, IndexError, ValueError):
+            pass  # already single-brace / has stray braces — send as-is
+        _is_json_prompt = "JSON" in detect_prompt or '"cells"' in detect_prompt
+        print(f"[identify] list-objects prompt SOURCE: {_src}; "
+              f"looks_like_JSON_prompt={_is_json_prompt}")
+        print(f"[identify] list-objects prompt SENT ({len(detect_prompt)} chars):\n{detect_prompt[:800]!r}")
+        if not _is_json_prompt:
+            print("[identify] WARNING: the prompt sent is NOT the JSON prompt "
+                  "(likely a stale Decoinks DB copy). Re-import prompts_export.json "
+                  "so AIS.IDENTIFY.OBJECTS is the JSON version. Parsing will still "
+                  "fall back to the plain list.")
+        job.setdefault("prompts", []).append(detect_prompt)
+        _track_start(job)
+        detected_text = send_text_turn(page, prompt=detect_prompt,
+                                       image_paths=[grid_path], run_id=f"{job_id}_identify")
+        _track_end(job)
+        _rename_chat_once(page, job)
+
+        job["identify_objects_raw"] = detected_text or ""
+        # Always log the exact raw reply for the list-objects turn (not only on a
+        # JSON-parse failure), so the captured text is verifiable against what
+        # ChatGPT actually showed.
+        print(f"[identify] list-objects RAW REPLY ({len(detected_text or '')} chars):\n{detected_text!r}")
+        parsed = _parse_identify_json(detected_text)
+        if parsed:
+            # JSON understood — build structured objects with bbox HINTS. A cell
+            # set that is scattered or covers half the grid yields bbox=None, so
+            # that object simply gets no pin (a bad pin is worse than none).
+            struct = []
+            pinned = 0
+            for obj in parsed:
+                bbox = cells_to_bbox(obj.get("cells", []))
+                if bbox:
+                    pinned += 1
+                struct.append({"id": obj["id"], "name": obj["name"], "bbox": bbox})
+            job["identify_objects_struct"] = struct
+            job["identify_objects"] = [o["name"] for o in struct]
+            job["identify_parse_ok"] = True
+            print(f"[identify] parsed {len(struct)} object(s) as JSON; {pinned} pinned, "
+                  f"{len(struct) - pinned} un-pinned (unreliable/omitted cells).")
+            # Draw numbered badges on the ORIGINAL image at each surviving bbox.
+            try:
+                annotated = draw_badges(original_data, struct)
+                ann_name = f"{job_id}_annotated.png"
+                _record_stage_image(job, "annotated", annotated, ann_name)
+                job["identify_annotated_file"] = ann_name
+            except Exception as exc:
+                print(f"[identify] draw_badges failed: {exc}")
+        else:
+            # PARSE FAILED — never a dead end. Log the raw reply so we can see
+            # what ChatGPT actually returned and tighten the prompt, then fall
+            # back to the plain-text numbered list with NO pins.
+            print("[identify] JSON parse FAILED. Falling back to plain-text list. "
+                  f"RAW REPLY ({len(detected_text or '')} chars):\n{detected_text!r}")
+            names = _parse_numbered_list(detected_text)
+            job["identify_objects"] = names
+            job["identify_objects_struct"] = [
+                {"id": i, "name": n, "bbox": None} for i, n in enumerate(names, start=1)
+            ]
+            job["identify_parse_ok"] = False
+            print(f"[identify] plain-text fallback recovered {len(names)} name(s).")
+
+    # --- PAUSE: operator assigns changes per object / colour group ---
+    job["awaiting_input"] = True
+    job["paused_at"] = time.time()
+    job["status"] = "awaiting_object_instructions"
+    print(f"[worker] Job {job_id} awaiting object instructions.")
+    _wait_for_resume(job_id)
+
+    # --- Turn 2: regenerate with the operator's instructions applied ---
+    job["status"] = "running"
+    job["awaiting_input"] = False
+    job["stage"] = 2
+    job["stage_label"] = "Regenerating artwork with your changes"
+
+    # Build {changes}: one line per instruction, referencing the object by its
+    # NUMBER and NAME so the regenerate prompt is unambiguous. The server already
+    # rejected an empty list, so there is always at least one.
+    instructions = job.get("object_instructions") or []
+    lines = []
+    for it in instructions:
+        obj = str((it or {}).get("object", "")).strip()
+        act = str((it or {}).get("action", "")).strip()
+        oid = (it or {}).get("id")
+        if not (obj and act):
+            continue
+        prefix = f"- {oid} ({obj}): " if oid not in (None, "") else f"- {obj}: "
+        lines.append(prefix + act)
+    changes_text = "\n".join(lines)
+    if not changes_text:
+        raise RuntimeError("No object instructions were received from the operator before regeneration.")
+    print(f"[identify] changes:\n{changes_text}")
+
+    bg_clause = _identify_bg_clause(job.get("identify_has_transparency", False))
+    regen_template = job.get("template_identify_regen") or _tpl(job, "IDENTIFY_REGENERATE", IDENTIFY_REGENERATE)
+    if "{changes}" not in regen_template:
+        # Operator edited out the placeholder; append the changes so they survive.
+        regen_template = regen_template + "\n\n{changes}"
+    # Fill {changes} and {background}. Tolerate an edited template missing
+    # {background} (then only {changes} is substituted).
+    try:
+        regen_prompt = regen_template.format(changes=changes_text, background=bg_clause)
+    except (KeyError, IndexError):
+        regen_prompt = regen_template.replace("{changes}", changes_text).replace("{background}", bg_clause)
+    job.setdefault("prompts", []).append(regen_prompt)
+
+    _track_start(job)
+    regen_images = send_turn(page, prompt=regen_prompt,
+                             image_paths=[current_image_path], run_id=f"{job_id}_identify_regen",
+                             require_images=True)
+    _track_end(job)
+    if not regen_images:
+        job["status"] = "failed"
+        job["error"] = "Regeneration returned no image."
+        job["finished_at"] = time.time()
+        return
+
+    final_data = regen_images[0]
+    # Only strip an opaque white background for a design that was transparent to
+    # begin with; a full-scene opaque artwork must keep its background.
+    if job.get("identify_has_transparency") and is_opaque_white_bg(final_data):
+        final_data = remove_white_background(final_data)
+
+    final_name = f"{job_id}_final.png"
+    _record_stage_image(
+        job, "final", final_data, final_name,
+        vault_dir=run_dir, vault_name=f"{task_id}_R{run_number}_final.png")
+    job["identify_final_file"] = final_name
+
+    # Similarity: uploaded original vs the regenerated final, shown as it is for
+    # the aspect-ratio step.
+    try:
+        sim = similarity(original_data, final_data)
+    except Exception as exc:
+        print(f"[identify] similarity failed: {exc}")
+        sim = None
+    job["identify_similarity"] = sim
+
+    job["status"] = "done"
+    job["awaiting_input"] = False
+    job["finished_at"] = time.time()
+
+
+def _printready_measurements_block(report: dict) -> str:
+    """Format the server-precomputed report's measurements for the prompt's
+    {measurements} placeholder. Kept inline (not importing src.printready) so the
+    packaged agent never touches cv2 — this only reads an already-computed dict."""
+    if not report:
+        return "(measurements unavailable)"
+    checks = report.get("checks", [])
+    lines = [f"Overall local score: {report.get('score')}/100 ({report.get('band')})", ""]
+    for c in checks:
+        lines.append(f"- {c.get('label')}: {c.get('value_str')}  [{c.get('status')}]")
+    return "\n".join(lines)
+
+
+def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
+    """UC-8 Print Ready QA. The 13 numeric checks were measured on the SERVER
+    (src.printready, cv2) and arrive on the job as printready_report. Here the
+    agent runs the ONE ChatGPT turn: send the artwork + the measurements and ask
+    for a printer's written judgement (PRINTREADY_REVIEW). Store the assessment
+    and finish. The score/checks are already on the job for the UI."""
+    job_id = job["id"]
+    artwork_file = job.get("artwork_files", [""])[0]
+    current_image_path = str(INPUT_DIR / artwork_file)
+    if not artwork_file or not Path(current_image_path).exists():
+        job["status"] = "failed"
+        job["error"] = f"Input file not found: {artwork_file!r}"
+        job["finished_at"] = time.time()
+        return
+
+    # The server measures the 13 checks and stores them under
+    # printready_measurements (canonical) — printready_report is kept as an alias
+    # for older servers. The measurement IS the point of this workflow, so if it
+    # is absent we FAIL with a clear error rather than degrading to a visual-only
+    # review. (The server now also refuses to create such a job, so this is a
+    # belt-and-braces guard for an older server / a lost field.)
+    report = job.get("printready_measurements") or job.get("printready_report")
+    if not report:
+        reason = job.get("printready_error") or (
+            "No server-side print-readiness measurements were attached to the job. "
+            "The local measurement (src/printready.py) did not run on the server.")
+        print(f"[printready] FAILING job — {reason}")
+        job["status"] = "failed"
+        job["error"] = reason
+        job["finished_at"] = time.time()
+        return
+
+    job["printready_original_file"] = Path(current_image_path).name
+
+    # Open the chat in this workflow's project (falls back to plain chat).
+    _track_start(job)
+    _open_chat_for(page, job)
+    _track_end(job)
+
+    job["stage"] = 1
+    job["stage_label"] = "Getting the printer's assessment"
+
+    measurements_block = _printready_measurements_block(report)
+    review_template = _tpl(job, "PRINTREADY_REVIEW", PRINTREADY_REVIEW)
+    try:
+        review_prompt = review_template.format(measurements=measurements_block)
+    except (KeyError, IndexError):
+        review_prompt = review_template.replace("{measurements}", measurements_block)
+    job.setdefault("prompts", []).append(review_prompt)
+    print(f"[printready] review prompt SENT ({len(review_prompt)} chars).")
+
+    _track_start(job)
+    assessment = send_text_turn(page, prompt=review_prompt,
+                                image_paths=[current_image_path],
+                                run_id=f"{job_id}_printready")
+    _track_end(job)
+    _rename_chat_once(page, job)
+
+    assessment = (assessment or "").strip()
+    job["printready_assessment"] = assessment
+    print(f"[printready] assessment stored ({len(assessment)} chars).")
+
+    job["status"] = "done"
+    job["awaiting_input"] = False
+    job["finished_at"] = time.time()
+
+
+# ---------------------------------------------------------------------------
+# Colorways (UC-6)
+# ---------------------------------------------------------------------------
+
+def _colorway_colours_block(colours: list[dict]) -> str:
+    """The {colours} block for COLORWAY_SUGGEST — a plain list of the artwork's
+    dominant colours (name + hex + %). Kept inline (no cv2) since the report was
+    already computed server-side."""
+    if not colours:
+        return "(no dominant colours could be extracted; judge from the image)"
+    lines = []
+    for c in colours:
+        name = c.get("name") or "colour"
+        hexv = c.get("hex") or ""
+        pct = c.get("pct")
+        pct_str = f" — {pct}%" if pct is not None else ""
+        lines.append(f"- {name} {hexv}{pct_str}".rstrip())
+    return "\n".join(lines)
+
+
+def _parse_colorway_reply(text: str) -> tuple[list[dict], list[str]]:
+    """Parse COLORWAY_SUGGEST's free-prose reply into (recommendations, avoid).
+
+    recommendations: [{name, hex, reason}] — the garment colours to offer, each
+    with a resolved swatch hex (name->hex map, grey fallback) and ChatGPT's
+    one-line reason. avoid: [names] — the "should NOT go on" list, shown but not
+    selectable. Tolerant: recognises a bullet/numbered list and an 'avoid'/'not'
+    section header; the raw reply is always kept by the caller as the fallback."""
+    from src.colorway import garment_hex, GARMENT_HEX
+
+    recs: list[dict] = []
+    avoid: list[str] = []
+    in_avoid = False
+    known = sorted(GARMENT_HEX.keys(), key=len, reverse=True)
+
+    def _find_colour(s: str) -> str | None:
+        # The recommendation states its garment colour FIRST ("Navy - ...");
+        # a colour mentioned later (in the reason, e.g. "softer than black") must
+        # not win. So pick the known name with the EARLIEST match position, and
+        # break ties by longest name ("navy blue" over "navy" at the same spot).
+        low = s.lower()
+        best_k, best_pos, best_len = None, 10**9, 0
+        for k in known:
+            m = re.search(r"\b" + re.escape(k) + r"\b", low)
+            if not m:
+                continue
+            if m.start() < best_pos or (m.start() == best_pos and len(k) > best_len):
+                best_k, best_pos, best_len = k, m.start(), len(k)
+        return best_k
+
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        low = line.lower()
+        # Section switch: a line that announces the colours to avoid. Matches a
+        # header ("Avoid:") or an inline warning ("Steer clear of yellow", "Do
+        # not use red"). Once seen, this and following colour lines are avoids.
+        if re.match(r"^\s*(?:[-*•]|\d+[.)])?\s*(avoid|do not|don't|not\b|steer clear|stay away|should not)",
+                    low):
+            in_avoid = True
+            # A bare header like "Avoid:" carries no colour itself.
+            if len(line) < 40 and low.rstrip(":").strip() in (
+                    "avoid", "avoid these", "colours to avoid", "garment colours to avoid",
+                    "colors to avoid", "avoid:"):
+                continue
+        # Strip a leading bullet / number.
+        body = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line)
+        colour = _find_colour(body)
+        if not colour:
+            continue
+        if in_avoid:
+            if colour not in [a.lower() for a in avoid]:
+                avoid.append(colour.title())
+            continue
+        # Reason = the text after the colour name / first separator.
+        reason = body
+        m = re.search(r"[-–—:]\s*(.+)$", body)
+        if m:
+            reason = m.group(1).strip()
+        hexv = garment_hex(colour) or "#808080"
+        # De-dup by colour name.
+        if colour.lower() not in [r["name"].lower() for r in recs]:
+            recs.append({"name": colour.title(), "hex": hexv, "reason": reason[:300]})
+    return recs, avoid
+
+
+def _run_colorway_workflow(page: Any, job: dict[str, Any]) -> None:
+    """UC-6 Colorways. The artwork's dominant colours were extracted on the
+    SERVER (src.colorway.extract_colours) and arrive as colorway_colours.
+
+    Turn 1: ask ChatGPT which garment colours suit the artwork (COLORWAY_SUGGEST
+      with the {colours} data) -> parse recommendations + avoid list -> PAUSE for
+      the operator to tick colours.
+    Turn 2: one mockup turn per chosen colour (COLORWAY_MOCKUP), and a local
+      Pillow preview of the ACTUAL artwork on a swatch of that colour, side by
+      side -> PAUSE for the operator to (optionally) request adaptations.
+    Turn 3: one adaptation turn per chosen colour (COLORWAY_ADAPT), with the
+      similarity comparison against the original. Done.
+    """
+    job_id = job["id"]
+    client = job["client"]
+    task_id = job["task_id"]
+    artwork_file = job.get("artwork_files", [""])[0]
+
+    from src.vault import VAULT_DIR
+    from src.colorway import composite_on_swatch, slug
+    task_dir = VAULT_DIR / client / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    existing_runs = [d for d in task_dir.iterdir() if d.is_dir() and d.name.startswith("run_")]
+    run_number = len(existing_runs) + 1
+    run_dir = task_dir / f"run_{run_number}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    job["vault_folder"] = str(run_dir)
+
+    current_image_path = str(INPUT_DIR / artwork_file)
+    if not artwork_file or not Path(current_image_path).exists():
+        job["status"] = "failed"
+        job["error"] = f"Input file not found: {artwork_file!r}"
+        job["finished_at"] = time.time()
+        return
+    original_data = Path(current_image_path).read_bytes()
+    job["colorway_original_file"] = Path(current_image_path).name
+
+    # Open the chat once — all turns share it.
+    _track_start(job)
+    _open_chat_for(page, job)
+    _track_end(job)
+
+    # --- Turn 1: recommend garment colours ---------------------------------
+    job["stage"] = 1
+    job["stage_label"] = "Recommending garment colours"
+    colours_block = _colorway_colours_block(job.get("colorway_colours") or [])
+    suggest_template = _tpl(job, "COLORWAY_SUGGEST", COLORWAY_SUGGEST)
+    try:
+        suggest_prompt = suggest_template.format(colours=colours_block)
+    except (KeyError, IndexError):
+        suggest_prompt = suggest_template.replace("{colours}", colours_block)
+    job.setdefault("prompts", []).append(suggest_prompt)
+    _track_start(job)
+    reply = send_text_turn(page, prompt=suggest_prompt,
+                           image_paths=[current_image_path], run_id=f"{job_id}_colorway_suggest")
+    _track_end(job)
+    _rename_chat_once(page, job)
+    job["colorway_recommend_raw"] = reply or ""
+    recs, avoid = _parse_colorway_reply(reply)
+    job["colorway_recommend_parsed"] = recs
+    job["colorway_avoid"] = avoid
+    print(f"[colorway] parsed {len(recs)} recommendation(s), {len(avoid)} to avoid. "
+          f"RAW ({len(reply or '')} chars): {(reply or '')[:200]!r}")
+
+    # --- PAUSE 1: operator ticks the colours to mock up --------------------
+    job["awaiting_input"] = True
+    job["paused_at"] = time.time()
+    job["status"] = "awaiting_colour_selection"
+    print(f"[colorway] Job {job_id} awaiting colour selection.")
+    _wait_for_resume(job_id)
+
+    # --- Turn 2: one mockup per chosen colour + a local preview ------------
+    job["status"] = "running"
+    job["awaiting_input"] = False
+    job["stage"] = 2
+    selected = job.get("colorway_selected") or []
+    if not selected:
+        raise RuntimeError("No garment colours were selected before the mockup step.")
+    mockups: list[dict] = []
+    for i, sel in enumerate(selected, start=1):
+        cname = str((sel or {}).get("name", "")).strip()
+        chex = str((sel or {}).get("hex", "")).strip() or "#808080"
+        if not cname:
+            continue
+        cslug = slug(cname)
+        job["stage_label"] = f"Mocking up on {cname} ({i} of {len(selected)})"
+
+        # Local pixel-accurate preview FIRST (never fails the turn).
+        preview_file = ""
+        try:
+            preview_bytes = composite_on_swatch(original_data, chex)
+            preview_file = f"{job_id}_preview_{cslug}.png"
+            _record_stage_image(job, f"preview_{cslug}", preview_bytes, preview_file,
+                                vault_dir=run_dir, vault_name=f"{task_id}_R{run_number}_preview_{cslug}.png")
+        except Exception as exc:
+            print(f"[colorway] local preview for {cname} failed: {exc}")
+
+        # ChatGPT mockup on the garment.
+        mockup_file = ""
+        mockup_template = _tpl(job, "COLORWAY_MOCKUP", COLORWAY_MOCKUP)
+        try:
+            mockup_prompt = mockup_template.format(garment_colour=cname)
+        except (KeyError, IndexError):
+            mockup_prompt = mockup_template.replace("{garment_colour}", cname)
+        job.setdefault("prompts", []).append(mockup_prompt)
+        try:
+            _track_start(job)
+            imgs = send_turn(page, prompt=mockup_prompt, image_paths=[current_image_path],
+                             run_id=f"{job_id}_mockup_{cslug}", require_images=True)
+            _track_end(job)
+            if imgs:
+                mockup_file = f"{job_id}_mockup_{cslug}.png"
+                _record_stage_image(job, f"mockup_{cslug}", imgs[0], mockup_file,
+                                    vault_dir=run_dir, vault_name=f"{task_id}_R{run_number}_mockup_{cslug}.png")
+        except Exception as exc:
+            _track_end(job)
+            print(f"[colorway] mockup for {cname} failed: {exc}")
+
+        mockups.append({"colour": cname, "hex": chex,
+                        "mockup_file": mockup_file, "preview_file": preview_file})
+        job["colorway_mockups"] = list(mockups)   # publish incrementally for the UI
+
+    # --- PAUSE 2: operator optionally requests adaptations -----------------
+    job["awaiting_input"] = True
+    job["paused_at"] = time.time()
+    job["status"] = "awaiting_adapt_selection"
+    print(f"[colorway] Job {job_id} awaiting adaptation selection.")
+    _wait_for_resume(job_id)
+
+    # --- Turn 3: one adaptation per chosen colour (may be none) ------------
+    job["status"] = "running"
+    job["awaiting_input"] = False
+    job["stage"] = 3
+    adapt_selected = job.get("colorway_adapt_selected") or []
+    adapted: list[dict] = []
+    for i, sel in enumerate(adapt_selected, start=1):
+        cname = str((sel or {}).get("name", "")).strip()
+        chex = str((sel or {}).get("hex", "")).strip() or "#808080"
+        if not cname:
+            continue
+        cslug = slug(cname)
+        job["stage_label"] = f"Adapting for {cname} ({i} of {len(adapt_selected)})"
+        adapt_template = _tpl(job, "COLORWAY_ADAPT", COLORWAY_ADAPT)
+        try:
+            adapt_prompt = adapt_template.format(garment_colour=cname)
+        except (KeyError, IndexError):
+            adapt_prompt = adapt_template.replace("{garment_colour}", cname)
+        job.setdefault("prompts", []).append(adapt_prompt)
+        adapted_file = ""
+        sim = None
+        try:
+            _track_start(job)
+            imgs = send_turn(page, prompt=adapt_prompt, image_paths=[current_image_path],
+                             run_id=f"{job_id}_adapt_{cslug}", require_images=True)
+            _track_end(job)
+            if imgs:
+                adapted_data = imgs[0]
+                if is_opaque_white_bg(adapted_data):
+                    adapted_data = remove_white_background(adapted_data)
+                adapted_file = f"{job_id}_adapted_{cslug}.png"
+                _record_stage_image(job, f"adapted_{cslug}", adapted_data, adapted_file,
+                                    vault_dir=run_dir, vault_name=f"{task_id}_R{run_number}_adapted_{cslug}.png")
+                try:
+                    sim = similarity(original_data, adapted_data)
+                except Exception as exc:
+                    print(f"[colorway] similarity for {cname} failed: {exc}")
+                    sim = None
+        except Exception as exc:
+            _track_end(job)
+            print(f"[colorway] adaptation for {cname} failed: {exc}")
+        adapted.append({"colour": cname, "hex": chex,
+                        "adapted_file": adapted_file, "similarity": sim})
+        job["colorway_adapted"] = list(adapted)
+
+    job["status"] = "done"
+    job["awaiting_input"] = False
+    job["finished_at"] = time.time()
 
 
 def _run_job(page: Any, job: dict) -> None:
@@ -1676,6 +2504,12 @@ def _run_job(page: Any, job: dict) -> None:
         _run_artwork_workflow(page, job)
     elif wf == "custom":
         _run_custom_workflow(page, job)
+    elif wf == "identify":
+        _run_identify_workflow(page, job)
+    elif wf == "printready":
+        _run_printready_workflow(page, job)
+    elif wf == "colorway":
+        _run_colorway_workflow(page, job)
     else:
         _run_legacy_job(page, job)
 
@@ -2070,6 +2904,12 @@ def main() -> None:
     print(f"[agent] server: {SERVER_URL}")
     print(f"[agent] name:   {AGENT_NAME}")
 
+    # Startup check: every chat-opening workflow must have a ChatGPT project URL.
+    # Logs a clear WARNING naming any that would fall back to plain chatgpt.com
+    # (where the composer never appears). Jobs for those now fail loudly rather
+    # than silently, but flagging it here means it is spotted before a job runs.
+    check_project_urls()
+
     # Self-update at startup, BEFORE any job is claimed and before Chrome opens.
     # 1) Apply anything a previous run already staged.
     # 2) Then check the server; if newer, stage + apply + re-exec now. A failed
@@ -2085,6 +2925,21 @@ def main() -> None:
     except Exception as exc:
         print(f"[agent] FATAL: could not launch Chrome: {exc}")
         traceback.print_exc()
+        return
+
+    # Operator diagnostic: `python agent.py --dump-controls` opens ChatGPT and
+    # dumps every button's aria-label + the last turn's structure to the log,
+    # then exits. Run this after ChatGPT changes its markup to read the new
+    # attribute values straight from the log instead of hand-running console
+    # scripts. (The same dump also fires automatically when a control can't be
+    # found during a job.)
+    if "--dump-controls" in sys.argv:
+        try:
+            page.goto(PROJECT_URL_DEFAULT, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(4000)   # let the app render its controls
+            dump_page_controls(page, reason="operator --dump-controls")
+        except Exception as exc:
+            print(f"[agent] --dump-controls failed: {exc}")
         return
 
     if not logged_in:

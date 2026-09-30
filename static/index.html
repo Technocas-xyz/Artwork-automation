@@ -134,7 +134,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 <link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
-<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="textimage">Text + Image</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><button id="adminUsersBtn" onclick="openAdminUsers()" style="display:none;font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:8px">Users</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
+<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="textimage">Text + Image</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button><button class="wf-tab" data-wf="identify">Artwork Identification</button><button class="wf-tab" data-wf="printready">Print Ready QA</button><button class="wf-tab" data-wf="colorway">Colorways</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><button id="adminUsersBtn" onclick="openAdminUsers()" style="display:none;font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:8px">Users</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
 <div class="columns">
 <div class="col" id="col1"></div>
 <div class="col" id="col2"></div>
@@ -266,6 +266,30 @@ function wirePromptEdits(root){
 var psAsset="",psCode="",psLabel="",psPendingPath="",psArrivedPath="";
 var lastStatusInfo=null;
 var DT={turn1:"",turn2:"",turn3:""};
+// --- Prompt template accessor: one place, no empty boxes -------------------
+// DT holds the live prompt text from /api/templates. Every editable prompt box
+// reads its default through tpl(key) instead of touching DT.<key> directly.
+// tpl() returns the server value when present, otherwise a built-in fallback,
+// and warns ONCE per missing key. This is what stops the two recurring UI bugs:
+// a prompt box can never render empty (fetch failure, stale server, or a key
+// the server forgot to send), and a drift between the server's key names and
+// the UI's is surfaced in the console instead of silently blanking the box.
+// The fallbacks mirror config/workflows.py; keys match get_templates() exactly.
+var PROMPT_FALLBACKS={
+  identify:'A labelled 10x10 grid has been drawn over this artwork to help you describe where things are. Columns are lettered A to J from left to right; rows are numbered 1 to 10 from top to bottom. So the top-left cell is A1 and the bottom-right cell is J10. The grid is only a reference overlay \u2014 ignore it as part of the artwork.\n\nList the main objects and elements in the artwork \u2014 the things a person would actually want to change. List whole, meaningful elements: each subject, object, piece of text, logo, and distinct background element. Do NOT break a single subject into its parts (a lion is one item called "Lion", never its mane, eyes, paws or tail separately). Aim for roughly 5 to 15 items.\n\nFor each object, give the grid cells it mainly sits in. Use only the cells that the object actually covers; if you are unsure, give your best estimate of the few cells at its centre rather than listing many.\n\nReply with ONLY a JSON array and nothing else \u2014 no prose, no explanation, no markdown code fences. Each element is an object with: "id" (1-based integer), "name" (short label), and "cells" (array of cell strings). Exactly this shape:\n\n[\n  {{"id": 1, "name": "Lion", "cells": ["D4", "E5"]}},\n  {{"id": 2, "name": "Team name text", "cells": ["C8", "D8", "E8"]}}\n]\n\nOutput the JSON array only.',
+  identify_colour:'Look at this artwork and list every distinct colour group in it.\n\nA colour group is all the areas sharing one colour, even when they belong to different elements. Include outlines, fills, text colours, background colours and shadow tones.\n\nUse short names that identify each group clearly, for example "Red lettering", "Dark blue background", "Gold outlines", "Skin tones".\n\nReply with ONLY a plain numbered list in this format:\n1. Colour group name\n2. Colour group name\n3. Colour group name\n\nNo explanation, no headings, no hex codes, no extra text.',
+  identify_regen:'Reproduce this artwork exactly as it is, with ONLY the following specific changes applied.\n\nThis is a reproduction task, not a new artwork. Keep everything that is not named in the change list below exactly as it appears in the original: the background, scenery, all other subjects, the composition, framing, colour palette, lighting, artistic style, and every element not named in a change. Preserve all text that is not being changed, including accented characters.\n\nDo not simplify the scene. Do not remove anything that was not asked to be removed. The result must be recognisably the same artwork, changed only in the ways listed.\n\nEach change below names the object by its number and name, so you know exactly which element it refers to. Apply the changes to those objects only:\n\n{changes}\n\nIf a change is impossible without altering other parts, make the smallest possible alteration and keep everything else.\n\nOutput requirements (do not let these change the content above):\n- {background}\n- Clean sharp edges suitable for DTF garment printing'
+};
+var _tplWarned={};
+function tpl(key){
+  var v=DT[key];
+  if(v&&(""+v).trim())return v;
+  if(!_tplWarned[key]){
+    _tplWarned[key]=1;
+    console.warn("[templates] /api/templates has no non-empty \""+key+"\" \u2014 using the built-in fallback if one exists. The server may be stale; restart it to serve managed prompts.");
+  }
+  return PROMPT_FALLBACKS[key]||"";
+}
 var lastStatus="",lastStage=-1,lastImgKey="";
 
 function $(id){return document.getElementById(id)}
@@ -277,7 +301,7 @@ var col1=$("col1"),col2=$("col2"),statusArea=$("statusArea"),resultArea=$("resul
 var ACTIVE_JOB_KEY="activeJobId";
 function saveActiveJob(id){activeJobId=id;try{if(id)localStorage.setItem(ACTIVE_JOB_KEY,id);else localStorage.removeItem(ACTIVE_JOB_KEY)}catch(e){}}
 function clearActiveJob(){activeJobId=null;try{localStorage.removeItem(ACTIVE_JOB_KEY)}catch(e){}}
-var _ACTIVE_JOB_LIVE={running:1,queued:1,awaiting_selection:1,awaiting_text_confirmation:1,awaiting_crop_review:1,awaiting_multi_selection:1,awaiting_number_selection:1,awaiting_object_selection:1,awaiting_ratio_selection:1,awaiting_signin:1};
+var _ACTIVE_JOB_LIVE={running:1,queued:1,awaiting_selection:1,awaiting_text_confirmation:1,awaiting_crop_review:1,awaiting_multi_selection:1,awaiting_number_selection:1,awaiting_object_selection:1,awaiting_ratio_selection:1,awaiting_object_instructions:1,awaiting_colour_selection:1,awaiting_adapt_selection:1,awaiting_signin:1};
 function reconnectStoredJob(){
   var id="";try{id=localStorage.getItem(ACTIVE_JOB_KEY)||""}catch(e){}
   if(!id)return;
@@ -315,6 +339,14 @@ resultArea.addEventListener("click",function(e){
   else if(a==="submit-multi") doSubmitMulti(jid);
   else if(a==="submit-numbers") doSubmitNumbers(jid);
   else if(a==="submit-objects") doSubmitObjects(jid);
+  else if(a==="submit-instructions") doSubmitInstructions(jid);
+  else if(a==="id-chip") window.idChip(t);
+  else if(a==="id-quick-apply") window.idQuickApply();
+  else if(a==="printready-download") window.printReadyDownload(jid);
+  else if(a==="cw-colour-toggle") window.cwColourToggle(t);
+  else if(a==="cw-adapt-toggle") window.cwAdaptToggle(t);
+  else if(a==="submit-colours") doSubmitColours(jid);
+  else if(a==="submit-adapt") doSubmitAdapt(jid);
   else if(a==="submit-ratio") doSubmitRatio(jid);
   else if(a==="pick-ratio"){window.setRatioInputs(t.dataset.ratio)}
   else if(a==="toggle"){var tgt=$(t.dataset.target);if(tgt){tgt.classList.toggle("open");t.classList.toggle("open")}}
@@ -357,14 +389,14 @@ document.addEventListener("error",function(e){
   setTimeout(function(){ el.style.visibility=""; el.src=base+bust; }, IMG_RETRY_DELAY_MS);
 },true);
 
-fetch("/api/templates").then(function(r){return r.json()}).then(function(d){DT=d;renderCols()}).catch(function(e){console.error("[templates] fetch failed, using defaults:",e);DT={turn1:"",turn2:"",turn3:"",extract:"",regen:"",artwork:""};renderCols()});
+fetch("/api/templates").then(function(r){return r.json()}).then(function(d){DT=d||{};renderCols()}).catch(function(e){console.error("[templates] fetch failed \u2014 prompt boxes fall back to built-in defaults via tpl():",e);DT={};renderCols()});
 function switchWorkflow(wf){document.querySelectorAll(".wf-tab").forEach(function(x){x.classList.toggle("active",x.dataset.wf===wf)});currentWorkflow=wf;renderCols()}
 document.querySelectorAll(".wf-tab").forEach(function(t){t.addEventListener("click",function(){if(t.disabled)return;switchWorkflow(t.dataset.wf)})});
 
 function renderCols(){
   if(currentWorkflow==="nextcloud"){renderNextcloudCol1();renderNextcloudCol2();ncStartPolling();return}
   ncStopPolling();
-  if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else if(currentWorkflow==="custom"){textImageFile="";mockupImageFile="";renderCustomCol1();renderCustomCol2()}else{
+  if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else if(currentWorkflow==="custom"){textImageFile="";mockupImageFile="";renderCustomCol1();renderCustomCol2()}else if(currentWorkflow==="identify"){textImageFile="";mockupImageFile="";artworkFiles=[];renderIdentifyCol1();renderIdentifyCol2()}else if(currentWorkflow==="printready"){textImageFile="";mockupImageFile="";artworkFiles=[];renderPrintReadyCol1();renderPrintReadyCol2()}else if(currentWorkflow==="colorway"){textImageFile="";mockupImageFile="";artworkFiles=[];renderColorwayCol1();renderColorwayCol2()}else{
     // "text" and "textimage" share the same renderers; they differ only in which
     // modes they expose. Keep text_mode valid for the active tab — EXCEPT the
     // deliberate unset state ("") used when a Text + Image file arrives from the
@@ -481,15 +513,15 @@ function renderCol2(){
     // Two editable prompts: collage (step 1) and final (step 2). No colour step.
     promptBlock=''
       +'<div class="edit-toggle" id="tplTog">Edit prompt for step 1 (variations)</div>'
-      +'<div class="edit-body" id="tplBody"><textarea id="tplRC" data-prompt-id="tplRC">'+esc(seedPromptText("tplRC",DT.replace_collage))+'</textarea><div class="tpl-error" id="tplErr"></div></div>'
+      +'<div class="edit-body" id="tplBody"><textarea id="tplRC" data-prompt-id="tplRC">'+esc(seedPromptText("tplRC",tpl("replace_collage")))+'</textarea><div class="tpl-error" id="tplErr"></div></div>'
       +'<div class="edit-toggle" id="tplTog2">Edit prompt for step 2 (final)</div>'
-      +'<div class="edit-body" id="tplBody2"><textarea id="tplRF" data-prompt-id="tplRF">'+esc(seedPromptText("tplRF",DT.replace_final))+'</textarea><div class="tpl-error" id="tplErr2"></div></div>';
+      +'<div class="edit-body" id="tplBody2"><textarea id="tplRF" data-prompt-id="tplRF">'+esc(seedPromptText("tplRF",tpl("replace_final")))+'</textarea><div class="tpl-error" id="tplErr2"></div></div>';
   }else{
     // Step-1 template depends on the mode; steps 2/3 are edited in the pause
     // panels (renderAwaiting), same as typed/from_image.
-    var step1Tpl=DT.turn1||"";
-    if(textMode==="image_element")step1Tpl=DT.image_element_collage||"";
-    else if(textMode==="image_style")step1Tpl=DT.image_style_collage||"";
+    var step1Tpl=tpl("turn1");
+    if(textMode==="image_element")step1Tpl=tpl("image_element_collage");
+    else if(textMode==="image_style")step1Tpl=tpl("image_style_collage");
     // Key the remembered edit per mode so an edit made in one mode doesn't leak
     // into another mode's (different) default template.
     var tpl1Id="tpl1__"+textMode;
@@ -504,7 +536,7 @@ function renderCol2(){
   checkStatus();
 }
 function updBtn(){
-  var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();return}
+  var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();updIdentifyBtn();updPrintReadyBtn();updColorwayBtn();return}
   var dt=$("designText"),cn=$("cn"),ti=$("ti");
   var hasInput;
   if(textMode===""){hasInput=false}  // Text + Image mode not yet chosen — nothing to submit
@@ -558,23 +590,19 @@ function agentBannerHtml(s){
   // No worker runs in the server any more — messaging is about the PC agent.
   if(!s.worker_alive)return'<div class="worker-dead">No agent running. Start the agent on your PC to generate.</div>';
   if(!s.logged_in)return'<div class="worker-dead">Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.</div>';
-  // Informational only — the per-agent limit means other designers' jobs never
-  // block this one. Just show who is on what, and flag when the whole fleet is
-  // busy so this operator knows a new job will queue.
-  var aj=(s&&s.active_jobs)||[];
-  var h="";
-  if(aj.length){
-    var lines=aj.map(function(j){return esc(j.agent||"an agent")+" \u2014 "+jobStatusLabel(j.status)}).join("<br>");
-    h+='<div class="agent-busy-note" style="font-size:.74rem;color:var(--muted);padding:6px 0">Running now:<br>'+lines+'</div>';
-  }
-  if(s&&s.free_agent===false&&s.agent_count>0){
-    h+='<div class="worker-dead" style="background:#fef3c7;color:#92400e;border-color:#fde68a">All agents are busy. A new job will start as soon as one frees up, or start another agent.</div>';
-  }
-  return h;
+  // Jobs are routed per user: another designer's busy agent never blocks this
+  // one, and the operator's own running job is already described by the progress
+  // panel ("Picked up by ..."). So there is nothing to say here while an agent
+  // is simply busy — no "Running now" line (it duplicated "Picked up by") and no
+  // fleet-wide "all agents busy" banner (wrong now that routing is per user).
+  // The only place we tell someone they cannot start work is the submit button
+  // blocker, and only when they actually try to start a NEW job (see updBtn).
+  return "";
 }
 function jobStatusLabel(st){
   if(st==="running")return "running";
   if(st==="awaiting_signin")return "paused \u2014 sign in on the agent PC";
+  if(st==="awaiting_object_instructions")return "waiting for object instructions";
   if(st&&st.indexOf("awaiting_")===0)return "waiting for the client\u2019s choice";
   return st||"busy";
 }
@@ -603,10 +631,11 @@ function updElapsed(){var el=$("stepEl");if(el&&stepStart)el.textContent=fmt(Mat
 
 var myJobAgent="";
 function myJobBlockMsg(fallback){
-  // This browser has its own job in flight. Name the agent handling it so the
-  // operator knows whose machine is busy — it does NOT block other designers.
-  if(myJobAgent)return "Your job is running on "+myJobAgent+". Cancel or complete it before starting another.";
-  return fallback;
+  // This browser has its own job in flight, so the operator's single agent is
+  // busy with THEIR current job. A new job is not refused — it queues and runs
+  // when the current one finishes — so say exactly that. (Other designers are
+  // unaffected: jobs are routed per user.)
+  return "Your agent is busy with your current job. This will start when it finishes.";
 }
 function render(job){
   myJobAgent=(job&&job.claimed_by_name)||"";
@@ -649,7 +678,12 @@ function render(job){
       var sh='<div class="progress-steps">';steps.forEach(function(s){sh+='<div class="progress-step '+(s<stage?"done":s===stage?"active":"")+'"></div>'});sh+='</div>';
       var agentTag=job.claimed_by_name?'<div class="progress-agent" style="font-size:.72rem;color:var(--muted);margin-bottom:4px">Picked up by '+esc(job.claimed_by_name)+'</div>':'';
       statusArea.innerHTML='<div class="progress-box">'+agentTag+sh+'<div class="progress-label">Step '+stage+' \u2014 '+esc(label)+'</div><div class="progress-bar"><div class="progress-bar-inner"></div></div><div class="progress-elapsed">Elapsed: <span id="stepEl">0:00</span></div><div class="progress-hint">This normally takes 2 to 4 minutes per step</div></div>';
-      resultArea.innerHTML=renderStages(job)+cancelHtml(job);
+      // Print Ready QA: the 13 checks + score are measured on the server at job
+      // creation, so show them IMMEDIATELY while the ChatGPT assessment turn is
+      // still running (renderPrintReadyResults shows "Waiting…" for the text).
+      if(job.workflow==="printready")resultArea.innerHTML=renderPrintReadyResults(job)+cancelHtml(job);
+      else if(job.workflow==="colorway")resultArea.innerHTML=renderColorwayRunning(job)+cancelHtml(job);
+      else resultArea.innerHTML=renderStages(job)+cancelHtml(job);
       // Ensure exactly one elapsed timer runs, counting from the fixed stepStart.
       if(elapsedTimer)clearInterval(elapsedTimer);
       elapsedTimer=setInterval(updElapsed,1000);
@@ -669,6 +703,12 @@ function render(job){
     if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Assign colours to the objects below.</div>';resultArea.innerHTML=renderObjectSelection(job);startPauseTimer()}
   }else if(job.status==="awaiting_ratio_selection"){
     if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Choose a target aspect ratio. Padding is added with transparency \u2014 the design is never cropped or stretched.</div>';resultArea.innerHTML=renderRatioSelection(job);startPauseTimer()}
+  }else if(job.status==="awaiting_object_instructions"){
+    if(statusOnlyChanged){clearInterval(elapsedTimer);var _idMsg=job.identify_mode==="colour"?"Colour groups found. Tell it what to change, then regenerate.":"Objects identified. Tell it what to change, then regenerate.";statusArea.innerHTML='<div class="status-box awaiting">'+_idMsg+'</div>';resultArea.innerHTML=renderObjectInstructions(job);startPauseTimer()}
+  }else if(job.status==="awaiting_colour_selection"){
+    if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Pick the garment colours you want mockups for.</div>';resultArea.innerHTML=renderColorwaySelect(job);startPauseTimer()}
+  }else if(job.status==="awaiting_adapt_selection"){
+    if(statusOnlyChanged){clearInterval(elapsedTimer);statusArea.innerHTML='<div class="status-box awaiting">Tick any colour you want the artwork adapted for, or continue with none.</div>';resultArea.innerHTML=renderColorwayAdapt(job);startPauseTimer()}
   }else if(job.status==="done"||job.status==="done_with_errors"){
     clr();var activeT=job.active_time?Math.round(job.active_time):0;
     var doneMsg=job.status==="done_with_errors"?'Done with some errors ('+fmt(activeT)+' processing time)':'All done! ('+fmt(activeT)+' processing time)';
@@ -677,6 +717,9 @@ function render(job){
     if(job.workflow==="mockup")resultArea.innerHTML=renderMockupResults(job);
     else if(job.workflow==="artwork")resultArea.innerHTML=renderArtworkResults(job);
     else if(job.workflow==="custom")resultArea.innerHTML=renderCustomResults(job);
+    else if(job.workflow==="identify")resultArea.innerHTML=renderIdentifyResults(job);
+    else if(job.workflow==="printready")resultArea.innerHTML=renderPrintReadyResults(job);
+    else if(job.workflow==="colorway")resultArea.innerHTML=renderColorwayResults(job);
     else if(job.workflow==="text"&&job.text_mode==="replace")resultArea.innerHTML=renderReplaceResults(job);
     else resultArea.innerHTML=renderStages(job);
     clearActiveJob();updBtn();addHist(job);
@@ -724,7 +767,7 @@ function renderAwaiting(job){
   for(var i=1;i<=8;i++)html+='<button class="choice-btn" data-action="select" data-job="'+job.id+'" data-choice="'+i+'">'+i+'</button>';
   html+='<button class="regen-btn" data-action="regenerate" data-job="'+job.id+'">None of these \u2014 regenerate</button></div>';
   var nextStep=stage===1?2:3;
-  var nextTpl=stage===1?(job.template_turn2||DT.turn2):(job.template_turn3||DT.turn3);
+  var nextTpl=stage===1?(job.template_turn2||tpl("turn2")):(job.template_turn3||tpl("turn3"));
   var tplId="nextTpl_"+job.id;
   html+='<div class="edit-toggle" data-action="toggle" data-target="'+tplId+'_body">Edit prompt for step '+nextStep+'</div>';
   html+='<div class="edit-body" id="'+tplId+'_body"><textarea id="'+tplId+'">'+esc(nextTpl)+'</textarea><div class="tpl-error" id="selTplErr"></div></div>';
@@ -827,7 +870,7 @@ function upMockup(file){
   fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){mockupImageFile=d.saved[0].name;$("mdzPrev").innerHTML='<img src="/input/'+mockupImageFile+'" style="max-height:180px">';updMockupBtn()}}).catch(function(e){$("mdzErr").textContent=e.message});
 }
 function renderMockupCol2(){
-  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="mcn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="mti" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="mTplTog">Edit detection prompt</div><div class="edit-body" id="mTplBody"><textarea id="tplExtract" data-prompt-id="tplExtract">'+esc(seedPromptText("tplExtract",DT.extract))+'</textarea><div class="tpl-error" id="mTplErr"></div></div><div class="edit-toggle" id="mAdvTog">Advanced settings</div><div class="edit-body" id="mAdvBody"><div class="field-group"><label>Manual grid override (leave 0 for ChatGPT auto-detect)</label></div><div style="display:flex;gap:8px"><div class="field-group"><label>Cols</label><input type="number" id="mCols" value="0" min="0" max="10"></div><div class="field-group"><label>Rows</label><input type="number" id="mRows" value="0" min="0" max="10"></div></div><div class="field-group"><label>Padding (px around each design)</label><input type="number" id="mPad" value="0" min="0" max="50"></div></div><button class="gen-btn" id="mGenBtn" disabled>Extract Artworks</button><div class="blocker-msg" id="mBlkMsg"></div>';
+  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="mcn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="mti" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="mTplTog">Edit detection prompt</div><div class="edit-body" id="mTplBody"><textarea id="tplExtract" data-prompt-id="tplExtract">'+esc(seedPromptText("tplExtract",tpl("extract")))+'</textarea><div class="tpl-error" id="mTplErr"></div></div><div class="edit-toggle" id="mAdvTog">Advanced settings</div><div class="edit-body" id="mAdvBody"><div class="field-group"><label>Manual grid override (leave 0 for ChatGPT auto-detect)</label></div><div style="display:flex;gap:8px"><div class="field-group"><label>Cols</label><input type="number" id="mCols" value="0" min="0" max="10"></div><div class="field-group"><label>Rows</label><input type="number" id="mRows" value="0" min="0" max="10"></div></div><div class="field-group"><label>Padding (px around each design)</label><input type="number" id="mPad" value="0" min="0" max="50"></div></div><button class="gen-btn" id="mGenBtn" disabled>Extract Artworks</button><div class="blocker-msg" id="mBlkMsg"></div>';
   wireClientTask("mcn","mti",updMockupBtn);
   wirePromptEdits(col2);
   $("mTplTog").onclick=function(){$("mTplTog").classList.toggle("open");$("mTplBody").classList.toggle("open")};
@@ -893,7 +936,7 @@ function renderArtworkList(){
 }
 window.removeArtwork=function(idx){artworkFiles.splice(idx,1);renderArtworkList();updArtworkBtn()};
 function renderArtworkCol2(){
-  var artTpl=DT.artwork||DT.artwork_regen||"Regenerate this artwork as a clean final version suitable for DTF garment printing.";
+  var artTpl=tpl("artwork")||tpl("artwork_regen")||"Regenerate this artwork as a clean final version suitable for DTF garment printing.";
   col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="acn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="ati" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="aTplTog">Edit regeneration prompt</div><div class="edit-body" id="aTplBody"><textarea id="tplArtRegen" data-prompt-id="tplArtRegen">'+esc(seedPromptText("tplArtRegen",artTpl))+'</textarea></div><button class="gen-btn" id="aGenBtn" disabled>Generate</button><div class="blocker-msg" id="aBlkMsg"></div>';
   wireClientTask("acn","ati",updArtworkBtn);
   wirePromptEdits(col2);
@@ -1110,6 +1153,860 @@ function submitCustomJob(){
   var body={workflow:"custom",artwork_files:[customFile],custom_operations:customOps,custom_prompts:prompts,aspect_dpi:customDpi,halftone_settings:halftone,blackout_settings:blackout,client:$("ccn").value.trim(),task_id:$("cti").value.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
   $("cGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("cGenBtn").disabled=false});
+}
+
+// === PRINT READY QA (UC-8) WORKFLOW UI =====================================
+// Upload one artwork -> the SERVER measures 13 numeric checks immediately
+// (shown as a score + table) -> ONE ChatGPT turn adds a printer's written
+// assessment. Col1 is the upload; results show the score band, the 13 checks
+// (failures first), the assessment, and a Download report button.
+var printReadyFile="";
+var printReadyDpi=0;   // 0 = server decides (file DPI / 300 fallback)
+
+function renderPrintReadyCol1(){
+  col1.innerHTML='<div class="col-title">Artwork File</div>'
+    +'<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Upload the finished artwork. It is checked for DTF print-readiness — resolution, transparency, fine detail, halo, black level and more — then a printer\u2019s written assessment is added.</p>'
+    +'<div class="drop-zone" id="prz"><p>Drag artwork here or</p><button class="browse-btn" id="przBtn">Choose file</button><input type="file" id="przFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div>'
+    +'<div class="upload-error" id="przErr"></div><div class="uploaded-preview" id="przPrev"></div>';
+  var dz=$("prz"),btn=$("przBtn"),fi=$("przFile");
+  btn.onclick=function(e){e.stopPropagation();fi.click()};dz.onclick=function(){fi.click()};
+  dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
+  dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)upPrintReady(e.dataTransfer.files[0])};
+  fi.onchange=function(){if(fi.files.length)upPrintReady(fi.files[0]);fi.value=""};
+  if(printReadyFile){$("przPrev").innerHTML='<img src="/input/'+printReadyFile+'" style="max-height:120px">'}
+}
+function upPrintReady(file){
+  $("przErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
+  if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$("przErr").textContent="Only .png .jpg .jpeg .webp accepted.";return}
+  var fd=new FormData();fd.append("files",file);
+  fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){printReadyFile=d.saved[0].name;$("przPrev").innerHTML='<img src="/input/'+printReadyFile+'" style="max-height:120px">';updPrintReadyBtn()}}).catch(function(e){$("przErr").textContent=e.message});
+}
+function renderPrintReadyCol2(){
+  var html='<div class="col-title">Print Ready QA</div>';
+  html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">A full set of measurements runs on the server the moment you submit; ChatGPT then judges the artwork against them.</p>';
+  html+='<div class="field-group"><label>Client name</label><input type="text" id="prcn" placeholder="e.g. Acme Corp"></div>';
+  html+='<div class="field-group"><label>Job number</label><input type="text" id="prti" placeholder="e.g. JOB-0042"></div>';
+  html+='<button class="gen-btn" id="prGenBtn" disabled>Check print readiness</button>';
+  html+='<div class="blocker-msg" id="prBlkMsg"></div>';
+  col2.innerHTML=html;
+  wireClientTask("prcn","prti",updPrintReadyBtn);
+  $("prGenBtn").onclick=submitPrintReadyJob;
+  updPrintReadyBtn();
+}
+window.updPrintReadyBtn=function(){
+  var btn=$("prGenBtn"),blk=$("prBlkMsg");if(!btn)return;
+  var cn=$("prcn"),ti=$("prti");
+  var hasFile=!!printReadyFile;
+  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
+  var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
+  btn.disabled=!hasFile||!hasDetails||blocked;
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is in progress.");else blk.textContent=""}
+};
+function submitPrintReadyJob(){
+  var body={workflow:"printready",artwork_files:[printReadyFile],aspect_dpi:printReadyDpi,
+    client:$("prcn").value.trim(),task_id:$("prti").value.trim(),
+    text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",
+    template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},
+    extract_mode:"auto",grid_cols:4,grid_rows:2};
+  $("prGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("prGenBtn").disabled=false});
+}
+// Score colour band: >=90 ready (green), >=70 fixable (amber), else not-ready (red).
+function _prBandColour(band){
+  return band==="ready"?"#16a34a":(band==="fixable"?"#d97706":"#dc2626");
+}
+function _prBandLabel(band){
+  return band==="ready"?"PRINT READY":(band==="fixable"?"FIXABLE":"NOT READY");
+}
+function _prChip(status){
+  var c=status==="pass"?"#16a34a":(status==="warn"?"#d97706":(status==="na"?"#94a3b8":"#dc2626"));
+  var t=status==="na"?"N/A":status.toUpperCase();
+  return '<span style="display:inline-block;min-width:44px;text-align:center;font-size:.68rem;font-weight:700;color:#fff;background:'+c+';border-radius:10px;padding:2px 8px">'+t+'</span>';
+}
+function renderPrintReadyResults(job){
+  _prCurrentJob=job;   // remembered so the Download report button can build the file
+  var rep=job.printready_report;
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+' \u2014 Print Ready QA</div>';
+  if(!rep){
+    html+='<div class="status-box failed" style="margin:8px 0">Measurements are not available for this file (it may not have reached the server, or could not be read).</div>';
+    if(job.printready_assessment){html+='<div class="col-title" style="margin-top:12px">Printer\u2019s assessment</div><div style="border:1px solid var(--border);border-radius:8px;padding:12px;white-space:pre-wrap;font-size:.85rem">'+esc(job.printready_assessment)+'</div>'}
+    return html;
+  }
+  var band=rep.band, score=rep.score, col=_prBandColour(band);
+  // Prominent score with colour band.
+  html+='<div style="display:flex;align-items:center;gap:16px;margin:6px 0 16px;padding:14px 18px;border:2px solid '+col+';border-radius:12px;background:'+col+'14">';
+  html+='<div style="font-size:2.6rem;font-weight:800;line-height:1;color:'+col+'">'+score+'<span style="font-size:1rem;font-weight:600;color:var(--muted)">/100</span></div>';
+  html+='<div><div style="font-size:1rem;font-weight:700;color:'+col+'">'+_prBandLabel(band)+'</div>';
+  html+='<div style="font-size:.75rem;color:var(--muted)">'+esc(job.printready_original_file||"")+'</div></div>';
+  html+='<button class="regen-btn" style="margin-left:auto;font-size:.78rem;padding:6px 14px" data-action="printready-download" data-job="'+job.id+'">Download report</button>';
+  html+='</div>';
+  // 13-check table, FAILURES FIRST (then warn, then pass), then by weight.
+  var order={fail:0,warn:1,pass:2,na:3};
+  var checks=(rep.checks||[]).slice().sort(function(a,b){return ((order[a.status]!==undefined?order[a.status]:4)-(order[b.status]!==undefined?order[b.status]:4))||(b.weight-a.weight)});
+  html+='<div class="col-title">Checks</div>';
+  html+='<table style="width:100%;border-collapse:collapse;font-size:.8rem;margin-bottom:16px">';
+  html+='<thead><tr style="text-align:left;color:var(--muted);font-size:.72rem">'
+      +'<th style="padding:4px 8px">Check</th><th style="padding:4px 8px">Measured</th>'
+      +'<th style="padding:4px 8px">Threshold</th><th style="padding:4px 8px">Status</th></tr></thead><tbody>';
+  for(var i=0;i<checks.length;i++){
+    var c=checks[i];
+    var bg=c.status==="fail"?"rgba(220,38,38,.06)":(c.status==="warn"?"rgba(217,119,6,.06)":"");
+    html+='<tr style="border-top:1px solid var(--border);background:'+bg+'">';
+    html+='<td style="padding:6px 8px;font-weight:600">'+esc(c.label)+(c.detail?'<div style="font-size:.68rem;color:var(--muted);font-weight:400">'+esc(c.detail)+'</div>':'')+'</td>';
+    html+='<td style="padding:6px 8px">'+esc(c.value_str)+'</td>';
+    html+='<td style="padding:6px 8px;color:var(--muted);font-size:.74rem">'+esc(c.threshold_str||"")+'</td>';
+    html+='<td style="padding:6px 8px">'+_prChip(c.status)+'</td>';
+    html+='</tr>';
+  }
+  html+='</tbody></table>';
+  // Printer's written assessment beneath.
+  html+='<div class="col-title">Printer\u2019s assessment</div>';
+  if(job.printready_assessment){
+    html+='<div style="border:1px solid var(--border);border-radius:8px;padding:12px;white-space:pre-wrap;font-size:.85rem">'+esc(job.printready_assessment)+'</div>';
+  }else{
+    html+='<div style="font-size:.8rem;color:var(--muted)">Waiting for ChatGPT\u2019s assessment\u2026</div>';
+  }
+  return html;
+}
+// Build + download a plain-text report the operator can send.
+window.printReadyDownload=function(jobId){
+  var job=(window._lastJobsById&&window._lastJobsById[jobId])||_prCurrentJob;
+  if(!job){return}
+  var rep=job.printready_report||{};
+  var lines=[];
+  lines.push("PRINT READY QA REPORT");
+  lines.push(job.client+" / "+job.task_id);
+  lines.push("File: "+(job.printready_original_file||""));
+  lines.push("");
+  lines.push(rep.summary||("Score "+(rep.score!=null?rep.score:"?")+"/100"));
+  lines.push("");
+  lines.push("PRINTER'S ASSESSMENT");
+  lines.push("--------------------");
+  lines.push(job.printready_assessment||"(none)");
+  var blob=new Blob([lines.join("\n")],{type:"text/plain"});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement("a");
+  a.href=url;
+  a.download="print_ready_"+(job.task_id||"report").replace(/[^A-Za-z0-9_-]+/g,"_")+".txt";
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  setTimeout(function(){URL.revokeObjectURL(url)},1000);
+};
+var _prCurrentJob=null;
+
+
+// === COLORWAYS (UC-6) WORKFLOW UI ==========================================
+// Upload -> local dominant colours shown -> ChatGPT recommends garment colours
+// -> operator ticks colours -> one mockup per colour (beside a pixel-accurate
+// local preview) -> operator ticks colours to adapt -> adapted versions with a
+// similarity read-out. The extracted colours + the two ticked lists are the
+// only operator inputs.
+var colorwayFile="";
+// The garment colours ticked at each pause, kept in module state so the 2s
+// status poll re-render never loses the selection. Keyed by lowercased name.
+var _cwPicked={};      // pause 1: {nameLower: {name, hex}}
+var _cwAdaptPicked={}; // pause 2: {nameLower: {name, hex}}
+var _cwJob="";         // job id the maps belong to, so a new job resets them
+
+var CW_NOTE="ChatGPT redraws the artwork to place it on a shirt, so the mockup is an impression. The preview beside it uses your actual file.";
+
+function renderColorwayCol1(){
+  col1.innerHTML='<div class="col-title">Artwork File</div>'
+    +'<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Upload the artwork. Its dominant colours are read locally and shown; ChatGPT then recommends the garment colours it suits.</p>'
+    +'<div class="drop-zone" id="cwz"><p>Drag artwork here or</p><button class="browse-btn" id="cwzBtn">Choose file</button><input type="file" id="cwzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div>'
+    +'<div class="upload-error" id="cwzErr"></div><div class="uploaded-preview" id="cwzPrev"></div>';
+  var dz=$("cwz"),btn=$("cwzBtn"),fi=$("cwzFile");
+  btn.onclick=function(e){e.stopPropagation();fi.click()};dz.onclick=function(){fi.click()};
+  dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
+  dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)upColorway(e.dataTransfer.files[0])};
+  fi.onchange=function(){if(fi.files.length)upColorway(fi.files[0]);fi.value=""};
+  if(colorwayFile){$("cwzPrev").innerHTML='<img src="/input/'+colorwayFile+'" style="max-height:120px">'}
+}
+function upColorway(file){
+  $("cwzErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
+  if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$("cwzErr").textContent="Only .png .jpg .jpeg .webp accepted.";return}
+  var fd=new FormData();fd.append("files",file);
+  fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){colorwayFile=d.saved[0].name;$("cwzPrev").innerHTML='<img src="/input/'+colorwayFile+'" style="max-height:120px">';updColorwayBtn()}}).catch(function(e){$("cwzErr").textContent=e.message});
+}
+function renderColorwayCol2(){
+  var html='<div class="col-title">Colorways</div>';
+  html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Find which garment colours the artwork suits, see it on those shirts, and optionally have it adapted for the ones you pick.</p>';
+  html+='<div class="field-group"><label>Client name</label><input type="text" id="cwcn" placeholder="e.g. Acme Corp"></div>';
+  html+='<div class="field-group"><label>Job number</label><input type="text" id="cwti" placeholder="e.g. JOB-0042"></div>';
+  html+='<button class="gen-btn" id="cwGenBtn" disabled>Recommend garment colours</button>';
+  html+='<div class="blocker-msg" id="cwBlkMsg"></div>';
+  col2.innerHTML=html;
+  wireClientTask("cwcn","cwti",updColorwayBtn);
+  $("cwGenBtn").onclick=submitColorwayJob;
+  updColorwayBtn();
+}
+window.updColorwayBtn=function(){
+  var btn=$("cwGenBtn"),blk=$("cwBlkMsg");if(!btn)return;
+  var cn=$("cwcn"),ti=$("cwti");
+  var hasFile=!!colorwayFile;
+  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
+  var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
+  btn.disabled=!hasFile||!hasDetails||blocked;
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is in progress.");else blk.textContent=""}
+};
+function submitColorwayJob(){
+  var body={workflow:"colorway",artwork_files:[colorwayFile],
+    client:$("cwcn").value.trim(),task_id:$("cwti").value.trim(),
+    text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",
+    template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},
+    extract_mode:"auto",grid_cols:4,grid_rows:2};
+  $("cwGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("cwGenBtn").disabled=false});
+}
+// Small swatch chip.
+function _cwSwatch(hex,size){var s=size||18;return '<span style="display:inline-block;width:'+s+'px;height:'+s+'px;border-radius:4px;border:1px solid rgba(0,0,0,.25);background:'+esc(hex||"#808080")+';vertical-align:middle"></span>'}
+// The extracted dominant colours row, shown from upload onward.
+function _cwExtracted(job){
+  var cols=job.colorway_colours||[];
+  if(!cols.length)return '<div style="font-size:.76rem;color:var(--muted);margin-bottom:10px">No dominant colours could be read locally; ChatGPT will judge from the image.</div>';
+  var h='<div class="col-title" style="font-size:.8rem">Artwork colours</div><div style="display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 14px">';
+  for(var i=0;i<cols.length;i++){
+    h+='<div style="display:flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:.74rem">'+_cwSwatch(cols[i].hex)+'<span>'+esc(cols[i].name||"")+(cols[i].pct!=null?' <span style="color:var(--muted)">'+cols[i].pct+'%</span>':'')+'</span></div>';
+  }
+  return h+'</div>';
+}
+function _cwSteps(active){
+  var steps=[["upload","Upload"],["recommend","Recommend"],["mockups","Mockups"],["adapt","Adapt"],["result","Result"]];
+  var order={upload:0,recommend:1,mockups:2,adapt:3,result:4};
+  var h='<div style="display:flex;gap:6px;margin:4px 0 12px;font-size:.72rem;flex-wrap:wrap">';
+  for(var i=0;i<steps.length;i++){
+    var on=order[steps[i][0]]<=order[active],cur=steps[i][0]===active;
+    h+='<span style="padding:3px 10px;border-radius:12px;border:1px solid '+(on?"var(--accent)":"var(--border)")+';'+(cur?"background:var(--accent);color:#fff;font-weight:600":"color:"+(on?"var(--accent)":"var(--muted)"))+'">'+(i+1)+'. '+steps[i][1]+'</span>';
+  }
+  return h+'</div>';
+}
+// Running view: show the extracted colours immediately while ChatGPT works.
+function renderColorwayRunning(job){
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+' \u2014 Colorways</div>';
+  html+=_cwSteps(job.stage>=2?"mockups":"recommend");
+  html+=_cwExtracted(job);
+  return html;
+}
+// PAUSE 1: recommendation cards (selectable) + a separate, non-selectable avoid list.
+function renderColorwaySelect(job){
+  if(_cwJob!==job.id){_cwPicked={};_cwAdaptPicked={};_cwJob=job.id}
+  var recs=job.colorway_recommend_parsed||[];
+  var avoid=job.colorway_avoid||[];
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+' \u2014 Colorways</div>';
+  html+=_cwSteps("recommend");
+  html+=_cwExtracted(job);
+  if(!recs.length){
+    var raw=job.colorway_recommend_raw||"";
+    html+='<div class="status-box failed" style="margin:8px 0">Could not read the recommended colours from ChatGPT\u2019s reply. Its reply is shown below \u2014 type the garment colours you want, one per line, then continue.</div>';
+    if(raw){html+='<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px;font-size:.78rem;white-space:pre-wrap;color:var(--muted);max-height:220px;overflow:auto">'+esc(raw)+'</div>'}
+    html+='<textarea id="cwManual" rows="5" placeholder="Black&#10;Navy&#10;Heather Grey" style="width:100%;box-sizing:border-box;padding:8px;font-size:.82rem;border:1px solid var(--border);border-radius:6px"></textarea>';
+    html+='<button class="gen-btn" id="cwColBtn" style="width:auto;padding:10px 20px" data-action="submit-colours" data-job="'+job.id+'">Mock up these colours</button>';
+    html+='<div class="wait-elapsed">Waiting: <span id="pauseEl">0:00</span></div>'+cancelHtml(job);
+    return html;
+  }
+  html+='<p style="font-size:.84rem;margin-bottom:8px">Tick the garment colours you want mockups for.</p>';
+  html+='<div id="cwRecs" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px">';
+  for(var i=0;i<recs.length;i++){
+    var r=recs[i],lk=(r.name||"").toLowerCase(),on=!!_cwPicked[lk];
+    html+='<div class="cw-card" data-action="cw-colour-toggle" data-name="'+esc(r.name)+'" data-hex="'+esc(r.hex)+'" style="display:flex;align-items:flex-start;gap:10px;border:2px solid '+(on?"var(--accent)":"var(--border)")+';border-radius:8px;padding:10px;cursor:pointer;'+(on?"background:rgba(37,99,235,.06)":"")+'">';
+    html+='<span class="cw-check" style="flex:0 0 auto;margin-top:2px">'+(on?"\u2611":"\u2610")+'</span>';
+    html+='<span style="flex:0 0 auto;margin-top:1px">'+_cwSwatch(r.hex,22)+'</span>';
+    html+='<div style="flex:1"><div style="font-weight:600;font-size:.84rem">'+esc(r.name)+'</div><div style="font-size:.76rem;color:var(--muted)">'+esc(r.reason||"")+'</div></div>';
+    html+='</div>';
+  }
+  html+='</div>';
+  if(avoid.length){
+    html+='<div class="status-box failed" style="margin:0 0 12px;background:rgba(220,38,38,.06);color:var(--text)"><div style="font-weight:600;font-size:.8rem;margin-bottom:4px;color:#dc2626">Avoid these garment colours</div><div style="font-size:.78rem">'+avoid.map(function(a){return esc(a)}).join(", ")+'</div></div>';
+  }
+  html+='<button class="gen-btn" id="cwColBtn" style="width:auto;padding:10px 20px" data-action="submit-colours" data-job="'+job.id+'">Mock up the ticked colours</button>';
+  html+='<div class="wait-elapsed">Waiting: <span id="pauseEl">0:00</span></div>'+cancelHtml(job);
+  return html;
+}
+window.cwColourToggle=function(el){
+  var name=el.getAttribute("data-name"),hex=el.getAttribute("data-hex"),lk=(name||"").toLowerCase();
+  if(_cwPicked[lk])delete _cwPicked[lk];else _cwPicked[lk]={name:name,hex:hex};
+  var on=!!_cwPicked[lk];
+  el.style.borderColor=on?"var(--accent)":"var(--border)";
+  el.style.background=on?"rgba(37,99,235,.06)":"";
+  var c=el.querySelector(".cw-check");if(c)c.textContent=on?"\u2611":"\u2610";
+};
+function doSubmitColours(jid){
+  var colours=[];
+  var manual=$("cwManual");
+  if(manual){
+    manual.value.split(/\n+/).forEach(function(s){s=s.trim();if(s)colours.push({name:s,hex:""})});
+  }else{
+    for(var k in _cwPicked){if(_cwPicked.hasOwnProperty(k))colours.push({name:_cwPicked[k].name,hex:_cwPicked[k].hex})}
+  }
+  if(!colours.length){statusArea.innerHTML='<div class="status-box failed">Tick at least one garment colour.</div>';return}
+  fetch("/api/jobs/"+jid+"/select-colours",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({colours:colours})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){lastStatus="";stepStart=Date.now();if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000);if(pauseTimer){clearInterval(pauseTimer);pauseTimer=null}}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+}
+// A mockup beside its pixel-accurate local preview.
+function _cwPair(job,m){
+  var mUrl=m.mockup_file?("/api/jobs/"+job.id+"/stage/mockup_"+_cwSlug(m.colour)+".png"):"";
+  var pUrl=m.preview_file?("/api/jobs/"+job.id+"/stage/preview_"+_cwSlug(m.colour)+".png"):"";
+  var h='<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px">';
+  h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'+_cwSwatch(m.hex,18)+'<span style="font-weight:600;font-size:.84rem">'+esc(m.colour)+'</span></div>';
+  h+='<div style="display:flex;gap:10px;flex-wrap:wrap">';
+  h+='<div style="flex:1;min-width:150px;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">ChatGPT mockup</div>'+(mUrl?'<a href="'+mUrl+'" target="_blank"><img src="'+mUrl+'" style="max-width:100%;max-height:200px;object-fit:contain;border-radius:6px;border:1px solid var(--border)"></a>':'<span style="color:var(--muted);font-size:.74rem">no mockup</span>')+'</div>';
+  h+='<div style="flex:1;min-width:150px;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Local preview (your file)</div>'+(pUrl?'<a href="'+pUrl+'" target="_blank"><img src="'+pUrl+'" style="max-width:100%;max-height:200px;object-fit:contain;border-radius:6px;border:1px solid var(--border)"></a>':'<span style="color:var(--muted);font-size:.74rem">no preview</span>')+'</div>';
+  h+='</div></div>';
+  return h;
+}
+function _cwSlug(name){return (name||"").trim().toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"")||"colour"}
+// PAUSE 2: each mockup beside its preview, with a tick to request an adaptation.
+function renderColorwayAdapt(job){
+  if(_cwJob!==job.id){_cwPicked={};_cwAdaptPicked={};_cwJob=job.id}
+  var mockups=job.colorway_mockups||[];
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+' \u2014 Colorways</div>';
+  html+=_cwSteps("adapt");
+  html+='<div style="font-size:.74rem;color:var(--muted);margin-bottom:8px;border-left:3px solid var(--border);padding-left:8px">'+esc(CW_NOTE)+'</div>';
+  html+='<p style="font-size:.84rem;margin-bottom:8px">Tick any colour you want the artwork adapted for (adjusts contrast/outlines to read on that fabric). Leave all unticked to finish with mockups only.</p>';
+  for(var i=0;i<mockups.length;i++){
+    var m=mockups[i],lk=(m.colour||"").toLowerCase(),on=!!_cwAdaptPicked[lk];
+    html+='<div style="border:2px solid '+(on?"var(--accent)":"var(--border)")+';border-radius:8px;margin-bottom:10px">';
+    html+='<div class="cw-adapt-row" data-action="cw-adapt-toggle" data-name="'+esc(m.colour)+'" data-hex="'+esc(m.hex)+'" style="display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--border)"><span class="cw-check">'+(on?"\u2611":"\u2610")+'</span><span style="font-size:.8rem;font-weight:600">Adapt for this colour</span></div>';
+    html+='<div style="padding:0 4px">'+_cwPair(job,m)+'</div>';
+    html+='</div>';
+  }
+  html+='<button class="gen-btn" id="cwAdaptBtn" style="width:auto;padding:10px 20px" data-action="submit-adapt" data-job="'+job.id+'">Continue</button>';
+  html+='<div class="wait-elapsed">Waiting: <span id="pauseEl">0:00</span></div>'+cancelHtml(job);
+  return html;
+}
+window.cwAdaptToggle=function(el){
+  var name=el.getAttribute("data-name"),hex=el.getAttribute("data-hex"),lk=(name||"").toLowerCase();
+  if(_cwAdaptPicked[lk])delete _cwAdaptPicked[lk];else _cwAdaptPicked[lk]={name:name,hex:hex};
+  var on=!!_cwAdaptPicked[lk];
+  var box=el.parentElement;if(box)box.style.borderColor=on?"var(--accent)":"var(--border)";
+  var c=el.querySelector(".cw-check");if(c)c.textContent=on?"\u2611":"\u2610";
+  var btn=$("cwAdaptBtn");if(btn)btn.textContent=Object.keys(_cwAdaptPicked).length?"Adapt the ticked colours":"Continue";
+};
+function doSubmitAdapt(jid){
+  var colours=[];
+  for(var k in _cwAdaptPicked){if(_cwAdaptPicked.hasOwnProperty(k))colours.push({name:_cwAdaptPicked[k].name,hex:_cwAdaptPicked[k].hex})}
+  fetch("/api/jobs/"+jid+"/select-adapt",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({colours:colours})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){lastStatus="";stepStart=Date.now();if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000);if(pauseTimer){clearInterval(pauseTimer);pauseTimer=null}}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+}
+// RESULTS: every mockup+preview pair, then the adapted versions with similarity.
+function renderColorwayResults(job){
+  var mockups=job.colorway_mockups||[];
+  var adapted=job.colorway_adapted||[];
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+' \u2014 Colorways</div>';
+  html+=_cwSteps("result");
+  html+=_cwExtracted(job);
+  if(mockups.length){
+    html+='<div class="col-title" style="font-size:.85rem">Mockups</div>';
+    html+='<div style="font-size:.74rem;color:var(--muted);margin-bottom:8px;border-left:3px solid var(--border);padding-left:8px">'+esc(CW_NOTE)+'</div>';
+    for(var i=0;i<mockups.length;i++)html+=_cwPair(job,mockups[i]);
+  }
+  if(adapted.length){
+    html+='<div class="col-title" style="font-size:.85rem;margin-top:12px">Adapted versions</div>';
+    for(var j=0;j<adapted.length;j++){
+      var a=adapted[j];
+      var aUrl=a.adapted_file?("/api/jobs/"+job.id+"/stage/adapted_"+_cwSlug(a.colour)+".png"):"";
+      html+='<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px">';
+      html+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'+_cwSwatch(a.hex,18)+'<span style="font-weight:600;font-size:.84rem">'+esc(a.colour)+'</span></div>';
+      if(a.similarity){html+=_renderSimilarity(a.similarity,"Adapted vs the original artwork")}
+      html+='<div style="text-align:center">'+(aUrl?'<a href="'+aUrl+'" target="_blank"><img src="'+aUrl+'" style="max-width:100%;max-height:240px;object-fit:contain;border-radius:6px;border:1px solid var(--border);background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/12px 12px"></a>':'<span style="color:var(--muted);font-size:.74rem">no adapted image</span>')+'</div>';
+      if(aUrl){html+='<a class="dl-btn" href="'+aUrl+'" download="'+esc(job.task_id||"adapted")+'_'+_cwSlug(a.colour)+'.png">Download</a>'}
+      html+='</div>';
+    }
+  }
+  if(job.vault_folder){html+='<div class="vault-info">Saved to:<br><code>'+esc(job.vault_folder)+'</code><br><button class="vault-btn" data-action="open-folder" data-path="'+esc(job.vault_folder)+'">Open folder</button></div>'}
+  return html;
+}
+
+
+// === ARTWORK IDENTIFICATION WORKFLOW UI ===
+// Upload one artwork -> ChatGPT lists the objects (numbered) -> operator writes
+// a free-text instruction per object -> ChatGPT regenerates with those changes.
+// Col1 mirrors Custom Operation's upload + pixel info; results reuse the aspect
+// original-vs-regenerated + similarity layout.
+var identifyFile="";
+var identifyDpi=0;   // 0 = server decides (file DPI / 300 fallback)
+var identifyMode="object";   // "object" or "colour" — how ChatGPT breaks the artwork down
+// Identify prompts read through the shared tpl() accessor (defined near DT), so
+// the built-in fallbacks and drift-warning behaviour are the same everywhere
+// and a prompt box is never empty. Kept as a named alias for readability here.
+var _identifyTpl=tpl;
+function _idModeCard(mode,title,desc){
+  var sel=identifyMode===mode;
+  var h='<div data-id-mode="'+mode+'" onclick="setIdentifyMode(\''+mode+'\')" style="border:1px solid '+(sel?'var(--accent)':'var(--border)')+';border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;'+(sel?'background:rgba(37,99,235,.06)':'')+'">';
+  h+='<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.86rem;font-weight:600"><input type="radio" name="idMode" '+(sel?'checked':'')+' style="width:16px;height:16px"> '+esc(title)+'</label>';
+  h+='<div style="font-size:.72rem;color:var(--muted);margin-left:24px">'+esc(desc)+'</div>';
+  h+='</div>';
+  return h;
+}
+window.setIdentifyMode=function(mode){
+  if(mode!=="object"&&mode!=="colour")return;
+  identifyMode=mode;
+  saveClientTask();          // keep typed client/job across the re-render
+  renderIdentifyCol1();      // refresh the card highlighting
+  renderIdentifyCol2();      // swap the listing-prompt editor + button label
+};
+function renderIdentifyCol1(){
+  // Breakdown chooser first: the operator must pick how the artwork is listed
+  // before it goes to ChatGPT. Each mode carries a one-line "when to use it".
+  var modeHtml='<div class="col-title">Break down by</div>';
+  modeHtml+='<div id="iModePick" style="margin-bottom:14px">';
+  modeHtml+=_idModeCard("object","By object","List the things in the artwork \u2014 subjects, elements, text, logos, background pieces.");
+  modeHtml+=_idModeCard("colour","By colour group","List the distinct colour regions \u2014 every area sharing a colour, even across different elements.");
+  modeHtml+='</div>';
+  col1.innerHTML=modeHtml+'<div class="col-title">Artwork File</div><div class="drop-zone" id="idz"><p>Drag artwork here or</p><button class="browse-btn" id="idzBtn">Choose file</button><input type="file" id="idzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="idzErr"></div><div class="uploaded-preview" id="idzPrev"></div><div id="iInfoBox"></div>';
+  var dz=$("idz"),btn=$("idzBtn"),fi=$("idzFile");
+  btn.onclick=function(e){e.stopPropagation();fi.click()};dz.onclick=function(){fi.click()};
+  dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
+  dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)upIdentify(e.dataTransfer.files[0])};
+  fi.onchange=function(){if(fi.files.length)upIdentify(fi.files[0]);fi.value=""};
+  if(identifyFile){$("idzPrev").innerHTML='<img src="/input/'+identifyFile+'" style="max-height:120px">';loadIdentifyInfo()}
+}
+function upIdentify(file){
+  $("idzErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
+  if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$("idzErr").textContent="Only .png .jpg .jpeg .webp accepted.";return}
+  var fd=new FormData();fd.append("files",file);
+  fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){identifyFile=d.saved[0].name;$("idzPrev").innerHTML='<img src="/input/'+identifyFile+'" style="max-height:120px">';loadIdentifyInfo();updIdentifyBtn()}}).catch(function(e){$("idzErr").textContent=e.message});
+}
+function loadIdentifyInfo(){
+  var box=$("iInfoBox");if(!box||!identifyFile)return;
+  var url="/api/artwork-info?file="+encodeURIComponent(identifyFile)+(identifyDpi>0?"&dpi="+identifyDpi:"");
+  fetch(url).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(info){renderIdentifyInfo(info)}).catch(function(e){box.innerHTML='<div style="font-size:.75rem;color:var(--muted)">'+esc(e.message)+'</div>'});
+}
+// Reuse the exact pixel-info card the Custom Operation upload shows, wired to
+// the identify DPI input so recomputing print size uses the same endpoint.
+function renderIdentifyInfo(info){
+  var box=$("iInfoBox");if(!box)return;
+  var dpiVal=identifyDpi>0?identifyDpi:info.dpi;
+  var dpiNote=info.dpi_from_file?"from file":"assumed";
+  var h='<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-top:10px;font-size:.78rem">';
+  h+='<div style="font-weight:600;margin-bottom:6px">Image info</div>';
+  h+='<div>Dimensions: <b>'+info.width+' \u00d7 '+info.height+' px</b>'+(info.total_pixels?' <span style="color:var(--muted)">('+_fmtPixels(info.total_pixels)+' px)</span>':'')+'</div>';
+  h+='<div>Aspect ratio: <b>'+esc(info.ratio_normalised||info.ratio)+'</b></div>';
+  h+='<div>Print size: <b>'+info.inches_w+' \u00d7 '+info.inches_h+' in</b></div>';
+  if(info.channels!==undefined){h+='<div>Channels: <b>'+info.channels+'</b>'+(info.has_alpha?' <span style="color:var(--muted)">+ alpha</span>':'')+', transparent <b>'+info.transparent_pixel_pct+'%</b></div>'}
+  if(info.mean_colour){h+='<div style="display:flex;align-items:center;gap:6px;margin-top:4px">Mean colour: '+_swatch(info.mean_colour)+'</div>'}
+  h+='<div style="display:flex;align-items:center;gap:6px;margin-top:8px">';
+  h+='<label style="font-size:.76rem">DPI</label>';
+  h+='<input type="number" id="iDpiInput" min="1" value="'+dpiVal+'" style="width:80px;padding:4px 6px;font-size:.76rem;border:1px solid var(--border);border-radius:4px">';
+  h+='<span style="font-size:.7rem;color:var(--muted)">('+dpiNote+')</span>';
+  h+='</div></div>';
+  box.innerHTML=h;
+  var di=$("iDpiInput");
+  if(di)di.oninput=function(){var v=parseInt(di.value,10);identifyDpi=(v&&v>0)?v:0;loadIdentifyInfo()};
+}
+function renderIdentifyCol2(){
+  var isColour=identifyMode==="colour";
+  // The listing prompt + its default text depend on the chosen mode. Key the
+  // remembered edit per mode so an edit in one mode never leaks into the other.
+  // _identifyTpl guarantees a non-empty default even if the server is stale.
+  var listTpl=isColour?_identifyTpl("identify_colour"):_identifyTpl("identify");
+  var listId=isColour?"tplIdentifyColour":"tplIdentifyObject";
+  var listLabel=isColour?"Edit prompt \u2014 list colour groups":"Edit prompt \u2014 list objects";
+  var tRegen=_identifyTpl("identify_regen");
+  var lister=isColour?"the distinct colour groups":"the objects";
+  var html='<div class="col-title">Identify &amp; Regenerate</div>';
+  html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">ChatGPT lists '+lister+' it finds. You then say what to do with each one, and it redraws the artwork with your changes applied.</p>';
+  html+='<div class="field-group"><label>Client name</label><input type="text" id="icn" placeholder="e.g. Acme Corp"></div>';
+  html+='<div class="field-group"><label>Job number</label><input type="text" id="iti" placeholder="e.g. JOB-0042"></div>';
+  // Collapsed prompt editors, remembered across re-renders via data-prompt-id.
+  html+='<div class="edit-toggle" onclick="this.classList.toggle(\'open\');this.nextElementSibling.classList.toggle(\'open\')">'+listLabel+'</div>';
+  html+='<div class="edit-body"><textarea id="tplIdentify" data-prompt-id="'+listId+'">'+esc(seedPromptText(listId,listTpl))+'</textarea></div>';
+  html+='<div class="edit-toggle" onclick="this.classList.toggle(\'open\');this.nextElementSibling.classList.toggle(\'open\')">Edit prompt \u2014 regenerate with changes</div>';
+  html+='<div class="edit-body"><textarea id="tplIdentifyRegen" data-prompt-id="tplIdentifyRegen">'+esc(seedPromptText("tplIdentifyRegen",tRegen))+'</textarea></div>';
+  html+='<button class="gen-btn" id="iGenBtn" disabled>'+(isColour?"List colour groups":"List objects")+'</button>';
+  html+='<div class="blocker-msg" id="iBlkMsg"></div>';
+  col2.innerHTML=html;
+  wireClientTask("icn","iti",updIdentifyBtn);
+  wirePromptEdits(col2);
+  $("iGenBtn").onclick=submitIdentifyJob;
+  updIdentifyBtn();
+}
+function updIdentifyBtn(){
+  var btn=$("iGenBtn"),blk=$("iBlkMsg");if(!btn)return;
+  var cn=$("icn"),ti=$("iti");
+  var hasFile=!!identifyFile;
+  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
+  var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
+  btn.disabled=!hasFile||!hasDetails||blocked;
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is in progress.");else blk.textContent=""}
+}
+function submitIdentifyJob(){
+  var tObj=$("tplIdentify"),tRegen=$("tplIdentifyRegen");
+  var body={workflow:"identify",identify_mode:identifyMode,artwork_files:[identifyFile],aspect_dpi:identifyDpi,template_identify:tObj?tObj.value:"",template_identify_regen:tRegen?tRegen.value:"",client:$("icn").value.trim(),task_id:$("iti").value.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},extract_mode:"auto",grid_cols:4,grid_rows:2};
+  $("iGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("iGenBtn").disabled=false});
+}
+// Pause: numbered object list beside the original, a free-text instruction per
+// row. Submit stays disabled until at least one instruction is filled. If
+// parsing yielded no objects, the operator can add rows and type the names.
+// Group object names by a shared FIRST-WORD prefix. A prefix used by >=2 items
+// becomes a collapsible group ("Lion", "Lion mane" -> group "Lion"); everything
+// else stays ungrouped. Returns [{prefix, items:[{name,idx}]}] with a null
+// prefix bucket for singletons, order preserved.
+// === ARTWORK IDENTIFICATION — assign changes (pause panel) ===============
+// All annotation is drawn LOCALLY by the agent/server; the browser just shows
+// the annotated image and links its numbered pins to the list rows. Typed
+// actions live in a module-level map keyed by object id so the 2s status poll
+// (which may re-render) never wipes what the operator typed.
+var _idActions={};        // { id -> action string }  (per current pause)
+var _idActionsJob="";     // job id the map belongs to, so a new job resets it
+var _idManualActions={};  // { name-key -> action } for the manual-entry fallback,
+                          // so reconciling the row list preserves edits by NAME
+                          // (not position) and survives delete/reorder.
+var OBJ_QUICK_ACTIONS=[
+  {key:"keep",label:"Keep",fill:function(){return ""},focus:false},
+  {key:"remove",label:"Remove",fill:function(n){return "Remove the "+n},focus:false},
+  {key:"replace",label:"Replace\u2026",fill:function(n){return "Replace the "+n+" with "},focus:true},
+  {key:"recolour",label:"Recolour\u2026",fill:function(n){return "Recolour the "+n+" to "},focus:true},
+  {key:"custom",label:"Custom\u2026",fill:null,focus:true}
+];
+// The rows for the current pause: object mode -> identify_objects_struct (or a
+// plain-text fallback list); colour mode -> identify_colour_groups. Normalised
+// to {id, name, bbox|null, swatch|null}.
+function _idRows(job){
+  if(job.identify_mode==="colour"){
+    return (job.identify_colour_groups||[]).map(function(g){
+      return {id:g.id, name:g.name+" ("+g.pct+"%)", bbox:null, swatch:g.hex||("rgb("+(g.rgb||[128,128,128]).join(",")+")")};
+    });
+  }
+  var struct=job.identify_objects_struct;
+  if(struct&&struct.length){
+    return struct.map(function(o){return {id:o.id, name:o.name, bbox:o.bbox||null, swatch:null}});
+  }
+  // Plain-text fallback (JSON parse failed): names only, no pins.
+  return (job.identify_objects||[]).map(function(n,i){return {id:i+1, name:n, bbox:null, swatch:null}});
+}
+function renderObjectInstructions(job){
+  if(_idActionsJob!==job.id){_idActions={};_idManualActions={};_idActionsJob=job.id}
+  var isColour=job.identify_mode==="colour";
+  var rows=_idRows(job);
+  var annUrl=(job.stage_images&&job.stage_images.annotated)?("/api/jobs/"+job.id+"/stage/annotated.png"):"";
+  var origUrl=(job.artwork_files&&job.artwork_files[0])?("/input/"+job.artwork_files[0]):"";
+  var imgUrl=annUrl||origUrl;
+  var pinned=rows.filter(function(r){return r.bbox}).length;
+
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+' \u2014 Artwork Identification ('+(isColour?"by colour group":"by object")+')</div>';
+  html+=_idSteps("assign");
+
+  if(!rows.length){
+    // Parsing produced no items. NEVER fail silently: show an explicit error,
+    // the exact raw reply ChatGPT gave (so the operator can see it did answer),
+    // and a manual box so they can type the object names and still proceed.
+    var raw=job.identify_objects_raw||"";
+    if(raw){
+      html+='<div class="status-box failed" style="margin:8px 0">Could not read a list of items from ChatGPT\u2019s reply automatically. Its reply is shown below \u2014 type the items you want to change, one per line, then Regenerate.</div>';
+      html+='<div style="font-size:.7rem;color:var(--muted);margin-bottom:4px">ChatGPT\u2019s raw reply:</div>';
+      html+='<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px;font-size:.78rem;white-space:pre-wrap;color:var(--muted);max-height:220px;overflow:auto">'+esc(raw)+'</div>';
+    }else{
+      html+='<div class="status-box failed" style="margin:8px 0">ChatGPT returned an empty reply for the object list. Type the items you want to change, one per line, then Regenerate \u2014 or cancel and try again.</div>';
+    }
+    html+='<div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">Items (one per line):</div>';
+    html+='<textarea id="idManualItems" rows="6" oninput="_idManualToRowsDebounced()" onblur="_idManualToRows()" style="width:100%;box-sizing:border-box;padding:8px;font-size:.82rem;border:1px solid var(--border);border-radius:6px" placeholder="Lion&#10;Team name text&#10;Background"></textarea>';
+    html+='<div id="idManualRows"></div>';
+    html+='<button class="gen-btn" id="iInstrBtn" style="width:auto;padding:10px 20px" data-action="submit-instructions" data-job="'+job.id+'" disabled>Regenerate with these changes</button>';
+    html+='<div class="wait-elapsed">Waiting: <span id="pauseEl">0:00</span></div>';
+    html+=cancelHtml(job);
+    return html;
+  }
+
+  html+='<div class="id-assign" style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">';
+  // LEFT: the large annotated image with a bbox overlay layer for hover links.
+  html+='<div style="flex:1 1 320px;min-width:280px;max-width:520px">';
+  if(imgUrl){
+    html+='<div id="idImgWrap" style="position:relative;display:inline-block;max-width:100%;border:1px solid var(--border);border-radius:8px;overflow:hidden">';
+    html+='<img id="idImg" src="'+imgUrl+'" style="display:block;max-width:100%;height:auto">';
+    html+='<div id="idBboxLayer" style="position:absolute;inset:0;pointer-events:none"></div>';
+    html+='</div>';
+    if(!isColour){
+      html+='<div style="font-size:.7rem;color:var(--muted);margin-top:4px">'+pinned+' of '+rows.length+' pinned. Pin positions are ChatGPT\u2019s best guess and may be approximate.</div>';
+    }
+  }
+  html+='</div>';
+
+  // RIGHT: quick input + the list of rows.
+  html+='<div style="flex:1 1 320px;min-width:300px">';
+  html+='<p style="font-size:.84rem;margin-bottom:6px">For each '+(isColour?"colour group":"object")+', pick a quick action or type your own change. Leave it blank to keep it as-is.</p>';
+  // Quick bulk input: "3: remove, 7: recolour to blue".
+  html+='<div style="display:flex;gap:6px;margin-bottom:10px">';
+  html+='<input type="text" id="idQuickInput" placeholder="e.g. 3: remove, 7: recolour to blue" style="flex:1;padding:6px 8px;font-size:.78rem;border:1px solid var(--border);border-radius:6px">';
+  html+='<button type="button" class="regen-btn" style="font-size:.74rem;padding:4px 10px;margin:0" data-action="id-quick-apply" data-job="'+job.id+'">Apply</button>';
+  html+='</div>';
+
+  html+='<div id="idRowList">';
+  for(var i=0;i<rows.length;i++)html+=_idRow(rows[i]);
+  html+='</div>';
+
+  html+='<div id="idCount" style="font-size:.74rem;color:var(--accent);font-weight:600;margin:8px 0;display:none"></div>';
+  html+='<div style="font-size:.74rem;color:var(--muted);margin-bottom:10px;border-left:3px solid var(--border);padding-left:8px">ChatGPT reproduces the artwork with only your changes; untouched areas may differ slightly.</div>';
+  html+='<button class="gen-btn" id="iInstrBtn" style="width:auto;padding:10px 20px" data-action="submit-instructions" data-job="'+job.id+'" disabled>Regenerate with these changes</button>';
+  html+='<div class="wait-elapsed">Waiting: <span id="pauseEl">0:00</span></div>';
+  html+=cancelHtml(job);
+  html+='</div>';   // right col
+  html+='</div>';   // id-assign
+
+  // After the panel is in the DOM, wire hover links + bbox layer + restore text.
+  _idCurrentRows=rows;
+  setTimeout(function(){_idWireRows(rows);_idBuildHotspots(rows);_idDrawBbox(null);updIdCount()},0);
+  return html;
+}
+// The four-step progress rail shown across the identify flow.
+function _idSteps(active){
+  var steps=[["upload","Upload"],["identify","Identify"],["assign","Assign changes"],["result","Result"]];
+  var reached=false, order={upload:0,identify:1,assign:2,result:3};
+  var h='<div style="display:flex;gap:6px;margin:4px 0 12px;font-size:.72rem;flex-wrap:wrap">';
+  for(var i=0;i<steps.length;i++){
+    var on=order[steps[i][0]]<=order[active];
+    var cur=steps[i][0]===active;
+    h+='<span style="padding:3px 10px;border-radius:12px;border:1px solid '+(on?"var(--accent)":"var(--border)")+';'
+      +(cur?"background:var(--accent);color:#fff;font-weight:600":"color:"+(on?"var(--accent)":"var(--muted)"))+'">'
+      +(i+1)+'. '+steps[i][1]+'</span>';
+  }
+  return h+'</div>';
+}
+function _idRow(row){
+  var sw=row.swatch?('<span style="flex:0 0 auto;width:18px;height:18px;border-radius:4px;border:1px solid rgba(0,0,0,.2);background:'+esc(row.swatch)+'"></span>'):'';
+  var pinNote=(row.bbox===null&&row.swatch===null)?' <span style="font-size:.66rem;color:var(--muted)">(no pin)</span>':'';
+  var h='<div class="id-row" data-id="'+row.id+'" style="margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:6px">';
+  h+='<div style="display:flex;align-items:center;gap:8px">';
+  h+='<span class="id-badge" style="flex:0 0 auto;min-width:22px;height:22px;line-height:22px;text-align:center;border-radius:50%;background:var(--border);color:var(--text);font-size:.74rem;font-weight:700">'+row.id+'</span>';
+  h+=sw;
+  h+='<span class="id-name" style="flex:1;font-size:.84rem;font-weight:600;word-break:break-word">'+esc(row.name)+pinNote+'</span>';
+  h+='</div>';
+  // Action chips.
+  h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 0 30px">';
+  for(var i=0;i<OBJ_QUICK_ACTIONS.length;i++){
+    var qa=OBJ_QUICK_ACTIONS[i];
+    h+='<button type="button" class="id-chip" data-action="id-chip" data-id="'+row.id+'" data-qa="'+qa.key+'" data-name="'+esc(row.name)+'" style="font-size:.7rem;padding:2px 9px;border:1px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);cursor:pointer">'+esc(qa.label)+'</button>';
+  }
+  h+='</div>';
+  // One free-text field (never truncated), full width.
+  h+='<input type="text" class="id-action" data-id="'+row.id+'" placeholder="leave blank to keep, or type a change" oninput="_idOnType(this)" style="width:100%;margin-top:6px;padding:6px 8px;font-size:.78rem;border:1px solid var(--border);border-radius:4px;box-sizing:border-box">';
+  h+='</div>';
+  return h;
+}
+// Wire per-row hover <-> pin highlight, and restore any typed text from state.
+function _idWireRows(rows){
+  var byId={}; rows.forEach(function(r){byId[r.id]=r});
+  resultArea.querySelectorAll(".id-row").forEach(function(el){
+    var id=el.getAttribute("data-id");
+    var inp=el.querySelector(".id-action");
+    if(inp&&(id in _idActions))inp.value=_idActions[id];
+    el.addEventListener("mouseenter",function(){_idDrawBbox(id);_idHighlightRow(id,true)});
+    el.addEventListener("mouseleave",function(){_idDrawBbox(null);_idHighlightRow(id,false)});
+  });
+}
+function _idHighlightRow(id,on){
+  var el=resultArea.querySelector('.id-row[data-id="'+id+'"]');
+  if(el)el.style.borderColor=on?"var(--accent)":(_idActions[id]&&_idActions[id].trim()?"var(--accent)":"var(--border)");
+}
+// Draw the bbox for `id` on the image overlay (or clear when id is null). Also
+// paints a small marker so the pin<->row link is obvious.
+function _idDrawBbox(id){
+  var layer=$("idBboxLayer");if(!layer)return;
+  layer.innerHTML="";
+  if(id===null||id===undefined)return;
+  var row=(_idCurrentRows||[]).filter(function(r){return String(r.id)===String(id)})[0];
+  if(!row||!row.bbox)return;
+  var b=row.bbox;
+  var box=document.createElement("div");
+  box.style.cssText="position:absolute;border:2px solid #dc2626;box-shadow:0 0 0 9999px rgba(0,0,0,.12);border-radius:2px;"
+    +"left:"+(b.x*100)+"%;top:"+(b.y*100)+"%;width:"+(b.w*100)+"%;height:"+(b.h*100)+"%";
+  layer.appendChild(box);
+}
+var _idCurrentRows=[];   // rows for the current pause, for bbox lookup on hover
+// Invisible, pointer-interactive hotspots over each pinned bbox so hovering the
+// PIN area on the image highlights (and scrolls to) the matching list row —
+// the reverse of the row->bbox link.
+function _idBuildHotspots(rows){
+  var layer=$("idBboxLayer");if(!layer)return;
+  var wrap=$("idImgWrap");if(wrap)wrap.querySelectorAll(".id-hotspot").forEach(function(h){h.remove()});
+  rows.forEach(function(r){
+    if(!r.bbox||!wrap)return;
+    var b=r.bbox;
+    var hs=document.createElement("div");
+    hs.className="id-hotspot";
+    hs.style.cssText="position:absolute;cursor:pointer;left:"+(b.x*100)+"%;top:"+(b.y*100)+"%;width:"+(b.w*100)+"%;height:"+(b.h*100)+"%";
+    hs.addEventListener("mouseenter",function(){
+      _idDrawBbox(r.id);_idHighlightRow(r.id,true);
+      var el=resultArea.querySelector('.id-row[data-id="'+r.id+'"]');
+      if(el)el.scrollIntoView({block:"nearest",behavior:"smooth"});
+    });
+    hs.addEventListener("mouseleave",function(){_idDrawBbox(null);_idHighlightRow(r.id,false)});
+    wrap.appendChild(hs);
+  });
+}
+// MUST be global: called from inline oninput="_idOnType(this)". The whole script
+// is wrapped in an IIFE, so a bare `function _idOnType(){}` would be private to
+// that closure and the inline handler (which resolves names on window) would
+// throw "ReferenceError: _idOnType is not defined". Assign to window, like every
+// other inline-handler function here.
+window._idOnType=function(inp){
+  var id=inp.getAttribute("data-id");
+  _idActions[id]=inp.value;
+  // Manual-fallback rows carry a stable name-key; record the edit there too so
+  // reconciling the row list (add/remove item lines) preserves it by NAME.
+  var rowEl=inp.closest?inp.closest(".id-row"):null;
+  var key=rowEl?rowEl.getAttribute("data-key"):null;
+  if(key)_idManualActions[key]=inp.value;
+  updIdCount();
+};
+// A chip fills the row's text field. "keep" clears it; "custom" just focuses.
+window.idChip=function(btn){
+  var id=btn.getAttribute("data-id"), key=btn.getAttribute("data-qa"), name=btn.getAttribute("data-name")||"it";
+  var qa=null;
+  for(var i=0;i<OBJ_QUICK_ACTIONS.length;i++)if(OBJ_QUICK_ACTIONS[i].key===key)qa=OBJ_QUICK_ACTIONS[i];
+  if(!qa)return;
+  var inp=resultArea.querySelector('.id-action[data-id="'+id+'"]');if(!inp)return;
+  if(qa.key==="custom"){ /* leave whatever is there */ }
+  else{ inp.value=qa.fill(name); }
+  _idOnType(inp);   // persists to _idActions and (for manual rows) _idManualActions
+  if(qa.focus){inp.focus();inp.setSelectionRange(inp.value.length,inp.value.length)}
+};
+// Parse the bulk quick input: "3: remove, 7: recolour to blue" -> fill rows.
+window.idQuickApply=function(){
+  var box=$("idQuickInput");if(!box)return;
+  var text=box.value||"";
+  // Split on commas/semicolons/newlines; each part is "<number>: <action>".
+  var parts=text.split(/[,;\n]+/);
+  var applied=0;
+  parts.forEach(function(p){
+    var m=p.match(/^\s*#?(\d+)\s*[:\-]\s*(.+?)\s*$/);
+    if(!m)return;
+    var id=m[1], action=m[2].trim();
+    var inp=resultArea.querySelector('.id-action[data-id="'+id+'"]');
+    if(inp){inp.value=action;_idActions[id]=action;applied++}
+  });
+  updIdCount();
+  if(applied)box.value="";
+};
+// Manual-entry fallback: turn the "one item per line" textarea into the same
+// .id-row rows the normal path uses, so doSubmitInstructions works unchanged.
+// Each typed item becomes a row with an EMPTY action the operator fills in; the
+// submit button enables only once at least one row has a non-empty action.
+// Debounced entry point for the items textarea's oninput. Rebuilding on every
+// keystroke is the "re-render wipes operator input" bug class we have hit
+// repeatedly, so coalesce keystrokes (400ms) and also reconcile on blur.
+var _idManualTimer=null;
+window._idManualToRowsDebounced=function(){
+  if(_idManualTimer)clearTimeout(_idManualTimer);
+  _idManualTimer=setTimeout(function(){_idManualTimer=null;window._idManualToRows()},400);
+};
+// Reconcile the manual rows with the items textarea INCREMENTALLY: add rows for
+// new items, remove rows for deleted items, and leave every existing row's
+// inputs (and focus) untouched. Actions are NEVER seeded from the item name —
+// a name is not an instruction. Actions are preserved by item NAME (trimmed,
+// case-insensitive), so deleting or reordering lines never moves an action to a
+// different item; duplicate names are matched in order (name + occurrence).
+window._idManualToRows=function(){
+  var ta=$("idManualItems"),host=$("idManualRows");if(!ta||!host)return;
+  var names=(ta.value||"").split(/\n+/).map(function(s){return s.trim()}).filter(Boolean);
+  // Build the desired key list: NAME#occurrence (lowercased for matching).
+  var seen={},desired=[];
+  for(var i=0;i<names.length;i++){
+    var lk=names[i].toLowerCase();
+    var occ=seen[lk]=(seen[lk]===undefined?0:seen[lk]+1);
+    desired.push({key:lk+"#"+occ, name:names[i]});
+  }
+  var desiredKeys={}; desired.forEach(function(d){desiredKeys[d.key]=1});
+  // 1) Remove rows whose item is gone, capturing their action first so a
+  //    re-added identical item can recover the operator's text.
+  var existing={};
+  host.querySelectorAll(".id-row").forEach(function(el){
+    var k=el.getAttribute("data-key");
+    existing[k]=el;
+    if(!desiredKeys[k]){
+      var inp=el.querySelector(".id-action");
+      if(inp&&inp.value.trim())_idManualActions[k]=inp.value;   // remember by name-key
+      el.parentNode.removeChild(el);
+    }
+  });
+  // 2) Add/reorder rows to match desired order; keep existing DOM nodes as-is.
+  for(var j=0;j<desired.length;j++){
+    var d=desired[j], node=existing[d.key];
+    if(!node){
+      // New row. Render via _idRow (id = 1-based position, matching the parsed
+      // path) then tag it with its stable name-key and restore any remembered
+      // action for that name. Do NOT seed from the name.
+      var tmp=document.createElement("div");
+      tmp.innerHTML=_idRow({id:j+1,name:d.name,bbox:null,swatch:null});
+      node=tmp.firstChild;
+      node.setAttribute("data-key",d.key);
+      var inp2=node.querySelector(".id-action");
+      if(inp2){
+        var remembered=_idManualActions[d.key];
+        inp2.value=(remembered!==undefined&&remembered!==null)?remembered:"";
+      }
+    }
+    host.appendChild(node);   // appendChild moves existing nodes into order
+  }
+  updIdCount();
+};
+// Count filled actions, mark changed rows, gate the submit button.
+window.updIdCount=function(){
+  var filled=0;
+  resultArea.querySelectorAll(".id-row").forEach(function(el){
+    var inp=el.querySelector(".id-action");
+    var on=inp&&inp.value.trim();
+    if(on)filled++;
+    el.style.borderColor=on?"var(--accent)":"var(--border)";
+    el.style.background=on?"rgba(37,99,235,.06)":"";
+    var badge=el.querySelector(".id-badge");
+    if(badge)badge.style.background=on?"var(--accent)":"var(--border)";
+    if(badge)badge.style.color=on?"#fff":"var(--text)";
+  });
+  var cnt=$("idCount"),btn=$("iInstrBtn");
+  if(cnt){
+    if(filled>0){cnt.style.display="";cnt.textContent=filled+" "+(filled===1?"change":"changes")+" ready"}
+    else{cnt.style.display="none";cnt.textContent=""}
+  }
+  if(btn)btn.disabled=filled<1;
+};
+function doSubmitInstructions(jid){
+  var instructions=[];
+  resultArea.querySelectorAll(".id-row").forEach(function(el){
+    var id=el.getAttribute("data-id");
+    var name=(el.querySelector(".id-name")||{}).textContent||"";
+    name=name.replace(/\s*\(no pin\)\s*$/,"").trim();
+    var inp=el.querySelector(".id-action");
+    var action=inp?inp.value.trim():"";
+    if(name&&action)instructions.push({id:parseInt(id,10)||id, object:name, action:action});
+  });
+  if(!instructions.length){statusArea.innerHTML='<div class="status-box failed">Add a change to at least one item.</div>';return}
+  fetch("/api/jobs/"+jid+"/object-instructions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instructions:instructions})}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(){lastStatus="";stepStart=Date.now();if(!elapsedTimer)elapsedTimer=setInterval(updElapsed,1000)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>'});
+}
+// Results: original vs regenerated side by side + the similarity read-out,
+// exactly as the aspect-ratio regenerate step presents it.
+function renderIdentifyResults(job){
+  var si=job.stage_images||{};
+  var af=job.artwork_files||[];
+  var origUrl=af[0]?("/input/"+af[0]):"";
+  var finalUrl=si.final?("/api/jobs/"+job.id+"/stage/final.png"):"";
+  var instr=job.object_instructions||[];
+  var isColour=job.identify_mode==="colour";
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
+  html+=_idSteps("result");
+  // Make it clear how the list was produced.
+  html+='<div style="font-size:.74rem;color:var(--muted);margin-bottom:8px">Listed '+(isColour?"by colour group":"by object")+'</div>';
+  if(instr.length){
+    html+='<div style="font-size:.8rem;margin-bottom:8px">Changes applied:<ul style="margin:4px 0 0;padding-left:18px">';
+    for(var k=0;k<instr.length;k++){
+      var _pfx=(instr[k].id!==undefined&&instr[k].id!==null)?(instr[k].id+" ("+esc(instr[k].object)+")"):esc(instr[k].object);
+      html+='<li>'+_pfx+' \u2014 '+esc(instr[k].action)+'</li>';
+    }
+    html+='</ul></div>';
+  }
+  // Similarity FIRST and prominent — the same read-out the aspect-ratio step
+  // shows. A low score tells the operator at a glance that too much changed
+  // (e.g. the whole scene was replaced instead of the one object), before they
+  // even look at the images.
+  if(job.identify_similarity){html+=_renderSimilarity(job.identify_similarity,"Compared against the original artwork")}
+  html+='<div style="display:flex;gap:10px;margin:10px 0 8px">';
+  html+='<div style="flex:1;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Original</div>'+(origUrl?'<a href="'+origUrl+'" target="_blank"><img src="'+origUrl+'" style="max-width:100%;max-height:220px;object-fit:contain;border-radius:6px;border:1px solid var(--border)"></a>':'<span style="color:var(--muted);font-size:.76rem">n/a</span>')+'</div>';
+  html+='<div style="flex:1;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Regenerated</div>'+(finalUrl?'<a href="'+finalUrl+'" target="_blank"><img src="'+finalUrl+'" style="max-width:100%;max-height:220px;object-fit:contain;border-radius:6px;border:1px solid var(--border);background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/12px 12px"></a>':'<span style="color:var(--muted);font-size:.76rem">n/a</span>')+'</div>';
+  html+='</div>';
+  if(finalUrl){html+='<a class="dl-btn" href="'+finalUrl+'" download="'+esc(job.task_id||"final")+'.png">Download to send to client</a>'+vaultBtn(si.final,job.client,job.task_id)}
+  var prompts=job.prompts||[];
+  if(prompts.length>=1){var p0="pt_id_"+Math.random().toString(36).slice(2,6);html+='<div class="prompt-toggle" data-action="toggle" data-target="'+p0+'">Prompt used \u2014 list objects</div><div class="prompt-content" id="'+p0+'">'+esc(prompts[0])+'</div>'}
+  if(prompts.length>=2){var p1="pt_ir_"+Math.random().toString(36).slice(2,6);html+='<div class="prompt-toggle" data-action="toggle" data-target="'+p1+'">Prompt used \u2014 regenerate</div><div class="prompt-content" id="'+p1+'">'+esc(prompts[prompts.length-1])+'</div>'}
+  if(job.vault_folder){html+='<div class="vault-info">Saved to:<br><code>'+esc(job.vault_folder)+'</code><br><button class="vault-btn" data-action="open-folder" data-path="'+esc(job.vault_folder)+'">Open folder</button></div>'}
+  return html;
 }
 
 function doAcceptCrops(jid){

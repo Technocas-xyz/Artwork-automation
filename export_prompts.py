@@ -41,6 +41,28 @@ CATALOGUE: dict[str, tuple[str, int, str]] = {
     # --- Artwork Generation ---
     "ARTWORK_REGENERATE": ("artwork", 1, "Clean up a supplied artwork for DTF printing"),
 
+    # --- Artwork Identification ---
+    # IMPORTANT: IDENTIFY_OBJECTS returns ONLY JSON [{id,name,cells}]; the agent
+    # parses that (falling back to a plain list). Re-run this export and re-import
+    # into Decoinks whenever these change, or the DB will keep serving an older
+    # version (this is exactly what caused "No items were identified" — a stale
+    # plain-list AIS.IDENTIFY.OBJECTS was served instead of the JSON prompt).
+    "IDENTIFY_OBJECTS": ("identify", 1, "List objects as JSON with grid cells (object mode)"),
+    "IDENTIFY_COLOR_GROUPS": ("identify", 1, "List distinct colour groups (colour mode; usually computed locally)"),
+    "IDENTIFY_REGENERATE": ("identify", 2, "Reproduce the artwork with only the operator's per-object changes"),
+
+    # --- Print Ready QA (UC-8) ---
+    # Measurements are taken locally (src/printready.py); this is the single
+    # ChatGPT turn that gives the printer's written judgement of the artwork.
+    "PRINTREADY_REVIEW": ("printready", 1, "Printer's assessment of a DTF artwork, given local measurements"),
+
+    # --- Colorways (UC-6) ---
+    # Dominant colours are extracted locally; ChatGPT recommends garment colours,
+    # then mocks up the artwork per chosen colour, then adapts it per colour.
+    "COLORWAY_SUGGEST": ("colorway", 1, "Recommend garment colours for the artwork, given its dominant colours"),
+    "COLORWAY_MOCKUP": ("colorway", 2, "Mock up the artwork on a chosen garment colour"),
+    "COLORWAY_ADAPT": ("colorway", 3, "Adapt the artwork to read well on a chosen garment colour"),
+
     # --- Custom Operations ---
     "CUSTOM_RECONSTRUCT": ("custom", 1, "Redraw the design cleanly at high resolution"),
     "CUSTOM_REMOVE_BACKGROUND": ("custom", 2, "Isolate the design on transparency"),

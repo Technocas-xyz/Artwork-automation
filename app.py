@@ -18,6 +18,7 @@ import os
 import re
 import threading
 import time
+import traceback
 import uuid
 import zipfile
 from collections import deque
@@ -33,6 +34,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from config.agent_version import AGENT_CODE_VERSION
 from config.job_options import JOB_OPTIONS, PARAMETERISED_OPTIONS
 from config.workflows import TEXT_TURN_1, TEXT_TURN_2, TEXT_TURN_3, TEXT_REPLACE_COLLAGE, TEXT_REPLACE_FINAL, EXTRACT_CONTACT_SHEET, EXTRACT_SINGLE, ARTWORK_REGENERATE, CUSTOM_OPERATIONS
+from config.workflows import template_keys_json, WORKFLOW_REQUIRED_FIELDS
 from src.aspect import image_info
 from src.auth import (
     APP_USERNAME, APP_PASSWORD_HASH, verify_password, sign_cookie,
@@ -351,6 +353,10 @@ class GenerateRequest(BaseModel):
     template_regen: str = ""
     # Artwork Generation fields
     artwork_files: list[str] = []
+    # Artwork Identification fields (operator-editable prompts)
+    identify_mode: str = "object"   # "object" or "colour" — how to break the artwork down
+    template_identify: str = ""
+    template_identify_regen: str = ""
     # Custom Operation fields
     custom_operations: list[str] = []
     custom_prompts: dict[str, str] = {}  # {operation_key: edited_prompt}
@@ -395,6 +401,23 @@ class RatioSelectionRequest(BaseModel):
 
 class ObjectSelectionRequest(BaseModel):
     choices: list[dict]  # [{object: str, color: str}]
+
+
+class ObjectInstructionsRequest(BaseModel):
+    # Artwork Identification: per-object free-text instruction.
+    instructions: list[dict]  # [{object: str, action: str}]
+
+
+class ColourSelectionRequest(BaseModel):
+    # Colorways pause 1: the garment colours the operator ticked. Each may carry
+    # an optional operator-supplied hex when the name was unknown to the server.
+    colours: list[dict]  # [{name: str, hex: str}]
+
+
+class AdaptSelectionRequest(BaseModel):
+    # Colorways pause 2: which garment colours to ADAPT the artwork for. MAY be
+    # empty — the operator can choose no adaptation and still finish.
+    colours: list[dict] = []  # [{name: str, hex: str}]
 
 
 class TextConfirmRequest(BaseModel):
@@ -518,7 +541,8 @@ _AGENT_BUSY_STATUSES = (
     "running", "awaiting_selection", "awaiting_text_confirmation",
     "awaiting_crop_review", "awaiting_multi_selection",
     "awaiting_number_selection", "awaiting_object_selection",
-    "awaiting_ratio_selection",
+    "awaiting_ratio_selection", "awaiting_object_instructions",
+    "awaiting_colour_selection", "awaiting_adapt_selection",
     # Session dropped mid-job: the agent holds the job paused and will resume it
     # once the designer signs in again. It must stay assigned to that agent and
     # the agent must not pick up other work while paused.
@@ -770,21 +794,21 @@ def _live_template(name: str) -> str:
 
 @app.get("/api/templates")
 def get_templates():
-    # NOTE: custom operations are served via /api/custom-operations with their templates embedded.
-    # Every text/extraction/artwork prompt — including the two "replace text in a
-    # design" prompts — goes through the live registry so they are managed from
-    # Prompt Management, with config/workflows.py as the fallback.
-    return {"turn1": _live_template("TEXT_TURN_1"),
-            "turn2": _live_template("TEXT_TURN_2"),
-            "turn3": _live_template("TEXT_TURN_3"),
-            "replace_collage": _live_template("TEXT_REPLACE_COLLAGE"),
-            "replace_final": _live_template("TEXT_REPLACE_FINAL"),
-            "image_element_collage": _live_template("TEXT_IMAGE_ELEMENT_COLLAGE"),
-            "image_style_collage": _live_template("TEXT_IMAGE_STYLE_COLLAGE"),
-            "extract": _live_template("EXTRACT_CONTACT_SHEET"),
-            "regen": _live_template("EXTRACT_SINGLE"),
-            "artwork_regen": _live_template("ARTWORK_REGENERATE"),
-            "artwork": _live_template("ARTWORK_REGENERATE")}
+    """Live prompt text for every workflow's editable prompts, keyed exactly as
+    the UI reads them.
+
+    The key list is NOT hardcoded here: it comes from WORKFLOW_TEMPLATE_KEYS in
+    config/workflows.py (via template_keys_json), the single source both this
+    endpoint and the browser share. A new workflow adds its keys there once and
+    both sides get them — the endpoint and the UI can no longer drift apart.
+
+    NOTE: custom operations are served via /api/custom-operations with their
+    templates embedded. Text/extraction/artwork/identify prompts go through the
+    live registry so they are managed from Prompt Management, with
+    config/workflows.py as the fallback.
+    """
+    return {json_key: _live_template(registry_name)
+            for json_key, registry_name in template_keys_json().items()}
 
 
 @app.get("/api/custom-operations")
@@ -842,6 +866,209 @@ def artwork_info(file: str, dpi: int | None = None):
         raise HTTPException(status_code=400, detail=f"Could not read image: {exc}")
 
 
+def _field_present(req: "GenerateRequest", field: str) -> bool:
+    """True when the request carries a usable value for `field`.
+
+    A list field passes when non-empty; any other (string) field passes when its
+    stripped value is truthy. This is the only place that interprets a declared
+    required field, so every workflow's presence checks behave identically."""
+    value = getattr(req, field, None)
+    if isinstance(value, list):
+        return bool(value)
+    return bool((value or "").strip() if isinstance(value, str) else value)
+
+
+def _validate_workflow_request(req: "GenerateRequest", created_by: str) -> dict:
+    """Validate a submission against the requirements of ITS OWN workflow only.
+
+    Presence checks are declared in WORKFLOW_REQUIRED_FIELDS (config/workflows.py)
+    so a workflow can never accidentally check another workflow's field — it only
+    names its own. Rules that are more than "field present" (placeholder
+    presence, enum choices, the custom Prompt-Management gate) live in the
+    per-workflow hook below, dispatched by workflow value so they never fall
+    through to another workflow's block.
+
+    Returns a dict of derived values create_job needs (currently custom_op_labels).
+    Raises HTTPException(400/409) on the first failure.
+    """
+    workflow = req.workflow or ""
+
+    # 1) Declared required fields — checked for THIS workflow only. The text
+    #    workflow's requirements depend on text_mode, so it is handled in the hook.
+    for field, message in WORKFLOW_REQUIRED_FIELDS.get(workflow, []):
+        if not _field_present(req, field):
+            raise HTTPException(status_code=400, detail=message)
+
+    # 2) Workflow-specific rules that presence checks can't express.
+    derived: dict = {}
+    if workflow == "text":
+        _validate_text_workflow(req)
+    elif workflow == "mockup":
+        if req.extract_mode == "grid" and (req.grid_cols < 1 or req.grid_rows < 1):
+            raise HTTPException(status_code=400, detail="Grid cols and rows must be at least 1.")
+    elif workflow == "identify":
+        if req.identify_mode not in ("object", "colour"):
+            raise HTTPException(status_code=400, detail="Choose how to break the artwork down: by object or by colour group.")
+    elif workflow == "custom":
+        derived["custom_op_labels"] = _validate_custom_workflow(req, created_by)
+
+    return derived
+
+
+def _validate_text_workflow(req: "GenerateRequest") -> None:
+    """Text-workflow rules, split by input mode. Each mode reads only its own
+    fields; none touches another mode's or another workflow's fields."""
+    if req.text_mode == "replace":
+        if not req.replace_image.strip():
+            raise HTTPException(status_code=400, detail="Upload the design image to replace text in.")
+        if not req.replace_new_text.strip():
+            raise HTTPException(status_code=400, detail="Enter the replacement text.")
+        c1 = req.template_replace_collage.strip() or _live_template("TEXT_REPLACE_COLLAGE")
+        if "{new_text}" not in c1 or "{target_clause}" not in c1:
+            raise HTTPException(status_code=400, detail="Collage prompt must contain {new_text} and {target_clause} placeholders.")
+        f1 = req.template_replace_final.strip() or _live_template("TEXT_REPLACE_FINAL")
+        if "{n}" not in f1:
+            raise HTTPException(status_code=400, detail="Final prompt must contain the {n} placeholder.")
+    elif req.text_mode in ("image_element", "image_style"):
+        if not req.reference_image.strip():
+            raise HTTPException(status_code=400, detail="Upload the reference image.")
+        if not req.text.strip():
+            raise HTTPException(status_code=400, detail="Enter the wording for the design.")
+        reg_name = "TEXT_IMAGE_ELEMENT_COLLAGE" if req.text_mode == "image_element" else "TEXT_IMAGE_STYLE_COLLAGE"
+        t1 = req.template_turn1.strip() or _live_template(reg_name)
+        if "{text}" not in t1:
+            raise HTTPException(status_code=400, detail="Step 1 prompt must contain {text} placeholder.")
+    else:
+        if not req.text.strip() and not req.text_image.strip():
+            raise HTTPException(status_code=400, detail="Enter design text or upload an image containing the text.")
+        t1 = req.template_turn1.strip() if req.template_turn1.strip() else _live_template("TEXT_TURN_1")
+        if "{text}" not in t1:
+            raise HTTPException(status_code=400, detail="Step 1 prompt must contain {text} placeholder.")
+
+
+def _validate_custom_workflow(req: "GenerateRequest", created_by: str) -> dict:
+    """Custom-workflow Prompt-Management gate. Returns custom_op_labels."""
+    dyn_ops = {o["key"]: o for o in prompt_registry.dynamic_operations()}
+    pm_ops = [op for op in req.custom_operations if op.startswith(DYNAMIC_OP_PREFIX)]
+    gone = [op for op in pm_ops if op not in dyn_ops]
+    if gone:
+        raise HTTPException(status_code=409, detail="An operation you ticked is no longer published in Prompt Management. Reload the page.")
+    if pm_ops and not any(_version_at_least(a.get("code_version"), MIN_AGENT_FOR_PM_OPERATIONS)
+                          for a in _online_agents_for_user(created_by)):
+        raise HTTPException(status_code=409, detail="Your Artwork Agent is updating to run Prompt Management operations. Try again in a minute.")
+    return {op: dyn_ops[op]["label"] for op in pm_ops}
+
+
+def _precompute_identify_colour(job: dict, artwork_file: str) -> None:
+    """Colour-group identification runs entirely LOCALLY with k-means — no
+    ChatGPT turn. cv2 lives on the SERVER (the packaged agent excludes it), so
+    the server does this work here at job creation and hands the result to the
+    agent on the job.
+
+    Writes the numbered overlay to OUTPUT_DIR and registers it under
+    stage_images['annotated'] so the existing /stage/annotated.png route serves
+    it, exactly like an agent-produced stage image. Sets identify_colour_groups
+    and identify_has_transparency. Never raises — a failure just leaves the
+    groups empty and the UI shows a plain message."""
+    try:
+        from src.annotate import colour_groups, has_transparency
+        src = INPUT_DIR / Path(artwork_file).name
+        if not src.exists():
+            # The artwork must be in INPUT_DIR before precompute; otherwise the
+            # groups come back empty for a reason that has nothing to do with
+            # k-means. Say so explicitly instead of a bare "0 groups".
+            print(f"[identify] colour precompute: artwork not found at {src} "
+                  f"(cwd={Path.cwd()}) — groups will be empty until the file is present.")
+            job["identify_colour_groups"] = []
+            return
+        data = src.read_bytes()
+        job["identify_has_transparency"] = has_transparency(data)
+        result = colour_groups(data)
+        job["identify_colour_groups"] = result["groups"]
+        overlay_name = f"{job['id']}_colour.png"
+        (OUTPUT_DIR / overlay_name).write_bytes(result["overlay"])
+        job.setdefault("stage_images", {})["annotated"] = overlay_name
+        job["identify_annotated_file"] = overlay_name
+        print(f"[identify] colour groups precomputed: {len(result['groups'])} group(s) -> {overlay_name}")
+    except Exception as exc:
+        print(f"[identify] colour precompute failed: {exc}")
+        job["identify_colour_groups"] = []
+
+
+def _precompute_printready(job: dict, artwork_file: str) -> None:
+    """UC-8 Print Ready QA: the 13 numeric measurements run LOCALLY on the SERVER
+    (Pillow/numpy/cv2 live here; the packaged agent has none), exactly like the
+    colour-group precompute. The full report is stored on the job — under BOTH
+    printready_report and printready_measurements (the canonical key the agent
+    reads) — BEFORE the agent can claim the job, so the operator sees the score +
+    13 checks immediately and the agent only runs the ChatGPT judgement turn.
+
+    On ANY failure this records printready_error on the job (with the reason) so
+    the workflow FAILS with a clear message rather than silently degrading to a
+    visual-only review. Every branch logs the file name, resolved absolute path,
+    and whether it exists; exceptions log a full traceback."""
+    job["printready_report"] = None
+    job["printready_measurements"] = None
+    job["printready_error"] = ""
+    try:
+        from src.printready import measure_print_ready
+        src = INPUT_DIR / Path(artwork_file).name
+        resolved = src.resolve()
+        exists = src.exists()
+        print(f"[printready] precompute: file={artwork_file!r} resolved={resolved} "
+              f"exists={exists} cwd={Path.cwd()} INPUT_DIR={INPUT_DIR.resolve()}")
+        if not exists:
+            msg = (f"Artwork not found on the server at {resolved}. "
+                   f"The file must be uploaded to INPUT_DIR before the Print Ready QA job is created.")
+            print(f"[printready] precompute FAILED: {msg}")
+            job["printready_error"] = msg
+            return
+        data = src.read_bytes()
+        report = measure_print_ready(data, dpi_override=job.get("aspect_dpi") or None,
+                                     file_size_bytes=len(data))
+        checks = report.get("checks") or []
+        if len(checks) != 13:
+            # A partial report means a measurement path is broken — surface it.
+            print(f"[printready] WARNING: expected 13 checks, got {len(checks)}.")
+        job["printready_report"] = report
+        job["printready_measurements"] = report
+        job["printready_original_file"] = src.name
+        print(f"[printready] measured {src.name}: score {report['score']}/100 "
+              f"({report['band']}), {len(checks)} checks.")
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(f"[printready] precompute EXCEPTION: {exc}\n{tb}")
+        job["printready_error"] = f"Print-readiness measurement failed: {exc}"
+
+
+def _precompute_colorway(job: dict, artwork_file: str) -> None:
+    """UC-6 Colorways: extract the artwork's dominant colours + transparency
+    LOCALLY on the SERVER (cv2 lives here; the packaged agent has none), exactly
+    like the colour-group precompute. Stored on the job so the operator sees the
+    swatches the moment the job opens and the agent hands them to ChatGPT as the
+    {colours} data. Never raises — a failure leaves empty colours and ChatGPT
+    still gives a visual-only recommendation."""
+    job["colorway_colours"] = []
+    job["colorway_has_transparency"] = None
+    try:
+        from src.colorway import extract_colours
+        src = INPUT_DIR / Path(artwork_file).name
+        if not src.exists():
+            print(f"[colorway] precompute: artwork not found at {src.resolve()} "
+                  f"(cwd={Path.cwd()}) — colours will be empty until the file is present.")
+            return
+        data = src.read_bytes()
+        res = extract_colours(data)
+        job["colorway_colours"] = res.get("colours", [])
+        job["colorway_has_transparency"] = res.get("has_transparency")
+        job["colorway_original_file"] = src.name
+        print(f"[colorway] extracted {len(job['colorway_colours'])} dominant colour(s) "
+              f"from {src.name}; transparency={job['colorway_has_transparency']}.")
+    except Exception as exc:
+        print(f"[colorway] precompute failed: {exc}")
+        job["colorway_colours"] = []
+
+
 @app.post("/api/generate")
 def create_job(req: GenerateRequest, request: Request):
     print(f"[create_job] workflow={req.workflow!r} mockup_image={req.mockup_image!r} files={req.files} artwork_files={req.artwork_files}")
@@ -866,65 +1093,12 @@ def create_job(req: GenerateRequest, request: Request):
     # when it finishes. Another user's busy agent never enters this decision.
     _agent_busy_with_own = not _user_has_free_agent(_created_by)
 
-    if req.workflow == "text":
-        if req.text_mode == "replace":
-            # Replace-text-in-a-design: needs the design image and the new wording.
-            # Prompt fallbacks come from the live registry (managed from Prompt
-            # Management), same as every other text prompt.
-            if not req.replace_image.strip():
-                raise HTTPException(status_code=400, detail="Upload the design image to replace text in.")
-            if not req.replace_new_text.strip():
-                raise HTTPException(status_code=400, detail="Enter the replacement text.")
-            c1 = req.template_replace_collage.strip() or _live_template("TEXT_REPLACE_COLLAGE")
-            if "{new_text}" not in c1 or "{target_clause}" not in c1:
-                raise HTTPException(status_code=400, detail="Collage prompt must contain {new_text} and {target_clause} placeholders.")
-            f1 = req.template_replace_final.strip() or _live_template("TEXT_REPLACE_FINAL")
-            if "{n}" not in f1:
-                raise HTTPException(status_code=400, detail="Final prompt must contain the {n} placeholder.")
-        elif req.text_mode in ("image_element", "image_style"):
-            # UC-3: wording plus a client reference image. Both required.
-            if not req.reference_image.strip():
-                raise HTTPException(status_code=400, detail="Upload the reference image.")
-            if not req.text.strip():
-                raise HTTPException(status_code=400, detail="Enter the wording for the design.")
-            reg_name = "TEXT_IMAGE_ELEMENT_COLLAGE" if req.text_mode == "image_element" else "TEXT_IMAGE_STYLE_COLLAGE"
-            t1 = req.template_turn1.strip() or _live_template(reg_name)
-            if "{text}" not in t1:
-                raise HTTPException(status_code=400, detail="Step 1 prompt must contain {text} placeholder.")
-        else:
-            if not req.text.strip() and not req.text_image.strip():
-                raise HTTPException(status_code=400, detail="Enter design text or upload an image containing the text.")
-            t1 = req.template_turn1.strip() if req.template_turn1.strip() else _live_template("TEXT_TURN_1")
-            if "{text}" not in t1:
-                raise HTTPException(status_code=400, detail="Step 1 prompt must contain {text} placeholder.")
-    elif req.workflow == "mockup":
-        if not req.mockup_image.strip():
-            raise HTTPException(status_code=400, detail="Upload a mockup image first.")
-        if req.extract_mode == "grid":
-            if req.grid_cols < 1 or req.grid_rows < 1:
-                raise HTTPException(status_code=400, detail="Grid cols and rows must be at least 1.")
-    elif req.workflow == "artwork":
-        if not req.artwork_files:
-            raise HTTPException(status_code=400, detail="Upload at least one artwork file.")
-    elif req.workflow == "custom":
-        if not req.artwork_files:
-            raise HTTPException(status_code=400, detail="Upload an artwork file.")
-        if not req.custom_operations:
-            raise HTTPException(status_code=400, detail="Select at least one operation.")
-        dyn_ops = {o["key"]: o for o in prompt_registry.dynamic_operations()}
-        pm_ops = [op for op in req.custom_operations if op.startswith(DYNAMIC_OP_PREFIX)]
-        gone = [op for op in pm_ops if op not in dyn_ops]
-        if gone:
-            raise HTTPException(status_code=409, detail="An operation you ticked is no longer published in Prompt Management. Reload the page.")
-        if pm_ops and not any(_version_at_least(a.get("code_version"), MIN_AGENT_FOR_PM_OPERATIONS)
-                              for a in _online_agents_for_user(_created_by)):
-            raise HTTPException(status_code=409, detail="Your Artwork Agent is updating to run Prompt Management operations. Try again in a minute.")
-        custom_op_labels = {op: dyn_ops[op]["label"] for op in pm_ops}
-    else:
-        if not req.files:
-            raise HTTPException(status_code=400, detail="Select at least one image.")
-        if not req.options:
-            raise HTTPException(status_code=400, detail="Select at least one option.")
+    # Validate against THIS workflow's own requirements only. See
+    # _validate_workflow_request — one helper driven by the per-workflow
+    # declarations in config/workflows.py, so no workflow can check another's
+    # fields. Returns any derived values (e.g. custom_op_labels).
+    _validation = _validate_workflow_request(req, _created_by)
+    custom_op_labels = _validation.get("custom_op_labels", {})
 
     # The prompts this job will run, frozen now: a version published while the
     # job is running does not change it half way. A box the designer changed is
@@ -962,6 +1136,16 @@ def create_job(req: GenerateRequest, request: Request):
         template_regen = _pick("EXTRACT_SINGLE", req.template_regen.strip())
     else:
         template_regen = req.template_regen.strip()
+    # Artwork Identification: the listing prompt depends on the chosen mode
+    # (object vs colour group); the regenerate prompt is shared. Both are edited
+    # and version-tracked like every other managed prompt.
+    if req.workflow == "identify":
+        _identify_listing = "IDENTIFY_COLOR_GROUPS" if req.identify_mode == "colour" else "IDENTIFY_OBJECTS"
+        template_identify = _pick(_identify_listing, req.template_identify.strip())
+        template_identify_regen = _pick("IDENTIFY_REGENERATE", req.template_identify_regen.strip())
+    else:
+        template_identify = ""
+        template_identify_regen = ""
     custom_prompts = dict(req.custom_prompts or {})
     for ui_key, name in _CUSTOM_PROMPT_KEYS.items():
         if name in live:
@@ -1016,6 +1200,32 @@ def create_job(req: GenerateRequest, request: Request):
         "artwork_files": req.artwork_files, "artwork_errors": [],
         "custom_operations": req.custom_operations, "custom_prompts": custom_prompts,
         "custom_operation_labels": custom_op_labels if req.workflow == "custom" else {},
+        # Artwork Identification workflow state.
+        "identify_mode": req.identify_mode if req.workflow == "identify" else "",
+        "template_identify": template_identify,
+        "template_identify_regen": template_identify_regen,
+        "object_instructions": [],
+        "identify_objects": [], "identify_objects_raw": "",
+        "identify_objects_struct": [], "identify_annotated_file": "",
+        "identify_grid_file": "", "identify_parse_ok": None,
+        "identify_has_transparency": None, "identify_colour_groups": [],
+        "identify_original_file": "", "identify_final_file": "",
+        "identify_similarity": None,
+        # Print Ready QA (UC-8): measurements precomputed on the server; the
+        # agent fills printready_assessment with the ChatGPT judgement. No
+        # leading underscore so both survive _public_job to the UI.
+        "printready_report": None, "printready_measurements": None,
+        "printready_assessment": "", "printready_original_file": "",
+        "printready_error": "",
+        # Colorways (UC-6): dominant colours extracted on the server; the agent
+        # fills recommendations, mockups (+ local previews) and adaptations. No
+        # leading underscore so all survive _public_job to the UI.
+        "colorway_colours": [], "colorway_has_transparency": None,
+        "colorway_original_file": "",
+        "colorway_recommend_raw": "", "colorway_recommend_parsed": [],
+        "colorway_avoid": [],
+        "colorway_selected": [], "colorway_mockups": [],
+        "colorway_adapt_selected": [], "colorway_adapted": [],
         "aspect_dpi": req.aspect_dpi, "aspect_info": None, "aspect_recommendations": "",
         "aspect_target": None, "aspect_method": "pad", "aspect_similarity": None,
         "aspect_original_file": "", "aspect_original_features": None,
@@ -1029,6 +1239,27 @@ def create_job(req: GenerateRequest, request: Request):
         # Agent claim tracking
         "claimed_by": None, "claimed_by_name": "", "claimed_at": None, "last_progress_at": None,
     }
+    # Colour-group identification is computed locally on the server (cv2) right
+    # now, so the operator sees the numbered swatches the moment the pause opens
+    # and the agent needs no cv2 and no ChatGPT listing turn.
+    if req.workflow == "identify" and req.identify_mode == "colour" and req.artwork_files:
+        _precompute_identify_colour(jobs[job_id], req.artwork_files[0])
+    # Print Ready QA: measure numerically on the server right away, so the score
+    # and 13 checks are visible the moment the job opens (the agent adds only the
+    # written judgement).
+    if req.workflow == "printready" and req.artwork_files:
+        _precompute_printready(jobs[job_id], req.artwork_files[0])
+        # If the local measurement could not run, FAIL now with a clear reason
+        # rather than queueing a job that would silently become a visual-only
+        # review. The measurement is the point of this workflow.
+        _pr_err = jobs[job_id].get("printready_error")
+        if _pr_err:
+            del jobs[job_id]
+            raise HTTPException(status_code=400, detail=_pr_err)
+    # Colorways: extract the dominant colours on the server so the operator sees
+    # the swatches immediately and the agent hands them to ChatGPT as data.
+    if req.workflow == "colorway" and req.artwork_files:
+        _precompute_colorway(jobs[job_id], req.artwork_files[0])
     resp = {"job_id": job_id}
     if _agent_busy_with_own:
         # Queued behind the user's own in-flight job on their agent.
@@ -1105,7 +1336,13 @@ def cancel_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found.")
 
     old_status = job["status"]
-    if old_status not in ("running", "awaiting_selection", "awaiting_text_confirmation", "awaiting_crop_review", "awaiting_multi_selection", "awaiting_number_selection", "awaiting_object_selection", "awaiting_ratio_selection", "queued"):
+    # A job is cancellable UNLESS it has already finished. Inverting the check
+    # (rather than enumerating every cancellable status) means every current and
+    # future awaiting_* / paused status — including awaiting_object_instructions,
+    # which the old allow-list omitted — is cancellable by default. A paused job
+    # is exactly the case an operator most wants to cancel, and the agent sees
+    # the "cancelled" status on its paused-input poll and aborts cleanly.
+    if old_status in ("done", "done_with_errors", "failed", "cancelled"):
         raise HTTPException(status_code=400, detail="This job cannot be cancelled.")
 
     # Immediately mark as cancelled on the authoritative record
@@ -1249,6 +1486,91 @@ def select_objects(job_id: str, req: ObjectSelectionRequest):
     job["status"] = "running"
     job["awaiting_input"] = False
     return {"ok": True}
+
+
+@app.post("/api/jobs/{job_id}/object-instructions")
+def submit_object_instructions(job_id: str, req: ObjectInstructionsRequest):
+    """Artwork Identification: operator's per-object free-text instructions.
+
+    Each instruction is {object, action}; only rows with a non-empty action
+    matter. Reject an empty submission so the agent always has something to do.
+    """
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("status") != "awaiting_object_instructions":
+        raise HTTPException(status_code=400, detail="This job is not waiting for object instructions.")
+    cleaned = [
+        # Keep the object's id (number) if the UI sent one, so the agent can
+        # reference each change by number AND name in the regenerate prompt.
+        {"id": i.get("id"),
+         "object": str(i.get("object", "")).strip(),
+         "action": str(i.get("action", "")).strip()}
+        for i in (req.instructions or [])
+    ]
+    cleaned = [i for i in cleaned if i["object"] and i["action"]]
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Add an instruction for at least one object.")
+    job["object_instructions"] = cleaned
+    job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
+    job["status"] = "running"
+    job["awaiting_input"] = False
+    return {"ok": True, "count": len(cleaned)}
+
+
+def _clean_colour_selection(items: list[dict]) -> list[dict]:
+    """Normalise [{name, hex}] operator colour picks: trim, drop nameless rows,
+    resolve a hex for each (operator hex wins, else the name->hex map, else a
+    neutral grey so the local preview swatch is never blank)."""
+    from src.colorway import garment_hex
+    out: list[dict] = []
+    for it in items or []:
+        name = str((it or {}).get("name", "")).strip()
+        if not name:
+            continue
+        hexv = str((it or {}).get("hex", "")).strip()
+        if not hexv:
+            hexv = garment_hex(name) or "#808080"
+        out.append({"name": name, "hex": hexv})
+    return out
+
+
+@app.post("/api/jobs/{job_id}/select-colours")
+def select_colours(job_id: str, req: ColourSelectionRequest):
+    """Colorways pause 1: the garment colours the operator chose to mock up.
+
+    Each is {name, hex}; the server fills a hex from the name->hex map when the
+    operator did not supply one. At least one colour is required."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("status") != "awaiting_colour_selection":
+        raise HTTPException(status_code=400, detail="This job is not waiting for colour selection.")
+    cleaned = _clean_colour_selection(req.colours)
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Select at least one garment colour.")
+    job["colorway_selected"] = cleaned
+    job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
+    job["status"] = "running"
+    job["awaiting_input"] = False
+    return {"ok": True, "count": len(cleaned)}
+
+
+@app.post("/api/jobs/{job_id}/select-adapt")
+def select_adapt(job_id: str, req: AdaptSelectionRequest):
+    """Colorways pause 2: which garment colours to ADAPT the artwork for. MAY be
+    empty — the operator can finish with mockups only and no adaptation."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("status") != "awaiting_adapt_selection":
+        raise HTTPException(status_code=400, detail="This job is not waiting for adaptation selection.")
+    cleaned = _clean_colour_selection(req.colours)   # may legitimately be empty
+    job["colorway_adapt_selected"] = cleaned
+    job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
+    job["status"] = "running"
+    job["awaiting_input"] = False
+    return {"ok": True, "count": len(cleaned)}
 
 
 def _parse_ratio(req: "RatioSelectionRequest") -> tuple[float, float]:
@@ -2200,7 +2522,9 @@ def _require_agent_identity(request: Request) -> dict:
 # server owns the operator-supplied answers and the claim bookkeeping.
 _SERVER_OWNED_FIELDS = {
     "confirmed_text", "choices", "chosen_numbers", "selected_crops",
-    "object_color_choices", "aspect_target", "aspect_method",
+    "object_color_choices", "object_instructions", "aspect_target", "aspect_method",
+    # Colorways operator answers — the agent's periodic sync must never clobber them.
+    "colorway_selected", "colorway_adapt_selected",
     "_regenerate", "_regen_template", "_reextract", "_reextract_mode",
     "_reextract_cols", "_reextract_rows", "_reextract_padding", "_recrop_boxes",
     "claimed_by", "claimed_by_name", "claimed_at", "last_progress_at",
@@ -2253,7 +2577,34 @@ def _merge_agent_fields(job: dict, posted: dict) -> None:
                       f"(server is {server_status!r}) — an agent sync cannot move a "
                       f"job back to a non-terminal status.")
             continue
+        if k == "colorway_adapted":
+            # The server computes each adaptation's similarity on result upload
+            # (the agent can't — cv2 is server-only). The agent's later syncs
+            # echo colorway_adapted with similarity=None, which would wipe the
+            # server's value. Merge by adapted_file, preserving a similarity the
+            # server already computed when the agent's copy lacks one.
+            job[k] = _merge_colorway_adapted(job.get(k) or [], v or [])
+            continue
         job[k] = v
+
+
+def _merge_colorway_adapted(current: list, incoming: list) -> list:
+    """Take the agent's incoming colorway_adapted list, but keep any
+    server-computed `similarity` the current record already has for the same
+    adapted_file when the incoming entry has none."""
+    by_file = {}
+    for e in current:
+        if isinstance(e, dict) and e.get("adapted_file"):
+            by_file[e["adapted_file"]] = e
+    merged = []
+    for e in incoming:
+        if isinstance(e, dict):
+            e = dict(e)
+            prev = by_file.get(e.get("adapted_file"))
+            if not e.get("similarity") and prev and prev.get("similarity"):
+                e["similarity"] = prev["similarity"]
+        merged.append(e)
+    return merged
 
 
 # ── Prompt Management run log ────────────────────────────────────────────────
@@ -2533,6 +2884,7 @@ async def agent_result(job_id: str, request: Request):
     _heartbeat(job.get("claimed_by"))
     _recompute_aspect_similarity(job)
     _recompute_replace_similarity(job)
+    _recompute_colorway_similarity(job)
     return {"ok": True, "saved": saved}
 
 
@@ -2594,6 +2946,56 @@ def _recompute_replace_similarity(job: dict) -> None:
               f"shape={sim.get('shape_pct')} detail={sim.get('detail_pct')}")
     except Exception as exc:
         print(f"[server] replace similarity computation failed: {exc}")
+
+
+def _recompute_colorway_similarity(job: dict) -> None:
+    """For a Colorways job, compare each ADAPTED version against the ORIGINAL
+    artwork so the operator sees how far the adaptation drifted — adapting for a
+    garment colour should change the design as little as possible, so this number
+    matters. The agent produces the adapted images but can't run cv2 (it's
+    server-only), so we compute it here on each result upload. Original is the
+    uploaded input file; adapted files are recorded stage images. Only fills in
+    entries that don't already carry a similarity, and skips ones whose files
+    aren't on disk yet (a later upload triggers another pass)."""
+    if job.get("workflow") != "colorway":
+        return
+    adapted = job.get("colorway_adapted") or []
+    if not adapted:
+        return
+    source = (job.get("colorway_original_file") or "").strip()
+    if not source:
+        # Fall back to the uploaded artwork file.
+        af = job.get("artwork_files") or []
+        source = Path(af[0]).name if af else ""
+    if not source:
+        return
+    s_path = INPUT_DIR / Path(source).name
+    if not s_path.exists():
+        return
+    try:
+        from src.compare import similarity as _similarity
+        source_bytes = s_path.read_bytes()
+    except Exception as exc:
+        print(f"[server] colorway similarity: could not load source ({exc})")
+        return
+    for entry in adapted:
+        if not isinstance(entry, dict) or entry.get("similarity"):
+            continue  # already computed (or not a real entry)
+        fname = (entry.get("adapted_file") or "").strip()
+        if not fname:
+            continue
+        f_path = OUTPUT_DIR / Path(fname).name
+        if not f_path.exists():
+            continue  # upload still in flight; a later result pass will get it
+        try:
+            sim = _similarity(source_bytes, f_path.read_bytes())
+            entry["similarity"] = sim
+            print(f"[server] computed colorway similarity for job {job['id']} "
+                  f"({entry.get('colour')}): shape={sim.get('shape_pct')} "
+                  f"detail={sim.get('detail_pct')}")
+        except Exception as exc:
+            print(f"[server] colorway similarity computation failed for "
+                  f"{entry.get('colour')}: {exc}")
 
 
 @app.post("/api/agent/job/{job_id}/error")
@@ -2702,6 +3104,9 @@ def agent_paused_input(job_id: str, request: Request):
         "chosen_numbers": job.get("chosen_numbers", []),
         "selected_crops": job.get("selected_crops", []),
         "object_color_choices": job.get("object_color_choices", []),
+        "object_instructions": job.get("object_instructions", []),
+        "colorway_selected": job.get("colorway_selected", []),
+        "colorway_adapt_selected": job.get("colorway_adapt_selected", []),
         "aspect_target": job.get("aspect_target"),
         "aspect_method": job.get("aspect_method", "pad"),
         "template_turn2": job.get("template_turn2", ""),

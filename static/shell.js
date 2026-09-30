@@ -31,21 +31,24 @@
     textimage: "photo-edit",
     mockup: "scissors",
     artwork: "wand",
-    custom: "adjustments"
+    custom: "adjustments",
+    identify: "list-search"
   };
   var PAGE_DESC = {
     text: "Generate finished artwork from wording the client supplies.",
     textimage: "The client supplies an image — use it as an element, as style, or replace its wording.",
     mockup: "Pull individual designs out of a mockup or contact sheet.",
     artwork: "Batch clean-up and regeneration of supplied artwork.",
-    custom: "Apply a chosen sequence of operations to one artwork."
+    custom: "Apply a chosen sequence of operations to one artwork.",
+    identify: "List the objects in an artwork, then regenerate it with your changes applied."
   };
   var PAGE_TITLE = {
     text: "Text",
     textimage: "Text + Image",
     mockup: "Artwork Extraction",
     artwork: "Artwork Generation",
-    custom: "Custom Operation"
+    custom: "Custom Operation",
+    identify: "Artwork Identification"
   };
 
   ready(function () {

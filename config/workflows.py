@@ -290,6 +290,261 @@ Requirements:
 - The design only, centred with even margins
 - Clean sharp edges suitable for DTF garment printing"""
 
+# Artwork Identification: turn 1 lists every distinct object; the operator gives
+# an instruction per object; turn 2 regenerates with those changes applied.
+IDENTIFY_OBJECTS = """A labelled 10x10 grid has been drawn over this artwork to help you describe where things are. Columns are lettered A to J from left to right; rows are numbered 1 to 10 from top to bottom. So the top-left cell is A1 and the bottom-right cell is J10. The grid is only a reference overlay — ignore it as part of the artwork.
+
+List the main objects and elements in the artwork — the things a person would actually want to change. List whole, meaningful elements: each subject, object, piece of text, logo, and distinct background element. Do NOT break a single subject into its parts (a lion is one item called "Lion", never its mane, eyes, paws or tail separately). Aim for roughly 5 to 15 items.
+
+For each object, give the grid cells it mainly sits in. Use only the cells that the object actually covers; if you are unsure, give your best estimate of the few cells at its centre rather than listing many.
+
+Reply with ONLY a JSON array and nothing else — no prose, no explanation, no markdown code fences. Each element is an object with: "id" (1-based integer), "name" (short label), and "cells" (array of cell strings). Exactly this shape:
+
+[
+  {{"id": 1, "name": "Lion", "cells": ["D4", "E5"]}},
+  {{"id": 2, "name": "Team name text", "cells": ["C8", "D8", "E8"]}}
+]
+
+Output the JSON array only."""
+
+IDENTIFY_COLOR_GROUPS = """Look at this artwork and list every distinct colour group in it.
+
+A colour group is all the areas sharing one colour, even when they belong to different elements. Include outlines, fills, text colours, background colours and shadow tones.
+
+Use short names that identify each group clearly, for example "Red lettering", "Dark blue background", "Gold outlines", "Skin tones".
+
+Reply with ONLY a plain numbered list in this format:
+1. Colour group name
+2. Colour group name
+3. Colour group name
+
+No explanation, no headings, no hex codes, no extra text."""
+
+IDENTIFY_REGENERATE = """Reproduce this artwork exactly as it is, with ONLY the following specific changes applied.
+
+This is a reproduction task, not a new artwork. Keep everything that is not named in the change list below exactly as it appears in the original: the background, scenery, all other subjects, the composition, framing, colour palette, lighting, artistic style, and every element not named in a change. Preserve all text that is not being changed, including accented characters.
+
+Do not simplify the scene. Do not remove anything that was not asked to be removed. The result must be recognisably the same artwork, changed only in the ways listed.
+
+Each change below names the object by its number and name, so you know exactly which element it refers to. Apply the changes to those objects only:
+
+{changes}
+
+If a change is impossible without altering other parts, make the smallest possible alteration and keep everything else.
+
+Output requirements (do not let these change the content above):
+- {background}
+- Clean sharp edges suitable for DTF garment printing"""
+
+
+# Print Ready QA (UC-8): the artwork is uploaded with a full set of LOCAL
+# measurements (src/printready.py). ChatGPT is given the numbers and the image
+# and asked ONLY for the printer's judgement — never to re-measure. {measurements}
+# is filled with the formatted measurement block.
+PRINTREADY_REVIEW = """You are reviewing artwork for DTF garment printing.
+
+Here are the measurements taken from the file:
+
+{measurements}
+
+Look at the artwork alongside these numbers and give a printer's assessment.
+
+Cover:
+
+- Whether this will print cleanly on a garment, and on which garment colours
+
+- Any element that is too fine, too thin or too small to survive the transfer
+
+- Whether the text will remain legible at the stated print size
+
+- Anything the measurements cannot see: awkward composition, elements that
+
+  will disappear against fabric, detail that will fill in
+
+- What specifically to fix, in order of importance
+
+Be concrete. Name the element you mean. Do not repeat the numbers back - I
+
+have them. If the artwork is print ready, say so plainly.
+
+Plain text, no markdown, no preamble."""
+
+
+# Colorways (UC-6): the artwork's dominant colours are extracted LOCALLY and
+# handed to ChatGPT as data ({colours}); ChatGPT judges which garment colours
+# suit it. Then one mockup turn per chosen garment colour, and (optionally) an
+# adaptation turn per colour. {garment_colour} is the plain colour name.
+COLORWAY_SUGGEST = """You are advising on garment colours for a DTF print.
+
+The artwork's dominant colours are:
+
+{colours}
+
+Recommend the garment colours this artwork will look best on.
+
+For each recommendation give the garment colour, and one sentence on why it
+
+works - contrast against the artwork, how the design will read on that fabric,
+
+and anything that will disappear or clash.
+
+Also name any garment colour this artwork should NOT go on, and why.
+
+Cover both light and dark garments. Give 4 to 6 recommendations.
+
+Plain text, no markdown, no preamble."""
+
+COLORWAY_MOCKUP = """Show this artwork printed on a {garment_colour} t-shirt.
+
+Requirements:
+
+- A plain {garment_colour} t-shirt, front view, flat or on a plain background
+
+- The artwork printed on the chest at a realistic size and position
+
+- Reproduce the artwork as closely as you can - same colours, same layout,
+
+  same detail
+
+- No model, no branding, no extra text
+
+- Even lighting, no heavy shadows over the print"""
+
+COLORWAY_ADAPT = """Adapt this artwork so it prints well on a {garment_colour}
+
+garment.
+
+Requirements:
+
+- Keep the design recognisably the same - same layout, letterforms,
+
+  illustration and composition
+
+- Adjust only what is needed to read on {garment_colour} fabric: outlines,
+
+  contrast, and any colour that would disappear against it
+
+- Do not add new elements or remove existing ones
+
+- Transparent background, PNG
+
+- The design only, centred with even margins
+
+- Clean sharp edges suitable for DTF garment printing"""
+
+
+# ---------------------------------------------------------------------------
+# Single source of truth #1: which template each workflow exposes to the UI.
+#
+# THE RECURRING BUG this prevents: the server's /api/templates endpoint and the
+# browser's prompt editors each kept their own hardcoded list of "which prompt
+# keys does this workflow use". Every new workflow re-introduced the drift — the
+# endpoint would serve a key the UI never read, or the UI would read a key the
+# endpoint never served, and the prompt box rendered empty.
+#
+# Now there is ONE map. `get_templates()` builds its JSON from it, and the UI
+# reads the identical keys (it fetches WORKFLOW_TEMPLATE_KEYS via /api/templates
+# so it literally cannot name a key the server does not send). Adding a workflow
+# = adding one entry here; both sides pick it up automatically.
+#
+# Shape: {workflow_value: {json_key_the_ui_reads: registry_constant_name}}.
+# `json_key` is the field name in the /api/templates response (e.g. "turn1").
+# `registry_constant_name` is the CONSTANT in this module / prompt_registry
+# (e.g. "TEXT_TURN_1"), resolved live from Prompt Management with the built-in
+# text here as the fallback.
+WORKFLOW_TEMPLATE_KEYS: dict[str, dict[str, str]] = {
+    "text": {
+        "turn1": "TEXT_TURN_1",
+        "turn2": "TEXT_TURN_2",
+        "turn3": "TEXT_TURN_3",
+        "replace_collage": "TEXT_REPLACE_COLLAGE",
+        "replace_final": "TEXT_REPLACE_FINAL",
+        "image_element_collage": "TEXT_IMAGE_ELEMENT_COLLAGE",
+        "image_style_collage": "TEXT_IMAGE_STYLE_COLLAGE",
+    },
+    "mockup": {
+        "extract": "EXTRACT_CONTACT_SHEET",
+        "regen": "EXTRACT_SINGLE",
+    },
+    "artwork": {
+        # Historically served under both keys; the UI reads DT.artwork with a
+        # DT.artwork_regen fallback, so both are kept.
+        "artwork": "ARTWORK_REGENERATE",
+        "artwork_regen": "ARTWORK_REGENERATE",
+    },
+    "identify": {
+        "identify": "IDENTIFY_OBJECTS",
+        "identify_colour": "IDENTIFY_COLOR_GROUPS",
+        "identify_regen": "IDENTIFY_REGENERATE",
+    },
+    "printready": {
+        "printready_review": "PRINTREADY_REVIEW",
+    },
+    "colorway": {
+        "colorway_suggest": "COLORWAY_SUGGEST",
+        "colorway_mockup": "COLORWAY_MOCKUP",
+        "colorway_adapt": "COLORWAY_ADAPT",
+    },
+}
+
+
+def template_keys_json() -> dict[str, str]:
+    """Flat {json_key: registry_name} across every workflow — what the
+    /api/templates endpoint serves. First declaration wins for a shared key
+    (e.g. ARTWORK_REGENERATE under both "artwork" and "artwork_regen")."""
+    flat: dict[str, str] = {}
+    for keys in WORKFLOW_TEMPLATE_KEYS.values():
+        for json_key, registry_name in keys.items():
+            flat.setdefault(json_key, registry_name)
+    return flat
+
+
+# ---------------------------------------------------------------------------
+# Single source of truth #2: what each workflow requires to be submitted.
+#
+# THE RECURRING BUG this prevents: create_job's per-workflow validation was a
+# chain of `if workflow == X` blocks. A new workflow's block could read another
+# workflow's field (e.g. checking `files`/`options` from the legacy path, or the
+# button gating the wrong variable), so a valid submission was rejected or an
+# invalid one slipped through.
+#
+# Now each workflow DECLARES its own required fields here, and one helper
+# (validate_workflow_request) checks ONLY the fields named for that workflow. A
+# workflow can never end up checking another's fields, because it never names
+# them. Cross-field / placeholder rules that don't reduce to "field is present"
+# stay as named extra-rule hooks, dispatched by the same helper.
+#
+# Each entry: {workflow_value: [(field_name, error_message), ...]}. `field_name`
+# is an attribute on GenerateRequest. A string field passes when its .strip() is
+# truthy; a list field passes when non-empty. `extra_rules` (below) handles
+# anything more than presence.
+WORKFLOW_REQUIRED_FIELDS: dict[str, list[tuple[str, str]]] = {
+    "mockup": [
+        ("mockup_image", "Upload a mockup image first."),
+    ],
+    "artwork": [
+        ("artwork_files", "Upload at least one artwork file."),
+    ],
+    "identify": [
+        ("artwork_files", "Upload an artwork file."),
+    ],
+    "printready": [
+        ("artwork_files", "Upload an artwork file."),
+    ],
+    "colorway": [
+        ("artwork_files", "Upload an artwork file."),
+    ],
+    "custom": [
+        ("artwork_files", "Upload an artwork file."),
+        ("custom_operations", "Select at least one operation."),
+    ],
+    # The legacy edit-options API job (no workflow value set).
+    "": [
+        ("files", "Select at least one image."),
+        ("options", "Select at least one option."),
+    ],
+}
+
 
 def normalise_ratio(w: float, h: float) -> str:
     """Format a ratio as 'W:H (1 : X.XX)' by dividing both sides by the smaller.

@@ -47,17 +47,17 @@ code_prompts = {n for n, v in vars(W).items() if n.isupper() and isinstance(v, s
 code_prompts |= {"BASE_INSTRUCTION"} | {option_template_name(k) for k in JOB_OPTIONS}
 check("every prompt in the code has a Prompt Management key", code_prompts <= set(PROMPT_KEYS),
       sorted(code_prompts - set(PROMPT_KEYS)))
-check("31 prompts mapped, keys unique", len(PROMPT_KEYS) == 31 and len(set(PROMPT_KEYS.values())) == 31, len(PROMPT_KEYS))
+check("34 prompts mapped, keys unique", len(PROMPT_KEYS) == 34 and len(set(PROMPT_KEYS.values())) == 34, len(PROMPT_KEYS))
 
 # 2. Conversion to Decoinks {{}} text and back is exact for every one of them.
 bad = [n for n in PROMPT_KEYS if to_python_template(from_python_template(_builtin(n))) != _builtin(n)]
-check("round trip {x} <-> {{x}} is byte-identical for all 31", not bad, bad)
+check("round trip {x} <-> {{x}} is byte-identical for all 34", not bad, bad)
 
 # 3. Published text identical to the code -> the automation runs the code's text, from Decoinks.
 same = {PROMPT_KEYS[n]: from_python_template(_builtin(n)) for n in PROMPT_KEYS}
 reg = fake_registry(same)
 served = {n: reg.template(n) for n in PROMPT_KEYS}
-check("all 31 served as managed and identical to the built-in text",
+check("all 34 served as managed and identical to the built-in text",
       all(t == _builtin(n) and m["source"] == "managed" for n, (t, m) in served.items()))
 
 # 4. A version that adds or drops a placeholder is refused.
