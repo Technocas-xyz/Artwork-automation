@@ -11,6 +11,7 @@ Supports multi-turn workflows (Text workflow with operator decisions).
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
 import json
 import mimetypes
@@ -39,7 +40,7 @@ from src.aspect import image_info
 from src.auth import (
     APP_USERNAME, APP_PASSWORD_HASH, verify_password, sign_cookie,
     get_current_user, check_rate_limit, record_failure, record_success,
-    COOKIE_NAME, PUBLIC_PATHS, PUBLIC_PREFIXES,
+    COOKIE_NAME, COOKIE_MAX_AGE, PUBLIC_PATHS, PUBLIC_PREFIXES,
 )
 from src.agent_tokens import token_name, get_or_create_for_name, touch_token, list_agents
 from src import users
@@ -84,6 +85,80 @@ def _cookie_user_active(username: str) -> bool:
     return (username or "").strip().lower() == ((APP_USERNAME or "").strip().lower())
 
 
+# ---------------------------------------------------------------------------
+# Suite single sign-on
+# ---------------------------------------------------------------------------
+# The app now sits behind the suite vhost, which lets authentik decide WHO may
+# open it and then forwards the person's identity in X-authentik-* headers. The
+# shared secret is what makes those headers worth trusting - without it anyone
+# could set them by hand and walk in as an admin. Identity only opens the door:
+# the role still comes from this app's own user store, and we never create
+# accounts here, so somebody authentik lets through but this app does not know
+# is told to ask an admin rather than quietly becoming a designer.
+SSO_SHARED_SECRET = (os.getenv("SSO_SHARED_SECRET") or "").strip()
+
+
+def _parse_sso_aliases(raw: str) -> dict[str, str]:
+    """"suite@email:app-login, ..." -> {suite email: username in this app}.
+
+    Several designers signed up here with a personal address long before the
+    suite existed, so their authentik email is not the login they own here."""
+    aliases: dict[str, str] = {}
+    for pair in (raw or "").split(","):
+        suite, _, local = pair.partition(":")
+        suite, local = suite.strip().lower(), local.strip().lower()
+        if suite and local:
+            aliases[suite] = local
+    return aliases
+
+
+SSO_ALIASES = _parse_sso_aliases(os.getenv("SSO_ALIASES", ""))
+
+
+def _sso_identity(request: Request) -> tuple[str, dict | None] | None:
+    """(suite email, this app's user record) when the vhost vouched for the
+    request. The record is None when nobody here owns that email - the caller
+    then says so plainly. None means the request did not come through the suite
+    at all, so the ordinary cookie login applies."""
+    if not SSO_SHARED_SECRET:
+        return None
+    if not hmac.compare_digest(request.headers.get("x-decoinks-sso-secret", ""), SSO_SHARED_SECRET):
+        return None
+    email = (request.headers.get("x-authentik-email") or "").strip().lower()
+    if not email:
+        return None
+    user = users.get_user(SSO_ALIASES.get(email, email))
+    if user is not None and user.get("disabled"):
+        user = None
+    return email, user
+
+
+def _attach_session_cookie(request: Request, cookie_value: str) -> None:
+    """Hand the SSO identity to the rest of the app as an ordinary session, so
+    every endpoint keeps reading it through get_current_user, unchanged."""
+    existing = request.headers.get("cookie", "")
+    parts = [c for c in existing.split("; ") if c and not c.startswith(f"{COOKIE_NAME}=")]
+    parts.append(f"{COOKIE_NAME}={cookie_value}")
+    headers = [(k, v) for k, v in request.scope["headers"] if k.lower() != b"cookie"]
+    headers.append((b"cookie", "; ".join(parts).encode("latin-1")))
+    request.scope["headers"] = headers
+    for cached in ("_headers", "_cookies"):
+        if hasattr(request, cached):
+            delattr(request, cached)
+
+
+def _sso_no_account(email: str, path: str) -> Response:
+    message = (f"{email} can open Artwork Automation from the suite, but has no account here yet. "
+               "Ask an admin to add it under Users.")
+    if path.startswith("/api/"):
+        return JSONResponse(status_code=403, content={"detail": message})
+    return HTMLResponse(status_code=403, content=(
+        "<!doctype html><meta charset='utf-8'><title>No account yet</title>"
+        "<body style=\"font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;"
+        "display:flex;align-items:center;justify-content:center;height:100vh;margin:0\">"
+        f"<p style='max-width:34rem;line-height:1.6'>{message}</p></body>"))
+
+
 # Auth middleware
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -95,6 +170,23 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # cookie. The token is validated inside each agent endpoint.
         if path.startswith("/api/agent/"):
             return await call_next(request)
+        # Suite SSO: authentik already identified this person at the vhost, so
+        # there is nothing left to type in here.
+        sso = _sso_identity(request)
+        if sso is not None:
+            email, user = sso
+            if user is None:
+                return _sso_no_account(email, path)
+            if path == "/login":
+                return RedirectResponse("/", status_code=302)
+            cookie_value = sign_cookie(user["username"])
+            _attach_session_cookie(request, cookie_value)
+            response = await call_next(request)
+            response.set_cookie(
+                key=COOKIE_NAME, value=cookie_value,
+                httponly=True, samesite="lax", max_age=COOKIE_MAX_AGE,
+            )
+            return response
         # Allow login page
         if path == "/login":
             return await call_next(request)

@@ -6,7 +6,10 @@ services:
     env_file: .env
     shm_size: '1gb'
     ports:
-      - "4400:8000"   # web UI
+      # nginx owns 4400 now: it is the authentik gate for the web UI and the
+      # pass-through for the designers' agents, so the app itself is only
+      # reachable from this host.
+      - "127.0.0.1:4405:8000"   # web UI, behind the vhost on :4400
       - "4401:6080"   # noVNC (browser desktop, for ChatGPT sign-in)
     volumes:
       - ./input:/app/input
