@@ -176,21 +176,23 @@ def extract_colours(image_bytes: bytes) -> dict:
     Identification. Returns:
         {"colours": [{"name","hex","rgb":[r,g,b],"pct"}...],
          "has_transparency": bool}
-    Never raises — on failure returns empty colours (the UI shows a plain note
-    and ChatGPT still gets a visual-only recommendation)."""
+    Raises on a genuine failure (e.g. cv2 missing, an image mode Pillow cannot
+    decode) so the SERVER precompute can log a full traceback and record a
+    colorway_error, exactly like Print Ready QA. The caller already runs this in
+    a try/except that leaves colours empty and lets ChatGPT judge from the image,
+    so surfacing the cause here loses nothing but makes "no colours" diagnosable
+    instead of silent. A transparency read that fails on its own is non-fatal —
+    it only decides whether the swatch shows through — so that stays guarded."""
+    from src.annotate import colour_groups, has_transparency
+    result = colour_groups(image_bytes)
+    groups = result.get("groups", []) or []
+    colours = [{"name": g.get("name", ""), "hex": g.get("hex", ""),
+                "rgb": g.get("rgb", []), "pct": g.get("pct", 0)} for g in groups]
     try:
-        from src.annotate import colour_groups, has_transparency
-        result = colour_groups(image_bytes)
-        groups = result.get("groups", []) or []
-        colours = [{"name": g.get("name", ""), "hex": g.get("hex", ""),
-                    "rgb": g.get("rgb", []), "pct": g.get("pct", 0)} for g in groups]
-        try:
-            transparent = bool(has_transparency(image_bytes))
-        except Exception:
-            transparent = False
-        return {"colours": colours, "has_transparency": transparent}
+        transparent = bool(has_transparency(image_bytes))
     except Exception:
-        return {"colours": [], "has_transparency": False}
+        transparent = False
+    return {"colours": colours, "has_transparency": transparent}
 
 
 def colours_for_prompt(colours: list[dict]) -> str:

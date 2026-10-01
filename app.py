@@ -1142,12 +1142,19 @@ def _precompute_colorway(job: dict, artwork_file: str) -> None:
     still gives a visual-only recommendation."""
     job["colorway_colours"] = []
     job["colorway_has_transparency"] = None
+    job["colorway_error"] = ""
     try:
         from src.colorway import extract_colours
         src = INPUT_DIR / Path(artwork_file).name
-        if not src.exists():
-            print(f"[colorway] precompute: artwork not found at {src.resolve()} "
-                  f"(cwd={Path.cwd()}) — colours will be empty until the file is present.")
+        resolved = src.resolve()
+        exists = src.exists()
+        print(f"[colorway] precompute: file={artwork_file!r} resolved={resolved} "
+              f"exists={exists} cwd={Path.cwd()} INPUT_DIR={INPUT_DIR.resolve()}")
+        if not exists:
+            msg = (f"Artwork not found on the server at {resolved}. "
+                   f"The file must be uploaded to INPUT_DIR before the Colorways job is created.")
+            print(f"[colorway] precompute FAILED: {msg}")
+            job["colorway_error"] = msg
             return
         data = src.read_bytes()
         res = extract_colours(data)
@@ -1156,9 +1163,14 @@ def _precompute_colorway(job: dict, artwork_file: str) -> None:
         job["colorway_original_file"] = src.name
         print(f"[colorway] extracted {len(job['colorway_colours'])} dominant colour(s) "
               f"from {src.name}; transparency={job['colorway_has_transparency']}.")
+        if not job["colorway_colours"]:
+            print(f"[colorway] WARNING: extract_colours returned no colours for {src.name} "
+                  f"(bytes={len(data)}, transparency={job['colorway_has_transparency']}).")
     except Exception as exc:
-        print(f"[colorway] precompute failed: {exc}")
+        tb = traceback.format_exc()
+        print(f"[colorway] precompute EXCEPTION: {exc}\n{tb}")
         job["colorway_colours"] = []
+        job["colorway_error"] = f"Colour extraction failed: {exc}"
 
 
 @app.post("/api/generate")
@@ -1313,7 +1325,7 @@ def create_job(req: GenerateRequest, request: Request):
         # fills recommendations, mockups (+ local previews) and adaptations. No
         # leading underscore so all survive _public_job to the UI.
         "colorway_colours": [], "colorway_has_transparency": None,
-        "colorway_original_file": "",
+        "colorway_original_file": "", "colorway_error": "",
         "colorway_recommend_raw": "", "colorway_recommend_parsed": [],
         "colorway_avoid": [],
         "colorway_selected": [], "colorway_mockups": [],
@@ -3252,6 +3264,11 @@ WORKFLOW_TARGETS = {
     # Text + Image: the vault file is the client's image; the operator picks the
     # mode (element / style / replace) in the tab before entering wording.
     "textimage": {"label": "Text + Image", "multiple": False},
+    # UC-based single-file workflows. Keys match the .wf-tab data-wf values and
+    # the NC_TARGETS keys in the UI so a vault send-to opens the matching page.
+    "identify": {"label": "Artwork Identification", "multiple": False},
+    "printready": {"label": "Print Ready QA", "multiple": False},
+    "colorway": {"label": "Colorways", "multiple": False},
 }
 
 
@@ -3345,6 +3362,24 @@ def nextcloud_thumb(path: str, w: int = 320, h: int = 320):
     """Proxy Nextcloud's thumbnail so the browser never sees the credentials."""
     try:
         data, ctype = nc.preview(path, width=max(32, min(1024, w)), height=max(32, min(1024, h)))
+    except nc.NextcloudError as exc:
+        raise _nc_error(exc)
+    return Response(content=data, media_type=ctype or "image/png",
+                    headers={"Cache-Control": "private, max-age=300"})
+
+
+@app.get("/api/nextcloud/image")
+def nextcloud_image(path: str):
+    """The original artwork bytes, for the vault's fit-to-screen lightbox.
+
+    The thumbnail route cover-crops and clamps to 1024px, which distorts the
+    preview. The lightbox wants the real file at its true aspect ratio, so this
+    serves the original download instead of a generated preview.
+    """
+    cfg = nc.get_config()
+    try:
+        rel = nc.safe_rel(path, cfg)
+        data, ctype = nc.download_file(rel, max_bytes=40 * 1024 * 1024)
     except nc.NextcloudError as exc:
         raise _nc_error(exc)
     return Response(content=data, media_type=ctype or "image/png",

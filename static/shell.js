@@ -32,7 +32,12 @@
     mockup: "scissors",
     artwork: "wand",
     custom: "adjustments",
-    identify: "list-search"
+    identify: "list-search",
+    // badge-check does not exist in @tabler/icons-webfont 3.31.0 (rendered
+    // blank); rosette-discount-check is the check-badge glyph that does.
+    printready: "rosette-discount-check",
+    colorway: "palette",
+    nextcloud: "cloud"
   };
   var PAGE_DESC = {
     text: "Generate finished artwork from wording the client supplies.",
@@ -40,7 +45,10 @@
     mockup: "Pull individual designs out of a mockup or contact sheet.",
     artwork: "Batch clean-up and regeneration of supplied artwork.",
     custom: "Apply a chosen sequence of operations to one artwork.",
-    identify: "List the objects in an artwork, then regenerate it with your changes applied."
+    identify: "List the objects in an artwork, then regenerate it with your changes applied.",
+    printready: "Check whether an artwork is ready for DTF printing, with a score and a printer\u2019s assessment.",
+    colorway: "Find the garment colours an artwork suits, preview it on them, and adapt it where needed.",
+    nextcloud: "Browse the Leads 2.0 vault and send artwork to any workflow."
   };
   var PAGE_TITLE = {
     text: "Text",
@@ -48,7 +56,10 @@
     mockup: "Artwork Extraction",
     artwork: "Artwork Generation",
     custom: "Custom Operation",
-    identify: "Artwork Identification"
+    identify: "Artwork Identification",
+    printready: "Print Ready QA",
+    colorway: "Colorways",
+    nextcloud: "Nextcloud Vault"
   };
 
   ready(function () {
