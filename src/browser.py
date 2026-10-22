@@ -3,12 +3,108 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import signal
+import sys
 import threading
+import time
 
 from playwright.sync_api import BrowserContext, Page, Playwright, sync_playwright
 
 from config.selectors import PROMPT_BOX, LOGIN_SCREEN
-from src.self_update import profile_dir
+from src.self_update import (
+    profile_dir, profiles_root, cookies_file_stat, app_dir,
+    running_from_temp_location, install_writable,
+)
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown registry
+# ---------------------------------------------------------------------------
+# Chromium only flushes some session state (cookies, auth tokens) on a CLEAN
+# shutdown. An abrupt process kill — a self-update os.execv, a PC shutdown, or
+# Task Manager — can lose it, which shows as "logged out again" next start. We
+# keep a reference to the live context + driver and close them on any normal
+# exit (atexit) and on SIGTERM/SIGINT, so the common exit paths flush cleanly.
+_live_context: BrowserContext | None = None
+_live_pw: Playwright | None = None
+_owner_thread: threading.Thread | None = None
+_shutdown_registered = False
+
+
+def _close_live(reason: str = "atexit") -> None:
+    """Close the registered context + driver IF we are on the owning thread.
+
+    Playwright's sync context is thread-bound: closing it from any other thread
+    raises greenlet's "cannot switch to a different thread". atexit and signal
+    handlers run on the MAIN thread, which is NOT the browser thread in the GUI.
+    So this ONLY closes when called on the owning thread (true for CLI/headless,
+    and for the GUI's own browser-thread teardown). Off-thread, it refuses and
+    logs — it must NEVER attempt a cross-thread close. The GUI flushes on its
+    browser thread via the restart flag / tray-Quit path instead.
+
+    Idempotent and never raises."""
+    global _live_context, _live_pw
+    if _live_context is None and _live_pw is None:
+        return
+    if _owner_thread is not None and threading.current_thread() is not _owner_thread:
+        print(f"[agent] skip browser close ({reason}): not on the owning thread "
+              f"(current={threading.current_thread().name!r}, "
+              f"owner={_owner_thread.name!r}); the owning thread handles the flush")
+        return
+    ctx, pw = _live_context, _live_pw
+    _live_context, _live_pw = None, None
+    if ctx is not None:
+        try:
+            print(f"[agent] closing browser context gracefully ({reason})")
+            ctx.close()
+        except Exception as exc:
+            print(f"[agent] direct browser close raised ({reason}): {exc}")
+    if pw is not None:
+        try:
+            pw.stop()
+        except Exception:
+            pass
+
+
+def _clear_live_refs() -> None:
+    """Let the owning thread's teardown reset the module refs after it closed."""
+    global _live_context, _live_pw
+    _live_context, _live_pw = None, None
+
+
+def register_graceful_shutdown() -> None:
+    """Install atexit + signal handlers once so the browser context is closed
+    cleanly however the process ends. Safe to call multiple times."""
+    global _shutdown_registered
+    if _shutdown_registered:
+        return
+    _shutdown_registered = True
+    atexit.register(lambda: _close_live("atexit"))
+
+    def _sig(signum, _frame):
+        _close_live(f"signal {signum}")
+        # Re-raise default behaviour so the process still exits.
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+        except Exception:
+            pass
+        raise SystemExit(0)
+
+    for _name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+        s = getattr(signal, _name, None)
+        if s is not None:
+            try:
+                signal.signal(s, _sig)
+            except Exception:
+                # Signals can only be set on the main thread; ignore otherwise.
+                pass
+
+
+def close_browser_gracefully() -> None:
+    """Public hook for CLI/headless: close directly (the caller owns the
+    context there). The GUI uses its own owning-thread flush instead."""
+    _close_live("pre-restart")
 
 
 def _thread_diag() -> str:
@@ -76,12 +172,29 @@ def launch_context(account: str) -> tuple[Playwright, BrowserContext]:
     ProfileLockedError
         If the profile directory is already in use by another Chromium instance.
     """
-    # Absolute, fixed profile path derived from the app directory (never
-    # relative to the CWD, never inside the self-update-swapped code/ folder),
-    # so the saved ChatGPT session persists across restarts AND updates.
+    # Absolute, per-user profile path (LOCALAPPDATA) that does NOT depend on
+    # where the exe runs from — so a zip-extraction/temp launch or a fresh
+    # re-download no longer yields an empty profile every start.
     profile_path = profile_dir(account)
+
+    # --- Startup diagnostics: prove WHERE we run and WHETHER the session is on
+    #     disk. These lines let a stuck designer PC be diagnosed from the log. ---
+    print(f"[agent] exe/sys.executable : {sys.executable}")
+    print(f"[agent] app_dir            : {app_dir()}")
+    print(f"[agent] account key        : {account!r}")
+    print(f"[agent] profiles_root      : {profiles_root()}")
     print(f"[agent] using browser profile {profile_path}")
+    print(f"[agent] cookies (pre-launch): {cookies_file_stat(account)}")
+    if running_from_temp_location():
+        print("[agent] WARNING: running from a TEMP/zip-extraction folder — the "
+              "profile cannot persist. Extract the agent to a normal folder.")
+    if not install_writable():
+        print(f"[agent] WARNING: install dir not writable ({app_dir()}); "
+              "self-update will not persist (profile is unaffected).")
     print(f"[agent] launching browser context ({_thread_diag()})")
+
+    # Make sure the browser is flushed cleanly on any process exit.
+    register_graceful_shutdown()
 
     pw: Playwright | None = None
     try:
@@ -95,6 +208,11 @@ def launch_context(account: str) -> tuple[Playwright, BrowserContext]:
             ["clipboard-read", "clipboard-write"],
             origin="https://chatgpt.com",
         )
+        # Register the live handles + the OWNING thread so atexit / signals can
+        # flush them on the right thread even if the owner forgets to close.
+        global _live_context, _live_pw, _owner_thread
+        _live_context, _live_pw = context, pw
+        _owner_thread = threading.current_thread()
         return pw, context
     except Exception as exc:
         # Fully tear down the half-started driver so the thread is left clean for
@@ -108,8 +226,13 @@ def launch_context(account: str) -> tuple[Playwright, BrowserContext]:
         msg = str(exc).lower()
         if "already in use" in msg or "existing browser session" in msg or "lock" in msg:
             raise ProfileLockedError(
-                f"Profile '{profile_path}' is already in use by another Chromium instance. "
-                "Close any open automation browser windows and try again."
+                f"The ChatGPT browser profile is already open by another process.\n"
+                f"Profile: {profile_path}\n"
+                "A previous agent's Chrome is still running and holding this profile. "
+                "Open Task Manager, end any leftover 'chrome.exe' / 'ArtworkAgent' "
+                "processes (or sign out and back in to Windows), then start the agent "
+                "again. The agent will NOT open a blank profile — your saved ChatGPT "
+                "session is safe."
             ) from exc
         raise
 
@@ -135,10 +258,23 @@ def is_logged_in(page: Page) -> bool:
            - login screen absent     -> assume still logged in (benefit of the
                                          doubt; do not fail a working session).
     """
+    t0 = time.monotonic()
+    try:
+        print(f"[auth] checking session: url={page.url!r}")
+    except Exception:
+        pass
+    # Settle the page first so the check isn't racing an in-flight navigation.
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=15_000)
+    except Exception:
+        pass
+
     # 1) Fast, positive proof of an authenticated, ready editor.
     try:
         prompt = page.wait_for_selector(PROMPT_BOX, state="visible", timeout=10_000)
         if prompt is not None:
+            print(f"[auth] prompt box visible after {time.monotonic()-t0:.1f}s "
+                  "-> logged in")
             return True
     except Exception:
         pass
@@ -148,7 +284,8 @@ def is_logged_in(page: Page) -> bool:
     try:
         login = page.query_selector(LOGIN_SCREEN)
         if login is not None and login.is_visible():
-            print("[auth] login screen detected -> logged out")
+            print(f"[auth] login screen detected after {time.monotonic()-t0:.1f}s "
+                  "-> logged out")
             return False
     except Exception:
         pass
@@ -156,8 +293,9 @@ def is_logged_in(page: Page) -> bool:
     # 3) Neither the editor nor the login screen resolved. Do NOT report a false
     #    logout — a restart used to 'fix' this precisely because the session was
     #    fine all along.
-    print("[auth] prompt box not visible but no login screen either -> "
-          "treating session as still valid (avoiding false logout)")
+    print(f"[auth] after {time.monotonic()-t0:.1f}s: prompt box not visible but no "
+          "login screen either -> treating session as still valid (avoiding false "
+          "logout)")
     return True
 
 

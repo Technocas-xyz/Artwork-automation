@@ -264,11 +264,19 @@ CUSTOM_CHANGE_COLOR = """Change only the following objects in the uploaded artwo
 # with Pillow (transparent padding, never crop, never stretch).
 CUSTOM_ASPECT_ADVICE = """This artwork is currently {width} x {height} pixels, an aspect ratio of {ratio}, which prints at {inches_w} x {inches_h} inches at {dpi} DPI.
 
-Recommend the best aspect ratio for printing this design on garments. Consider standard DTF transfer sizes and common placements: full front, left chest, back, sleeve. Take into account the shape of the design itself - a wide design suits a different placement from a tall one.
+Recommend aspect ratios for printing this design on garments. Give one recommendation per common placement, and use the ratio that placement is normally printed at - NOT the design's current ratio. Padding will add transparent space to reach the ratio, so it is fine to recommend a taller or wider ratio than the design has now. For example a square design still prints a portrait ratio on the full front or full back.
 
-Reply with 2 to 4 recommendations. For each one give the ratio, the print size in inches, the placement it suits, and one short sentence on why.
+Cover these placements, each on its own line:
+- Left Chest: a small near-square area, about 3:3 to 4:4
+- Full Front: a tall portrait area, about 4:5 or 3:4
+- Full Back: a tall portrait area, about 4:5 or 3:4
+- Sleeve: a narrow tall strip, about 1:3 or 1:4
 
-Plain text, no markdown, no preamble."""
+Reply with exactly 4 lines, one per placement, each in EXACTLY this format:
+
+Ratio: W:H | Size: W x H in | Placement: NAME | one short reason
+
+Use whole-number ratios (e.g. 4:5). Give the print size in inches for that placement. Plain text, no markdown, no preamble, no extra lines."""
 
 CUSTOM_ASPECT_BASELINE = """Regenerate this artwork as a clean, print-ready version at its current proportions.
 
@@ -433,6 +441,15 @@ Requirements:
 - Clean sharp edges suitable for DTF garment printing"""
 
 
+# Pixel Geometry (Before -> Generate -> After): the SOURCE is measured LOCALLY
+# (src/pixel_geometry.py) and the numbers are handed to ChatGPT as data so it
+# never estimates geometry from the image. {before_json} is the measured BEFORE
+# block; the target size + policies are filled from the same block. ChatGPT
+# will not hit the exact pixel size — we MEASURE what comes back and report it
+# honestly, so this prompt only states the target, never a tolerance.
+GEOMETRY_GENERATE = """Recreate this artwork for DTF printing. Measurements from the file (do not re-estimate them): {before_json}. Output: {target_width_px} x {target_height_px} px, transparent background PNG, keep the content bounding box proportions and position (aspect policy {aspect_ratio_policy}), mode {reconstruction_mode}: no crop, no stretch, no repositioning, keep all text exactly, preserve white and black elements as specified. Plain image only."""
+
+
 # ---------------------------------------------------------------------------
 # Single source of truth #1: which template each workflow exposes to the UI.
 #
@@ -484,6 +501,9 @@ WORKFLOW_TEMPLATE_KEYS: dict[str, dict[str, str]] = {
         "colorway_suggest": "COLORWAY_SUGGEST",
         "colorway_mockup": "COLORWAY_MOCKUP",
         "colorway_adapt": "COLORWAY_ADAPT",
+    },
+    "geometry": {
+        "geometry_generate": "GEOMETRY_GENERATE",
     },
 }
 

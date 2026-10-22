@@ -19,6 +19,19 @@ from PIL import Image, ImageFilter
 
 
 # ---------------------------------------------------------------------------
+# Weights for the single blended "overall_pct" headline. Detail carries the
+# most weight (it is what the client sees — the artwork itself), with shape,
+# edges and colour contributing equally. They sum to 1.0. The UI falls back to
+# these exact weights if it ever has to compute overall_pct from an older
+# stored payload, so keep the two in sync.
+# ---------------------------------------------------------------------------
+OVERALL_WEIGHT_DETAIL = 0.40
+OVERALL_WEIGHT_SHAPE = 0.20
+OVERALL_WEIGHT_EDGES = 0.20
+OVERALL_WEIGHT_COLOUR = 0.20
+
+
+# ---------------------------------------------------------------------------
 # Perceptual hash (pHash), numpy-only. Replicates imagehash.phash(hash_size=16,
 # highfreq_factor=4) exactly using a numpy DCT (no scipy).
 # ---------------------------------------------------------------------------
@@ -427,8 +440,16 @@ def compare_features(orig_feat: dict, gen_feat: dict, orig_bytes: bytes, gen_byt
         "edges_pct": edges_pct,
         "colour_pct": colour_pct,
         "detail_pct": detail_pct,
-        # Backward-compatible headline for any older callers.
+        # Backward-compatible headline for any older callers (unchanged).
         "similarity_pct": detail_pct,
+        # Genuine blended headline across all four axes, so a weak axis (e.g.
+        # low Edges) is visible in the single number operators read.
+        "overall_pct": int(round(
+            OVERALL_WEIGHT_DETAIL * detail_pct
+            + OVERALL_WEIGHT_SHAPE * shape_pct
+            + OVERALL_WEIGHT_EDGES * edges_pct
+            + OVERALL_WEIGHT_COLOUR * colour_pct
+        )),
         "colour_matches": _colour_match_count(
             [d["rgb"] for d in orig_feat.get("dominant_colours", [])],
             [d["rgb"] for d in gen_feat.get("dominant_colours", [])], tolerance=32),

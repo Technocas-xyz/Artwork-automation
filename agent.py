@@ -43,6 +43,7 @@ from config.workflows import (
     IDENTIFY_OBJECTS, IDENTIFY_COLOR_GROUPS, IDENTIFY_REGENERATE,
     PRINTREADY_REVIEW,
     COLORWAY_SUGGEST, COLORWAY_MOCKUP, COLORWAY_ADAPT,
+    GEOMETRY_GENERATE,
     normalise_ratio, CUSTOM_OPERATIONS_ORDER, CUSTOM_OPERATIONS_LABELS,
 )
 from config.selectors import PROJECT_URL_DEFAULT
@@ -85,8 +86,17 @@ from src import agent_diagnostics as diag
 # The agent's running CODE version, surfaced to the server (and thence the web
 # UI + the agent window) so a designer never has to open code_version.txt to
 # check whether a fix has landed.
+#
+# Source vs frozen: when running FROM SOURCE, config/agent_version.py is the
+# source of truth — code_version.txt is a stale build artifact that is never
+# rewritten during development, so reading it makes a source agent report an
+# old version. Only FROZEN builds use code_version.txt, where it is the
+# authoritative marker of which staged update has actually been applied.
 try:
-    AGENT_CODE_VERSION = self_update.read_local_version()
+    if self_update.is_frozen():
+        AGENT_CODE_VERSION = self_update.read_local_version()
+    else:
+        from config.agent_version import AGENT_CODE_VERSION  # type: ignore
 except Exception:
     try:
         from config.agent_version import AGENT_CODE_VERSION  # type: ignore
@@ -339,6 +349,10 @@ class _CancelledError(Exception):
 # are sent explicitly at the end of a job, not from the periodic sync.
 _AGENT_OWNED_FIELDS = (
     "stage", "stage_label", "active_time",
+    # The failure reason a workflow sets alongside status="failed". Without this
+    # in the synced blob the server kept error=None and the UI showed the
+    # generic "Unknown error"; the agent owns this message, so sync it.
+    "error",
     "images", "stage_images", "prompts",
     "final_names", "custom_steps_done", "artwork_errors",
     "detected_objects", "aspect_recommendations", "aspect_info",
@@ -365,6 +379,12 @@ _AGENT_OWNED_FIELDS = (
     # is set by the SERVER at job creation, so it is NOT echoed back here.
     "colorway_recommend_raw", "colorway_recommend_parsed", "colorway_avoid",
     "colorway_mockups", "colorway_adapted", "colorway_original_file",
+    # Pixel Geometry: the agent only produces + uploads the generated OUTPUT and
+    # records which file it is. geometry_before is SERVER-measured at job
+    # creation and geometry_after/_autofix/_approval are measured by the SERVER
+    # when the output arrives (cv2 is server-only), so NONE of those are echoed
+    # back here — only the output filename the agent owns.
+    "geometry_output_file", "geometry_original_file",
 )
 
 
@@ -1529,16 +1549,31 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                 (OUTPUT_DIR / step_name).write_bytes(gen_data)
                 (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(gen_data)
                 _mark_uploaded(job, _upload_files(job_id, [step_name]))
-                # Similarity: RESULT vs BASELINE (both background-free) — like for like.
+                # Similarity: RESULT vs the BASELINE PADDED TO THE TARGET RATIO —
+                # like for like. The result was redrawn at the target ratio, so
+                # comparing against the unpadded baseline would score the ratio
+                # change itself; padding (transparent-only, pixels preserved)
+                # puts both on the same canvas. This usually runs on the SERVER
+                # (cv2 is not bundled in the packaged agent); when it does run
+                # here, record any error instead of failing silently.
+                sim = None
+                sim_err = None
                 try:
-                    sim = similarity(baseline_bytes, gen_data)
+                    compare_bytes = fit_to_ratio(baseline_bytes, tw, th)
+                    sim = similarity(compare_bytes, gen_data)
+                    print(f"[custom] aspect similarity: shape={sim.get('shape_pct')} "
+                          f"detail={sim.get('detail_pct')}")
                 except Exception as exc:
-                    print(f"[custom] similarity failed: {exc}")
-                    sim = None
+                    sim_err = str(exc)
+                    print(f"[custom] similarity failed: {sim_err}")
                 job["aspect_similarity"] = sim
-                steps_done.append({"step": i, "op": op, "label": "Final (target ratio)",
-                                   "file": step_name, "prompt": regen_prompt, "method": "regenerate",
-                                   "compare_against": "baseline", "similarity": sim})
+                job["aspect_similarity_error"] = sim_err
+                step_entry = {"step": i, "op": op, "label": "Final (target ratio)",
+                              "file": step_name, "prompt": regen_prompt, "method": "regenerate",
+                              "compare_against": "baseline_padded", "similarity": sim}
+                if sim_err:
+                    step_entry["similarity_error"] = sim_err
+                steps_done.append(step_entry)
                 current_image_path = str(OUTPUT_DIR / step_name)
             else:
                 # PAD the BASELINE locally — pixels preserved exactly, no comparison.
@@ -2228,6 +2263,106 @@ def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pixel Geometry (Before -> Generate -> After)
+# ---------------------------------------------------------------------------
+
+def _geometry_before_json(before: dict) -> str:
+    """The measured BEFORE block as compact JSON for the {before_json} prompt
+    placeholder. ChatGPT is handed these numbers as DATA so it never estimates
+    geometry from the image. Any underscore-prefixed helper keys are dropped
+    (the stored block has none, but guard anyway) and it is kept inline — no cv2,
+    no re-measuring — because the block was computed server-side."""
+    import json
+    clean = {k: v for k, v in (before or {}).items() if not str(k).startswith("_")}
+    return json.dumps(clean, separators=(",", ":"), default=str)
+
+
+def _run_geometry_workflow(page: Any, job: dict[str, Any]) -> None:
+    """Pixel Geometry. The SOURCE was measured on the SERVER
+    (src/pixel_geometry.py, cv2) and arrives as job["geometry_before"]. Here the
+    agent runs the ONE ChatGPT generation turn: upload the source + hand over the
+    measured BEFORE values as structured text (so ChatGPT does not re-estimate
+    geometry), require an image back, then record + upload the output. The AFTER
+    measurement + comparison run on the SERVER when the output upload lands
+    (the packaged agent has no cv2), so the agent writes only the output file."""
+    job_id = job["id"]
+    artwork_file = job.get("artwork_files", [""])[0]
+    current_image_path = str(INPUT_DIR / artwork_file)
+    if not artwork_file or not Path(current_image_path).exists():
+        job["status"] = "failed"
+        job["error"] = f"Input file not found: {artwork_file!r}"
+        job["finished_at"] = time.time()
+        return
+
+    # The server measures the BEFORE block and attaches it before the agent can
+    # claim the job. The measurement IS the input to this turn, so if it is
+    # absent we FAIL with a clear reason rather than asking ChatGPT to guess
+    # geometry from the image. (The server also refuses to create a geometry job
+    # whose source could not be measured, so this is a belt-and-braces guard.)
+    before = job.get("geometry_before")
+    if not before:
+        reason = job.get("geometry_error") or (
+            "No server-side source geometry measurements were attached to the job. "
+            "The local measurement (src/pixel_geometry.py) did not run on the server.")
+        print(f"[geometry] FAILING job — {reason}")
+        job["status"] = "failed"
+        job["error"] = reason
+        job["finished_at"] = time.time()
+        return
+
+    job["geometry_original_file"] = Path(current_image_path).name
+
+    # Open the chat in this workflow's project (falls back to a plain chat).
+    _track_start(job)
+    _open_chat_for(page, job)
+    _track_end(job)
+
+    job["stage"] = 1
+    job["stage_label"] = "Generating at target geometry"
+
+    before_json = _geometry_before_json(before)
+    fields = {
+        "before_json": before_json,
+        "target_width_px": before.get("target_width_px"),
+        "target_height_px": before.get("target_height_px"),
+        "aspect_ratio_policy": before.get("aspect_ratio_policy"),
+        "reconstruction_mode": before.get("reconstruction_mode"),
+    }
+    template = _tpl(job, "GEOMETRY_GENERATE", GEOMETRY_GENERATE)
+    try:
+        gen_prompt = template.format(**fields)
+    except (KeyError, IndexError):
+        # Placeholder drift: fill each token we know by name, leave the rest.
+        gen_prompt = template
+        for k, v in fields.items():
+            gen_prompt = gen_prompt.replace("{" + k + "}", "" if v is None else str(v))
+    job.setdefault("prompts", []).append(gen_prompt)
+    print(f"[geometry] generate prompt SENT ({len(gen_prompt)} chars); "
+          f"target {fields['target_width_px']}x{fields['target_height_px']} px.")
+
+    _track_start(job)
+    imgs = send_turn(page, prompt=gen_prompt, image_paths=[current_image_path],
+                     run_id=f"{job_id}_geometry", require_images=True)
+    _track_end(job)
+    _rename_chat_once(page, job)
+
+    # Record + upload the output. DO NOT post-process or resize it: the whole
+    # point is to MEASURE honestly what came back (the server does that when the
+    # file lands). We still prefer a transparent result if ChatGPT returned one;
+    # send_turn already prefers transparency, so imgs[0] is the best candidate.
+    output_data = imgs[0]
+    output_file = f"{job_id}_geometry_output.png"
+    _record_stage_image(job, "output", output_data, output_file)
+    job["geometry_output_file"] = output_file
+    print(f"[geometry] output recorded ({len(output_data)} bytes) -> {output_file}; "
+          f"server will measure AFTER on upload.")
+
+    job["status"] = "done"
+    job["awaiting_input"] = False
+    job["finished_at"] = time.time()
+
+
+# ---------------------------------------------------------------------------
 # Colorways (UC-6)
 # ---------------------------------------------------------------------------
 
@@ -2510,6 +2645,8 @@ def _run_job(page: Any, job: dict) -> None:
         _run_printready_workflow(page, job)
     elif wf == "colorway":
         _run_colorway_workflow(page, job)
+    elif wf == "geometry":
+        _run_geometry_workflow(page, job)
     else:
         _run_legacy_job(page, job)
 
@@ -2647,7 +2784,11 @@ def _report_error(job_id: str, job: dict, exc: Exception, tb: str) -> None:
                       data=fields,
                       files=[("screenshot", (shot.name, fh, "image/png"))])
         else:
-            _post(f"/api/agent/job/{job_id}/error", data=fields)
+            # No screenshot: send the fields as JSON (application/json) so the
+            # message is delivered unambiguously. `data=fields` would have gone
+            # out as urlencoded, which an older server parsed as neither
+            # multipart nor JSON and dropped — surfacing as "Unknown error".
+            _post(f"/api/agent/job/{job_id}/error", json=fields)
     except Exception as post_exc:
         print(f"[agent] failed to report error to server: {post_exc}")
 
@@ -2737,6 +2878,7 @@ def _apply_and_restart(log=print, status=None) -> bool:
         log("[update] staged update present; restarting so the bootstrap applies it…")
         if status:
             status("connected", "Updating — restarting…")
+        _flush_browser_before_restart(log)
         self_update.restart()   # bootstrap does the swap before code/ is imported
         return True
     # Source/dev: apply in-process (code/ is the project root, nothing locked).
@@ -2749,12 +2891,47 @@ def _apply_and_restart(log=print, status=None) -> bool:
     log(f"[update] applied code {st.local_version}; restarting…")
     if status:
         status("connected", "Updating — restarting…")
+    _flush_browser_before_restart(log)
     self_update.restart()
     return True
 
 
+# A callable the owner registers to close the browser context ON ITS OWNING
+# THREAD. _apply_and_restart always runs on the browser thread (run_loop's idle
+# branch, or the GUI's browser loop), so the close is always same-thread and
+# Playwright's thread affinity is respected. Set by the GUI; in CLI/headless the
+# owning thread is the main thread and the default direct close is correct.
+_browser_closer = None
+
+
+def set_browser_closer(fn) -> None:
+    """Register a no-arg callable that closes the browser context. It is only
+    ever invoked from the browser's OWNING thread (inside _apply_and_restart)."""
+    global _browser_closer
+    _browser_closer = fn
+
+
+def _flush_browser_before_restart(log=print) -> None:
+    """Close the browser context cleanly BEFORE os.execv replaces the process,
+    so Chromium flushes the ChatGPT session to disk. MUST be called on the
+    thread that owns the context (the browser thread in the GUI, the main thread
+    in CLI/headless) — callers guarantee this by only invoking it from
+    _apply_and_restart, which runs on the owning thread. Never raises."""
+    log("[update] flushing browser session before restart…")
+    try:
+        if _browser_closer is not None:
+            _browser_closer()
+        else:
+            from src.browser import close_browser_gracefully
+            close_browser_gracefully()
+    except Exception as exc:
+        log(f"[update] browser flush before restart failed (continuing): {exc}")
+
+
 def apply_pending_update() -> dict:
-    """GUI Restart button entry point: apply a staged update and re-exec.
+    """Apply a staged update and re-exec. Called ONLY on the browser/owning
+    thread (from _do_start before the loop, or CLI). The GUI Restart button does
+    NOT call this directly — it sets a flag that run_loop acts on.
 
     FROZEN: re-exec and let the bootstrap swap (safe, code/ not yet locked).
     SOURCE: apply in-process then re-exec. Never raises; on failure returns a
@@ -2762,16 +2939,18 @@ def apply_pending_update() -> dict:
     if not self_update.has_staged_update():
         return {"applied": False, "error": None, "reason": "up_to_date"}
     if self_update.is_frozen():
+        _flush_browser_before_restart()
         self_update.restart()  # does not return on success; bootstrap applies
         return {"applied": False, "error": "restart did not occur", "reason": "error"}
     st = self_update.apply_if_staged()
     if st.applied and not st.error:
+        _flush_browser_before_restart()
         self_update.restart()  # does not return on success
     return st.as_dict()
 
 
 def run_loop(page, agent_id, stop_event=None, on_status=None, on_log=None,
-             on_update=None, auto_restart=False) -> None:
+             on_update=None, auto_restart=False, restart_requested=None) -> None:
     """The claim loop. Identical job/workflow behaviour to the original; the
     additions are an optional stop_event for clean GUI stop, status/log
     callbacks, and self-update.
@@ -2863,6 +3042,21 @@ def run_loop(page, agent_id, stop_event=None, on_status=None, on_log=None,
                 # IDLE: the only place a self-update may run, so it can never
                 # interrupt a job. This may re-exec the process (auto mode).
                 maybe_self_update()
+                # Honour a GUI "Restart to apply" request HERE, on the browser
+                # thread, so the context close + re-exec happen on the thread
+                # that owns the context (Playwright is thread-bound). We only
+                # reach this branch between jobs, so a running job is never
+                # interrupted. If applying fails, clear the flag so we don't spin.
+                if restart_requested is not None and restart_requested.is_set():
+                    if self_update.has_staged_update():
+                        log("[update] GUI requested restart; applying on browser thread…")
+                        status("connected", "Restarting to apply update…")
+                        _apply_and_restart(log, status)  # closes context, re-execs on success
+                        # If we're still here, the apply failed; keep current code.
+                        log("[update] restart requested but apply did not re-exec (kept current code)")
+                    else:
+                        log("[update] restart requested but nothing staged to apply")
+                    restart_requested.clear()
                 if stop_event is not None:
                     stop_event.wait(POLL_INTERVAL)
                 else:

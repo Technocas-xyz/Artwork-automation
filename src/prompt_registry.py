@@ -81,6 +81,9 @@ PROMPT_KEYS: dict[str, str] = {
     "COLORWAY_SUGGEST": "AIS.COLORWAY.SUGGEST",
     "COLORWAY_MOCKUP": "AIS.COLORWAY.MOCKUP",
     "COLORWAY_ADAPT": "AIS.COLORWAY.ADAPT",
+    # Pixel Geometry: the source is measured locally; this is the one ChatGPT
+    # generation turn (upload + measured BEFORE values -> recreated artwork).
+    "GEOMETRY_GENERATE": "AIS.GEOMETRY.GENERATE",
     # In config/workflows.py and kept in the library, but no screen sends them yet.
     "EXTRACT_BOXES": "AIS.EXTRACT.BOXES",
     "EXTRACT_ARTWORKS": "AIS.EXTRACT.SEPARATE",
@@ -140,6 +143,7 @@ WORKFLOW_PROMPTS: dict[str, list[str]] = {
     "identify": ["IDENTIFY_OBJECTS", "IDENTIFY_COLOR_GROUPS", "IDENTIFY_REGENERATE"],
     "printready": ["PRINTREADY_REVIEW"],
     "colorway": ["COLORWAY_SUGGEST", "COLORWAY_MOCKUP", "COLORWAY_ADAPT"],
+    "geometry": ["GEOMETRY_GENERATE"],
 }
 
 # The prompts each Text input mode actually runs.

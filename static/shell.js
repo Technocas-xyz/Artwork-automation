@@ -1,16 +1,16 @@
 /* ============================================================================
-   shell.js — product-shell chrome (sidebar, top bar, action bar).
+   shell.js — product-shell chrome (dark navy sidebar, top bar, page header).
    VISUAL/STRUCTURAL ADDITION ONLY.
 
    Rules honoured:
-   - Does NOT touch app.py, src/, or the existing inline <script>.
-   - Renames/removes NO existing id or data attribute.
+   - Does NOT touch app.py, src/, or the existing inline <script> / its logic.
+   - Renames/removes NO existing id or data attribute, changes NO API call.
    - The existing <header>, its .wf-tab buttons, and the .columns block are
      MOVED (re-parented) into the new layout — moving a node preserves all its
      event listeners, so the original tab-switching logic keeps working.
-   - Workflow switching is NOT reimplemented: sidebar nav items dispatch a
-     real .click() on the matching existing .wf-tab. A MutationObserver mirrors
-     the real tabs' .active state back into the new UI.
+   - Workflow switching is NOT reimplemented: sidebar nav items dispatch a real
+     .click() on the matching existing .wf-tab. A MutationObserver mirrors the
+     real tabs' .active state back into the new UI.
    ============================================================================ */
 (function () {
   "use strict";
@@ -20,12 +20,9 @@
     else document.addEventListener("DOMContentLoaded", fn);
   }
 
+  var APP_VERSION = "v1.0.0";   // decorative footer label
+
   // Tabler icon glyphs (webfont classes). Icon names map to ti-<name>.
-  var NAV_TOP = [
-    { icon: "layout-dashboard", label: "Dashboard" },
-    { icon: "folders", label: "Projects" },
-    { icon: "photo", label: "Artwork Vault" }
-  ];
   var WF_ICONS = {
     text: "typography",
     textimage: "photo-edit",
@@ -33,12 +30,16 @@
     artwork: "wand",
     custom: "adjustments",
     identify: "list-search",
-    // badge-check does not exist in @tabler/icons-webfont 3.31.0 (rendered
-    // blank); rosette-discount-check is the check-badge glyph that does.
     printready: "rosette-discount-check",
     colorway: "palette",
+    geometry: "ruler-measure",
     nextcloud: "cloud"
   };
+  // Workflows that belong in the "CREATE ARTWORK" group (everything that
+  // generates/analyses art). nextcloud is shown separately below.
+  var CREATE_WORKFLOWS = ["text", "textimage", "mockup", "artwork", "custom",
+                          "identify", "printready", "colorway", "geometry"];
+
   var PAGE_DESC = {
     text: "Generate finished artwork from wording the client supplies.",
     textimage: "The client supplies an image — use it as an element, as style, or replace its wording.",
@@ -48,6 +49,7 @@
     identify: "List the objects in an artwork, then regenerate it with your changes applied.",
     printready: "Check whether an artwork is ready for DTF printing, with a score and a printer\u2019s assessment.",
     colorway: "Find the garment colours an artwork suits, preview it on them, and adapt it where needed.",
+    geometry: "Measure an artwork's geometry, regenerate it at the target DTF size, and measure the result.",
     nextcloud: "Browse the Leads 2.0 vault and send artwork to any workflow."
   };
   var PAGE_TITLE = {
@@ -59,6 +61,7 @@
     identify: "Artwork Identification",
     printready: "Print Ready QA",
     colorway: "Colorways",
+    geometry: "Pixel Geometry",
     nextcloud: "Nextcloud Vault"
   };
 
@@ -68,7 +71,10 @@
     var realTabs = Array.prototype.slice.call(document.querySelectorAll(".wf-tab"));
     if (!header || !columns || !realTabs.length) return; // markup not as expected — bail safely
 
-    // --- Build the shell scaffold ---
+    var tabByWf = {};
+    realTabs.forEach(function (t) { tabByWf[t.dataset.wf] = t; });
+
+    // ---- Shell scaffold ----
     var shell = document.createElement("div");
     shell.className = "app-shell";
 
@@ -78,59 +84,31 @@
     var main = document.createElement("div");
     main.className = "app-main";
 
-    // Top bar: page title + description on the left, agent status + user on the
-    // right. The numbered workflow breadcrumb was removed — the sidebar is the
-    // single place a workflow is chosen, and the numbering wrongly implied the
-    // workflows are sequential steps.
-    var topbar = document.createElement("div");
-    topbar.className = "app-topbar";
-
-    var titleWrap = document.createElement("div");
-    titleWrap.className = "app-title-wrap";
-    titleWrap.innerHTML = '<div class="app-page-title" id="shellPageTitle"></div>' +
-      '<div class="app-page-desc" id="shellPageDesc"></div>';
-
-    // User block moved visually to the top bar (clone-follow, see below).
-    var userSlot = document.createElement("div");
-    userSlot.className = "app-user-slot";
-    userSlot.id = "shellUserSlot";
-
-    // Agent connection status pill (fed by /api/status polling below).
-    var agentPill = document.createElement("div");
-    agentPill.className = "agent-pill agent-pill-off";
-    agentPill.id = "shellAgentPill";
-    agentPill.innerHTML = '<span class="agent-dot"></span><span class="agent-text">Checking agent…</span>';
-
-    // "Download agent" button — opens the setup panel.
-    var dlBtn = document.createElement("button");
-    dlBtn.type = "button";
-    dlBtn.className = "agent-dl-btn";
-    dlBtn.id = "shellAgentDownload";
-    dlBtn.innerHTML = '<i class="ti ti-download"></i> Download agent';
-    dlBtn.addEventListener("click", function () { openAgentPanel(); });
-
-    topbar.appendChild(titleWrap);
-    userSlot.appendChild(agentPill);
-    userSlot.appendChild(dlBtn);
-    topbar.appendChild(userSlot);
-
-    // --- Sidebar contents ---
+    // ======================= SIDEBAR =======================================
     sidebar.innerHTML =
-      '<div class="sb-brand"><span class="sb-logo">A</span><span class="sb-brand-name">Artwork Studio</span></div>' +
-      '<button class="sb-newproject" type="button"><i class="ti ti-plus"></i> New Project</button>' +
+      '<div class="sb-brand">' +
+        '<span class="sb-logo">A</span>' +
+        '<span class="sb-brand-text">' +
+          '<div class="sb-brand-name">Artwork Studio</div>' +
+          '<div class="sb-brand-sub">AI Powered Designs</div>' +
+        '</span>' +
+      '</div>' +
       '<nav class="sb-nav" id="sbNav"></nav>' +
-      '<div class="sb-help"><div class="sb-help-title">Need help?</div>' +
-      '<div class="sb-help-body">Check the workflow guide or reach out.</div>' +
-      '<a class="sb-help-link" href="#" onclick="return false">View guide</a></div>';
+      '<div class="sb-foot">' +
+        '<span class="sb-version">' + APP_VERSION + '</span>' +
+        '<button class="sb-collapse" id="sbCollapse" type="button" title="Collapse sidebar">' +
+          '<i class="ti ti-chevrons-left"></i></button>' +
+      '</div>';
 
     var nav = sidebar.querySelector("#sbNav");
 
     function navItem(icon, label, opts) {
       opts = opts || {};
-      var el = document.createElement(opts.href ? "a" : "button");
+      var el = document.createElement("button");
+      el.type = "button";
       el.className = "sb-item" + (opts.active ? " active" : "");
-      if (!opts.href) el.type = "button";
       el.innerHTML = '<i class="ti ti-' + icon + '"></i><span>' + label + '</span>';
+      el.title = label;
       return el;
     }
     function sectionLabel(text) {
@@ -139,89 +117,233 @@
       d.textContent = text;
       return d;
     }
-
-    // Top nav (decorative destinations — not wired to backend routes)
-    NAV_TOP.forEach(function (n, i) {
-      var it = navItem(n.icon, n.label, { active: i === 0 });
-      it.addEventListener("click", function () {
-        // Visual selection only for these placeholder destinations.
-        clearSidebarActive();
-        it.classList.add("active");
-      });
-      nav.appendChild(it);
-    });
-
-    nav.appendChild(sectionLabel("Workflow"));
-
-    // Workflow nav items — each dispatches a click on the matching real .wf-tab.
-    var wfNavItems = {};
-    realTabs.forEach(function (tab) {
-      var wf = tab.dataset.wf;
-      var it = navItem(WF_ICONS[wf] || "square", tab.textContent.trim());
-      it.dataset.wfLink = wf;
-      it.addEventListener("click", function () {
-        if (tab.disabled) return;
-        tab.click(); // reuse existing switching behaviour — do NOT reimplement
-      });
-      wfNavItems[wf] = it;
-      nav.appendChild(it);
-    });
-
-    // Settings section. The "Users" item opens the admin user-management modal
-    // (window.openAdminUsers, defined in index.html). It is admin-only, so it
-    // stays hidden until /api/auth/me confirms the current user is an admin —
-    // without that gate the item did nothing on click, which read as "Settings
-    // does nothing".
-    nav.appendChild(sectionLabel("Settings"));
-    var usersItem = navItem("users", "Users", {});
-    usersItem.style.display = "none";   // revealed for admins below
-    usersItem.addEventListener("click", function () {
-      clearSidebarActive();
-      usersItem.classList.add("active");
-      if (typeof window.openAdminUsers === "function") window.openAdminUsers();
-    });
-    nav.appendChild(usersItem);
-    // Reveal for admins only.
-    fetch("/api/auth/me", { headers: { "Accept": "application/json" } })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) { if (d && d.role === "admin") usersItem.style.display = ""; })
-      .catch(function () {});
-
-    // "New Project" resets to the first workflow tab.
-    var newBtn = sidebar.querySelector(".sb-newproject");
-    newBtn.addEventListener("click", function () {
-      if (realTabs[0] && !realTabs[0].disabled) realTabs[0].click();
-    });
-
-    function clearSidebarActive() {
+    function clearPlaceholderActive() {
       nav.querySelectorAll(".sb-item.active").forEach(function (x) {
-        // Keep the active workflow item highlighted; only clear placeholder nav.
         if (!x.dataset.wfLink) x.classList.remove("active");
       });
     }
 
-    // --- Assemble: move existing header + columns into the main area ---
-    // Insert shell where the header currently is, then re-parent nodes.
+    // A sidebar item that opens a real .wf-tab. Keyed by workflow via
+    // data-wfLink so syncActive() can mirror the active state onto it.
+    var wfNavItems = {};     // wf -> primary sidebar item (for title/mirror)
+    function wfLink(wf, icon, label) {
+      var it = navItem(icon, label);
+      var tab = tabByWf[wf];
+      it.dataset.wfLink = wf;
+      it.addEventListener("click", function () {
+        if (!tab || tab.disabled) return;
+        tab.click();                 // reuse existing switching behaviour
+      });
+      return it;
+    }
+
+    // --- Dashboard (decorative landing highlight) ---
+    var dashItem = navItem("layout-dashboard", "Dashboard");
+    dashItem.addEventListener("click", function () {
+      clearPlaceholderActive();
+      dashItem.classList.add("active");
+    });
+    nav.appendChild(dashItem);
+
+    // --- Nextcloud (main starting point) + Artwork Vault ---
+    // Both open the single real nextcloud tab. "Nextcloud" is the browse/import
+    // starting point; "Artwork Vault" is our saved outputs — same backend tab
+    // today, kept as distinct entries per the information architecture. They are
+    // mirrored together when that tab is active.
+    // Both "Nextcloud" and "Artwork Vault" open the same nextcloud tab, but only
+    // ONE sidebar item may look active at a time. ncActiveItem tracks the one the
+    // operator actually clicked (default: Nextcloud); syncActive highlights only
+    // that one and clears the other.
+    var ncTabItems = [];
+    var ncActiveItem = null;
+    if (tabByWf.nextcloud) {
+      var ncItem = wfLink("nextcloud", "cloud", "Nextcloud");
+      var vaultItem = wfLink("nextcloud", "photo", "Artwork Vault");
+      wfNavItems.nextcloud = ncItem;      // the one that drives the page title
+      ncTabItems.push(ncItem, vaultItem);
+      ncActiveItem = ncItem;
+      ncItem.addEventListener("click", function () { ncActiveItem = ncItem; });
+      vaultItem.addEventListener("click", function () { ncActiveItem = vaultItem; });
+      nav.appendChild(ncItem);
+      nav.appendChild(vaultItem);
+    }
+
+    // --- Workflows ▾ (collapsible group) ---
+    var WF_OPEN_KEY = "sbWorkflowsOpen";
+    function wfGroupStored() {
+      try { return localStorage.getItem(WF_OPEN_KEY); } catch (e) { return null; }
+    }
+    var wfGroupHead = document.createElement("button");
+    wfGroupHead.type = "button";
+    wfGroupHead.className = "sb-group-head";
+    wfGroupHead.innerHTML = '<i class="ti ti-stack-2"></i><span>Workflows</span>' +
+      '<i class="ti ti-chevron-down sb-caret"></i>';
+    var wfGroupBody = document.createElement("div");
+    wfGroupBody.className = "sb-group-body";
+    nav.appendChild(wfGroupHead);
+    nav.appendChild(wfGroupBody);
+
+    CREATE_WORKFLOWS.forEach(function (wf) {
+      var tab = tabByWf[wf];
+      if (!tab) return;
+      var it = wfLink(wf, WF_ICONS[wf] || "square", PAGE_TITLE[wf] || tab.textContent.trim());
+      it.classList.add("sb-sub");
+      wfNavItems[wf] = it;
+      wfGroupBody.appendChild(it);
+    });
+
+    function setWfGroupOpen(open, persist) {
+      wfGroupHead.classList.toggle("open", open);
+      wfGroupBody.classList.toggle("open", open);
+      if (persist) { try { localStorage.setItem(WF_OPEN_KEY, open ? "1" : "0"); } catch (e) {} }
+    }
+    wfGroupHead.addEventListener("click", function () {
+      setWfGroupOpen(!wfGroupBody.classList.contains("open"), true);
+    });
+    // Initial state: remembered preference, else closed (opened on demand when a
+    // workflow page is active — see syncActive).
+    setWfGroupOpen(wfGroupStored() === "1", false);
+
+    // --- Settings (bottom of the nav) → admin user modal (modal gates by role) ---
+    nav.appendChild(sectionLabel(""));   // spacer pushes Settings down a touch
+    var usersItem = navItem("settings", "Settings");
+    usersItem.addEventListener("click", function () {
+      clearPlaceholderActive();
+      usersItem.classList.add("active");
+      if (typeof window.openAdminUsers === "function") window.openAdminUsers();
+    });
+    nav.appendChild(usersItem);
+
+    // Collapse toggle.
+    sidebar.querySelector("#sbCollapse").addEventListener("click", function () {
+      shell.classList.toggle("sb-collapsed");
+    });
+
+    // ======================= TOP BAR =======================================
+    var topbar = document.createElement("div");
+    topbar.className = "app-topbar";
+
+    var search = document.createElement("div");
+    search.className = "topbar-search";
+    search.innerHTML = '<i class="ti ti-search"></i>' +
+      '<input type="text" placeholder="Search artworks, jobs, or tools…" aria-label="Search">';
+
+    var userSlot = document.createElement("div");
+    userSlot.className = "app-user-slot";
+    userSlot.id = "shellUserSlot";
+
+    // "How it works?" moved into the top bar (was in the page header) to keep
+    // the header a single compact line.
+    var howBtn = document.createElement("button");
+    howBtn.type = "button";
+    howBtn.className = "app-howto";
+    howBtn.id = "shellHowTo";
+    howBtn.innerHTML = '<i class="ti ti-help-circle"></i> How it works?';
+    howBtn.addEventListener("click", function () { openAgentPanel(); });
+
+    // Agent status pill (fed by /api/status polling below).
+    var agentPill = document.createElement("div");
+    agentPill.className = "agent-pill agent-pill-off";
+    agentPill.id = "shellAgentPill";
+    agentPill.innerHTML = '<span class="agent-dot"></span><span class="agent-text">Checking agent…</span>';
+
+    // Download-agent button.
+    var dlBtn = document.createElement("button");
+    dlBtn.type = "button";
+    dlBtn.className = "agent-dl-btn";
+    dlBtn.id = "shellAgentDownload";
+    dlBtn.innerHTML = '<i class="ti ti-download"></i> Download agent';
+    dlBtn.addEventListener("click", function () { openAgentPanel(); });
+
+    // Notification bell (decorative) with an unread badge.
+    var bell = document.createElement("button");
+    bell.type = "button";
+    bell.className = "topbar-bell";
+    bell.setAttribute("aria-label", "Notifications");
+    bell.innerHTML = '<i class="ti ti-bell"></i><span class="bell-badge"></span>';
+
+    // Avatar + name + chevron, with a dropdown holding the existing
+    // #userInfo / session indicator (which carry the real logout etc.).
+    var userMenu = document.createElement("div");
+    userMenu.className = "app-user-menu";
+    userMenu.id = "shellUserMenu";
+    userMenu.setAttribute("role", "button");
+    userMenu.setAttribute("tabindex", "0");
+    userMenu.innerHTML =
+      '<span class="app-avatar" id="shellAvatar">AD</span>' +
+      '<span class="app-user-name" id="shellUserName">admin</span>' +
+      '<i class="ti ti-chevron-down app-user-caret"></i>';
+    var dropdown = document.createElement("div");
+    dropdown.className = "app-user-dropdown";
+    dropdown.id = "shellUserDropdown";
+    dropdown.innerHTML = '<div class="dd-name" id="shellDdName">Signed in</div>' +
+      '<div class="dd-sub" id="shellDdSub">Decoinks</div>' +
+      '<div class="dd-slot" id="shellDdSlot"></div>';
+    userMenu.appendChild(dropdown);
+    userMenu.addEventListener("click", function (e) {
+      e.stopPropagation();
+      dropdown.classList.toggle("open");
+    });
+    document.addEventListener("click", function () { dropdown.classList.remove("open"); });
+
+    userSlot.appendChild(howBtn);
+    userSlot.appendChild(agentPill);
+    userSlot.appendChild(dlBtn);
+    userSlot.appendChild(bell);
+    userSlot.appendChild(userMenu);
+
+    topbar.appendChild(search);
+    topbar.appendChild(userSlot);
+
+    // ======================= PAGE HEADER ===================================
+    var pagehead = document.createElement("div");
+    pagehead.className = "app-pagehead";
+    // ONE-LINE header: title + subtitle on the same row (no breadcrumb). The
+    // "How it works?" control lives in the top bar now (added above), freeing
+    // vertical space so a workflow fits a 1366×768 screen without scrolling.
+    pagehead.innerHTML =
+      '<div class="app-page-title" id="shellPageTitle"></div>' +
+      '<div class="app-page-desc" id="shellPageDesc"></div>';
+
+    // ---- Assemble: move existing header + columns into the main area ----
     header.parentNode.insertBefore(shell, header);
     shell.appendChild(sidebar);
     shell.appendChild(main);
     main.appendChild(topbar);
-    main.appendChild(header);   // header keeps its listeners; hidden via CSS
-    main.appendChild(columns);  // columns and all col contents unchanged
+    main.appendChild(pagehead);
+    main.appendChild(header);    // header kept (hidden via CSS) as tab source-of-truth
+    main.appendChild(columns);   // columns + all col contents unchanged
 
-    // Relocate the existing user + session indicators into the top bar slot.
+    // ---- ONE left scroll container ----
+    // #col1 (inputs) and #col2 (options + action button) used to be two separate
+    // grid rows that scrolled independently and overlapped. Wrap them in a single
+    // .col-left once at startup — their ids are untouched, so every renderer that
+    // writes into #col1 / #col2 keeps working. Inside the wrapper they flow
+    // normally one after the other and only the wrapper scrolls; #col3 (Results)
+    // sits beside it. Pixel Geometry (geo-full) hides this wrapper and uses #col3
+    // full-width, so it is unaffected.
+    (function wrapLeftColumn() {
+      var c1 = document.getElementById("col1");
+      var c2 = document.getElementById("col2");
+      var c3 = document.getElementById("col3");
+      if (!c1 || !c2 || !columns) return;
+      var left = document.createElement("div");
+      left.className = "col-left";
+      left.id = "colLeft";
+      columns.insertBefore(left, c1);   // put the wrapper where col1 was
+      left.appendChild(c1);
+      left.appendChild(c2);
+      if (c3) columns.appendChild(c3);  // keep Results after the wrapper
+    })();
+
+    // Relocate the existing user + session indicators into the dropdown slot.
     var userInfo = document.getElementById("userInfo");
     var sessionIndicator = document.getElementById("sessionIndicator");
-    if (sessionIndicator) userSlot.appendChild(sessionIndicator);
-    if (userInfo) {
-      var avatar = document.createElement("span");
-      avatar.className = "app-avatar";
-      avatar.id = "shellAvatar";
-      userSlot.appendChild(avatar);
-      userSlot.appendChild(userInfo);
-    }
+    var ddSlot = document.getElementById("shellDdSlot");
+    if (sessionIndicator && ddSlot) ddSlot.appendChild(sessionIndicator);
+    if (userInfo && ddSlot) ddSlot.appendChild(userInfo);
 
-    // --- Mirror active state from the real tabs (source of truth) ---
+    // ---- Mirror active state from the real tabs (source of truth) ----
     function activeIndex() {
       for (var i = 0; i < realTabs.length; i++) {
         if (realTabs[i].classList.contains("active")) return i;
@@ -231,44 +353,57 @@
     function syncActive() {
       var idx = activeIndex();
       var wf = realTabs[idx] ? realTabs[idx].dataset.wf : "text";
-
-      // Sidebar workflow items — the single place a workflow is highlighted.
       Object.keys(wfNavItems).forEach(function (k) {
         wfNavItems[k].classList.toggle("active", k === wf);
       });
-
-      // Page title + description
+      // Nextcloud is reached from TWO sidebar items; highlight ONLY the one the
+      // operator clicked (ncActiveItem) so a single item is ever active.
+      ncTabItems.forEach(function (it) {
+        it.classList.toggle("active", wf === "nextcloud" && it === ncActiveItem);
+      });
+      // A real workflow is active → clear the decorative Dashboard highlight.
+      if (wfNavItems[wf] || wf === "nextcloud") {
+        dashItem.classList.remove("active");
+      }
       var t = document.getElementById("shellPageTitle");
       var d = document.getElementById("shellPageDesc");
+      var c = document.getElementById("shellCrumbPage");
       if (t) t.textContent = PAGE_TITLE[wf] || "";
       if (d) d.textContent = PAGE_DESC[wf] || "";
+      if (c) c.textContent = PAGE_TITLE[wf] || "Workflow";
     }
-
-    // Observe class changes on the real tabs to mirror them.
     var mo = new MutationObserver(syncActive);
     realTabs.forEach(function (tab) {
       mo.observe(tab, { attributes: true, attributeFilter: ["class"] });
     });
     syncActive();
 
-    // Fill avatar initial once userInfo is populated by the existing script.
-    var avatarEl = document.getElementById("shellAvatar");
-    if (avatarEl) {
-      var setInitial = function () {
-        var ui = document.getElementById("userInfo");
-        var name = ui ? (ui.textContent || "").trim() : "";
-        avatarEl.textContent = name ? name.charAt(0).toUpperCase() : "";
-      };
-      setInitial();
-      var uo = new MutationObserver(setInitial);
-      if (userInfo) uo.observe(userInfo, { childList: true, subtree: true, characterData: true });
+    // Fill avatar initials, top-bar name and dropdown name from #userInfo text.
+    function _initials(name) {
+      var parts = name.split(/\s+/).filter(Boolean);
+      if (!parts.length) return "AD";
+      if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+      return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
+    }
+    function setUserBits() {
+      var ui = document.getElementById("userInfo");
+      var name = ui ? (ui.textContent || "").replace(/\s+/g, " ").trim() : "";
+      // #userInfo often holds extra chrome; take the first non-empty token line.
+      var display = name ? name.split("•")[0].trim() : "";
+      var avatarEl = document.getElementById("shellAvatar");
+      var nameEl = document.getElementById("shellUserName");
+      var ddName = document.getElementById("shellDdName");
+      if (avatarEl) avatarEl.textContent = display ? _initials(display) : "AD";
+      if (nameEl && display) nameEl.textContent = display.split(" ")[0] || display;
+      if (ddName && display) ddName.textContent = display;
+    }
+    setUserBits();
+    if (userInfo) {
+      var uo = new MutationObserver(setUserBits);
+      uo.observe(userInfo, { childList: true, subtree: true, characterData: true });
     }
 
-    // --- Agent setup: there is a SINGLE panel now, the "Agent setup" modal
-    // defined in index.html (window.openAgentSetup). It shows the download, the
-    // three setup steps, and the pre-fillable server URL. Designers sign in to
-    // the agent with their email + password (no tokens). All entry points
-    // delegate to that one modal.
+    // --- Single agent-setup modal entry point (defined in index.html) ---
     function openAgentPanel() {
       if (typeof window.openAgentSetup === "function") window.openAgentSetup();
     }
@@ -284,8 +419,25 @@
     if (columns && columns.parentNode) columns.parentNode.insertBefore(banner, columns);
     document.getElementById("agentBannerBtn").addEventListener("click", function () { openAgentPanel(); });
 
+    // ======================= REUSABLE STEPPER ==============================
+    // window.buildStepper([{name,desc}...], currentIndex) -> HTML string of a
+    // numbered horizontal stepper (steps before current = done). Pure helper;
+    // nothing calls it from workflow logic, so it changes no behaviour.
+    window.buildStepper = function (steps, current) {
+      steps = steps || []; current = current || 0;
+      var h = '<div class="stepper">';
+      for (var i = 0; i < steps.length; i++) {
+        if (i) h += '<div class="st-sep"></div>';
+        var cls = i < current ? "done" : (i === current ? "current" : "");
+        var s = steps[i] || {};
+        h += '<div class="step ' + cls + '"><div class="st-num">' + (i + 1) + '</div>' +
+          '<div class="st-txt"><div class="st-name">' + (s.name || "") + '</div>' +
+          (s.desc ? '<div class="st-desc">' + s.desc + '</div>' : '') + '</div></div>';
+      }
+      return h + '</div>';
+    };
+
     // --- Agent connection status: poll /api/status every 5s ---
-    // Relative "last seen" from an epoch-seconds timestamp.
     function _agoText(epochSec) {
       if (!epochSec) return "never seen";
       var s = Math.max(0, Math.round(Date.now() / 1000 - epochSec));
@@ -295,7 +447,6 @@
       if (s < 86400) return Math.round(s / 3600) + "h ago";
       return Math.round(s / 86400) + "d ago";
     }
-
     function pollAgentStatus() {
       fetch("/api/status", { headers: { "Accept": "application/json" } })
         .then(function (r) { return r.ok ? r.json() : null; })
@@ -310,8 +461,6 @@
             pill.className = "agent-pill agent-pill-on";
             var nm = s.agent_name || "agent";
             var ver = s.agent_version ? "  v" + s.agent_version : "";
-            // Last-seen of the labelled agent, so "connected" can be sanity-
-            // checked at a glance (a stale heartbeat is now visible).
             var seenTxt = "";
             var la = (s.agents || []).filter(function (a) { return a.name === nm; })[0];
             if (la && la.last_seen) seenTxt = "  (" + _agoText(la.last_seen) + ")";
@@ -320,7 +469,7 @@
             if (bnr) bnr.style.display = "none";
           } else {
             pill.className = "agent-pill agent-pill-off";
-            textEl.textContent = "No agent running — start the agent on your PC to generate";
+            textEl.textContent = "No agent running";
             if (dl) dl.classList.add("agent-dl-prominent");
             if (bnr) bnr.style.display = "flex";
           }
@@ -330,8 +479,7 @@
     pollAgentStatus();
     setInterval(pollAgentStatus, 5000);
 
-    // Show which agent picked up each job on the job cards. The existing render
-    // writes job status text; we annotate any element that carries a job id.
+    // Show which agent picked up each job, on job cards.
     function annotateJobAgents() {
       fetch("/api/jobs", { headers: { "Accept": "application/json" } })
         .then(function (r) { return r.ok ? r.json() : null; })

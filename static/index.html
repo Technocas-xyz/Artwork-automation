@@ -12,6 +12,12 @@ header{padding:14px 24px;border-bottom:1px solid var(--border);background:var(--
 header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .wf-tabs{display:flex;gap:6px}.wf-tab{padding:7px 16px;font-size:.85rem;font-weight:600;border:2px solid var(--border);border-radius:8px;background:var(--surface);cursor:pointer;transition:.15s}.wf-tab.active{border-color:var(--accent);background:#eff6ff;color:var(--accent)}.wf-tab:disabled{opacity:.4;cursor:not-allowed}
 .columns{flex:1;display:grid;grid-template-columns:1fr 1.1fr 1.3fr;gap:0;overflow:hidden}
+/* Pixel Geometry uses the FULL page width: collapse the 3-column grid to a
+   single scrollable column, hide the first two columns, and let the results
+   column (col3) span everything. Only this page gets the class. */
+.columns.geo-full{grid-template-columns:1fr}
+.columns.geo-full #col1,.columns.geo-full #col2{display:none}
+.columns.geo-full #col3{border-right:none}
 .col{padding:18px;overflow-y:auto;border-right:1px solid var(--border)}.col:last-child{border-right:none}
 .col-title{font-size:.82rem;font-weight:600;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);margin-bottom:12px}
 .drop-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:16px;text-align:center;margin-bottom:10px;cursor:pointer;transition:.2s}.drop-zone.dragover{border-color:var(--accent);background:#eff6ff}.drop-zone p{font-size:.8rem;color:var(--muted)}.drop-zone .browse-btn{display:inline-block;margin-top:6px;padding:5px 12px;font-size:.76rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer}
@@ -25,7 +31,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .gen-btn{width:100%;padding:14px;font-size:1rem;font-weight:700;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;transition:.2s;margin-top:8px}.gen-btn:hover{background:var(--accent-hover)}.gen-btn:disabled{background:#94a3b8;cursor:not-allowed}
 .blocker-msg{font-size:.78rem;color:#dc2626;margin-top:5px;line-height:1.3}
 .edit-toggle{font-size:.74rem;color:var(--muted);cursor:pointer;margin:8px 0 4px;user-select:none}.edit-toggle:hover{color:var(--accent)}.edit-toggle.open::before{content:"▾ "}.edit-toggle::before{content:"▸ "}
-.edit-body{display:none;margin-bottom:10px}.edit-body.open{display:block}.edit-body textarea{width:100%;min-height:200px;padding:10px;font-size:.76rem;font-family:Consolas,Monaco,monospace;border:1px solid var(--border);border-radius:8px;resize:vertical}.edit-body .reset-link{font-size:.68rem;color:var(--accent);cursor:pointer;margin-top:2px;display:inline-block}
+.edit-body{display:none;margin-bottom:10px}.edit-body.open{display:block}.edit-body textarea{width:100%;min-height:120px;padding:10px;font-size:.76rem;font-family:Consolas,Monaco,monospace;border:1px solid var(--border);border-radius:8px;resize:vertical}.edit-body .reset-link{font-size:.68rem;color:var(--accent);cursor:pointer;margin-top:2px;display:inline-block}
 .tpl-error{color:#dc2626;font-size:.72rem;margin-top:2px}
 .worker-dead{padding:14px 16px;border-radius:var(--radius);margin-bottom:14px;background:#fee2e2;border:1px solid #fecaca;color:#991b1b;font-size:.86rem}
 .progress-box{padding:14px 16px;border-radius:var(--radius);margin-bottom:14px;background:#fef3c7;border:1px solid #fde68a}
@@ -45,7 +51,103 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .prompt-toggle{font-size:.72rem;color:var(--muted);cursor:pointer;margin-top:4px;user-select:none}.prompt-toggle:hover{color:var(--accent)}.prompt-content{display:none;margin-top:4px;padding:7px 9px;background:#f9fafb;border:1px solid var(--border);border-radius:6px;font-family:Consolas,Monaco,monospace;font-size:.7rem;white-space:pre-wrap;max-height:110px;overflow-y:auto;color:var(--muted)}.prompt-content.open{display:block}
 .history-section{border-top:1px solid var(--border);padding-top:12px;margin-top:12px}.history-section h3{font-size:.8rem;color:var(--muted);margin-bottom:6px}.history-item{padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:.76rem;cursor:pointer}.history-item:hover{border-color:var(--accent)}.history-item .hi-label{font-weight:600}.history-detail{display:none;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)}.history-detail.open{display:block}.history-detail img{max-width:100%;max-height:90px;border-radius:6px;margin-right:4px;margin-bottom:3px;border:1px solid var(--border)}
 .coming-soon{text-align:center;color:var(--muted);padding:40px 0;font-size:.88rem}
+/* Client slot: a read-only chip (from the vault) OR one optional input (manual upload). */
+.client-slot{margin-bottom:14px}
+.client-chip{display:inline-flex;align-items:center;gap:7px;padding:7px 12px;border-radius:999px;background:#eef2ff;border:1px solid #d6ddff;color:#3730a3;font-size:.8rem}
+.client-chip b{font-weight:700}
+.client-chip .ti{font-size:15px}
 .hd-thumb{display:inline-block;vertical-align:top;text-align:center;margin-right:6px;margin-bottom:4px}.hd-thumb-label{display:block;font-size:.64rem;color:var(--muted);margin-bottom:2px}
+/* --- Pixel Geometry — full-width Before|After dashboard --- */
+.geo-page{font-size:.78rem;padding:4px 20px 24px;max-width:1760px;margin:0 auto}
+/* top row: title left, step bar right */
+.geo-top{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:14px}
+.geo-top .gt-title{font-size:1.35rem;font-weight:800;line-height:1.1}
+.geo-top .gt-sub{font-size:.76rem;color:var(--muted);margin-top:3px;max-width:420px}
+.geo-steps{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.geo-step{display:flex;align-items:center;gap:7px;padding:2px 4px}
+.geo-step .s-num{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.76rem;font-weight:700;background:#eef0f3;color:#94a3b8;border:2px solid #eef0f3}
+.geo-step .s-txt{line-height:1.1}.geo-step .s-name{font-size:.72rem;font-weight:700}.geo-step .s-desc{font-size:.6rem;color:var(--muted)}
+.geo-step.done .s-num{background:#dbeafe;color:var(--accent);border-color:#bfdbfe}
+.geo-step.cur .s-num{background:var(--accent);color:#fff;border-color:var(--accent)}
+.geo-step.cur .s-name{color:var(--accent)}
+.geo-step-sep{width:18px;height:2px;background:#e5e7eb;flex:none}
+/* the two halves */
+.geo-halves{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
+@media (max-width:1200px){.geo-halves{grid-template-columns:1fr}}
+.geo-half{min-width:0}
+.geo-half .gh-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.geo-half .gh-title{font-size:.92rem;font-weight:800;letter-spacing:.02em}
+.geo-half .gh-tag{font-size:.64rem;font-weight:700;padding:3px 9px;border-radius:20px;margin-left:auto}
+.geo-half.before .gh-title{color:var(--accent)}
+.geo-half.before .gh-tag{background:#eff6ff;color:var(--accent)}
+.geo-half.after .gh-title{color:#059669}
+.geo-half.after .gh-tag{background:#ecfdf5;color:#059669}
+.geo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+@media (max-width:1480px){.geo-grid{grid-template-columns:repeat(2,1fr)}}
+.geo-card2{border:1px solid var(--border);border-radius:11px;padding:10px 12px;background:var(--surface);max-height:none}
+.geo-card2.span2{grid-column:span 2}.geo-card2.span3{grid-column:1/-1}
+@media (max-width:1480px){.geo-card2.span3{grid-column:1/-1}}
+.geo-card2 h4{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);margin-bottom:7px;display:flex;align-items:center;gap:6px}
+.geo-card2 h4 .h4-right{margin-left:auto;font-weight:700}
+.geo-kv{display:flex;justify-content:space-between;gap:8px;font-size:.74rem;padding:2px 0}
+.geo-kv .k{color:var(--muted)}.geo-kv .v{font-weight:600;text-align:right}
+.geo-bar{margin:4px 0}
+.geo-bar .bar-top{display:flex;justify-content:space-between;font-size:.66rem;margin-bottom:2px}
+.geo-bar .bar-track{height:7px;border-radius:4px;background:#eef0f3;overflow:hidden}
+.geo-bar .bar-fill{height:100%;background:var(--accent);border-radius:4px}
+.geo-half.after .geo-bar .bar-fill{background:#059669}
+/* image + measurement preview */
+.geo-imgbox{border-radius:8px;overflow:hidden;background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/14px 14px}
+.geo-imgbox img{display:block;width:100%;max-height:260px;object-fit:contain}
+/* generation settings radio cards */
+.geo-radio{display:block;border:1px solid var(--border);border-radius:9px;padding:8px 10px;margin-bottom:6px;cursor:pointer;transition:.12s}
+.geo-radio:hover{border-color:#c7d2fe}
+.geo-radio.sel{border-color:var(--accent);background:#eff6ff}
+.geo-radio .r-name{font-size:.76rem;font-weight:700}.geo-radio .r-rec{font-size:.58rem;font-weight:700;color:var(--accent);margin-left:6px}
+.geo-radio .r-desc{font-size:.66rem;color:var(--muted);margin-top:1px}
+/* JSON production spec */
+.geo-json{position:relative;background:#0f172a;color:#cbd5e1;border-radius:9px;padding:10px 12px;font-family:Consolas,Monaco,monospace;font-size:.68rem;line-height:1.5;max-height:260px;overflow:auto;white-space:pre}
+.geo-json .j-copy{position:absolute;top:7px;right:7px;font-size:.62rem;font-weight:700;padding:3px 8px;border-radius:6px;border:1px solid #334155;background:#1e293b;color:#cbd5e1;cursor:pointer}
+.geo-json .j-copy:hover{background:#334155}
+/* big similarity % */
+.geo-simbig{text-align:center}
+.geo-simbig .sb-pct{font-size:1.9rem;font-weight:800;color:#059669;line-height:1}
+.geo-simbar{height:9px;border-radius:5px;background:#eef0f3;overflow:hidden;margin:7px 0}
+.geo-simbar .sb-fill{height:100%;background:#059669}
+/* QA / status chips */
+.geo-statustag{font-size:.6rem;font-weight:700;padding:2px 8px;border-radius:20px}
+.geo-chip{display:inline-flex;min-width:40px;justify-content:center;font-size:.6rem;font-weight:700;color:#fff;border-radius:10px;padding:2px 7px}
+.geo-qgrid{display:grid;grid-template-columns:1fr 1fr;gap:5px 12px}
+.geo-qrow{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:.72rem}
+.geo-autofix .af-row{display:flex;align-items:center;gap:7px;font-size:.73rem;padding:2px 0}
+.geo-autofix .af-ic{color:#059669;font-weight:800}
+.geo-autofix .af-amt{margin-left:auto;color:var(--muted)}
+.geo-dlbtn{display:inline-block;margin-top:8px;padding:7px 13px;font-size:.76rem;font-weight:700;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;text-decoration:none}
+.geo-dlbtn:hover{background:var(--accent-hover)}
+.geo-ready{display:inline-flex;align-items:center;gap:6px;font-size:.68rem;font-weight:700;color:#059669;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:5px 9px;margin-bottom:6px}
+/* comparison + all-fields below */
+.geo-below{margin-top:18px}
+.geo-cmp{width:100%;border-collapse:collapse;border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.geo-cmp th{font-size:.64rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);text-align:right;padding:7px 10px;background:#f6f7f9;border-bottom:1px solid var(--border)}
+.geo-cmp th:first-child{text-align:left}
+.geo-cmp td{padding:6px 10px;font-size:.78rem;text-align:right;border-bottom:1px solid var(--border)}
+.geo-cmp td:first-child{text-align:left;font-weight:600}
+.geo-cmp tr:last-child td{border-bottom:none}
+.geo-cmp .d-up{color:#16a34a}.geo-cmp .d-down{color:#dc2626}.geo-cmp .d-zero{color:var(--muted)}
+.geo-section-toggle{font-size:.78rem;font-weight:600;color:var(--text);cursor:pointer;user-select:none;padding:9px 11px;border:1px solid var(--border);border-radius:9px;background:#f6f7f9;margin-top:10px}
+.geo-section-toggle:hover{border-color:var(--accent);color:var(--accent)}
+.geo-section-toggle.open::before{content:"▾ "}.geo-section-toggle::before{content:"▸ "}
+.geo-section-body{display:none;margin-top:8px}.geo-section-body.open{display:block}
+.geo-search{width:100%;padding:8px 11px;border:1px solid var(--border);border-radius:8px;font-size:.82rem;margin-bottom:8px}
+.geo-allcols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:1100px){.geo-allcols{grid-template-columns:1fr}}
+.geo-allrows{width:100%;border-collapse:collapse}
+.geo-allrows tr{border-top:1px solid var(--border)}
+.geo-allrows td{padding:4px 8px;font-size:.76rem}
+.geo-allrows td.v{text-align:right}
+.geo-allrows .fkey{font-size:.6rem;color:#94a3b8;font-family:monospace}
+.geo-uploadbox{border:2px dashed var(--border);border-radius:9px;padding:14px;text-align:center;cursor:pointer;font-size:.74rem;color:var(--muted);margin-top:8px}
+.geo-uploadbox:hover{border-color:var(--accent);background:#eff6ff}
 /* --- Nextcloud vault browser --- */
 .nc-banner{padding:9px 11px;border-radius:8px;font-size:.76rem;margin-bottom:10px;line-height:1.35}.nc-banner.ok{background:#f0fdf4;border:1px solid #bbf7d0;color:#166534}.nc-banner.warn{background:#fffbeb;border:1px solid #fde68a;color:#92400e}.nc-banner.bad{background:#fee2e2;border:1px solid #fecaca;color:#991b1b}
 .nc-live{display:inline-flex;align-items:center;gap:5px;font-weight:600}.nc-dot{width:8px;height:8px;border-radius:50%;background:#10b981;animation:pulse 1.6s ease-in-out infinite;flex:none}.nc-dot.off{background:#f59e0b;animation:none}.nc-dot.bad{background:#dc2626;animation:none}
@@ -55,7 +157,9 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .nc-crumbs{font-size:.76rem;color:var(--muted);margin-bottom:8px;line-height:1.6;word-break:break-word}.nc-crumbs a{color:var(--accent);text-decoration:none;cursor:pointer}.nc-crumbs a:hover{text-decoration:underline}
 .nc-folders{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
 .nc-folder{padding:7px 11px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:.78rem;cursor:pointer;transition:.15s}.nc-folder:hover{border-color:var(--accent);background:#eff6ff}
-.nc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px}
+.nc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+@media (min-width:1100px){.nc-grid{grid-template-columns:repeat(5,1fr)}}
+@media (min-width:1500px){.nc-grid{grid-template-columns:repeat(6,1fr)}}
 .nc-file{position:relative;border:2px solid var(--border);border-radius:8px;padding:5px;background:var(--surface);cursor:pointer;text-align:center;transition:.15s}.nc-file:hover{border-color:var(--accent)}.nc-file.sel{border-color:var(--accent);background:#eff6ff}.nc-file.dead{opacity:.5;cursor:not-allowed}.nc-file.dead:hover{border-color:var(--border)}
 .nc-file img{width:100%;height:78px;object-fit:contain;border-radius:4px;background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/12px 12px}
 .nc-file .nc-name{font-size:.64rem;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -74,9 +178,10 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .nc-lb-close{position:absolute;top:14px;right:18px;width:38px;height:38px;border:none;border-radius:50%;background:rgba(255,255,255,.14);color:#fff;font-size:1.1rem;cursor:pointer;z-index:2}.nc-lb-close:hover{background:rgba(255,255,255,.26)}
 .nc-lb-nav{position:absolute;top:50%;transform:translateY(-50%);width:48px;height:72px;border:none;border-radius:10px;background:rgba(255,255,255,.12);color:#fff;font-size:2rem;line-height:1;cursor:pointer;z-index:2}.nc-lb-nav:hover{background:rgba(255,255,255,.24)}
 .nc-lb-nav.prev{left:16px}.nc-lb-nav.next{right:16px}
-.nc-send{position:sticky;bottom:0;background:var(--surface);border-top:1px solid var(--border);padding:10px 0 2px;margin-top:14px}
+/* Send-to-workflow toolbar: compact, sticky at the TOP of the file panel. */
+.nc-send{position:sticky;top:0;z-index:5;background:var(--surface);border-bottom:1px solid var(--border);padding:8px 0 8px;margin-bottom:10px}
 .nc-send-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-.nc-send-btn{flex:1 1 45%;padding:9px 10px;font-size:.76rem;font-weight:700;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer}.nc-send-btn:hover{background:var(--accent-hover)}.nc-send-btn:disabled{background:#cbd5e1;cursor:not-allowed}
+.nc-send-btn{padding:6px 10px;font-size:.72rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:7px;cursor:pointer}.nc-send-btn:hover{background:var(--accent-hover)}.nc-send-btn:disabled{background:#cbd5e1;cursor:not-allowed}
 .nc-feed{margin-top:14px;border-top:1px solid var(--border);padding-top:10px}
 .nc-feed-item{padding:6px 8px;border:1px solid var(--border);border-radius:7px;margin-bottom:4px;font-size:.72rem;cursor:pointer;background:var(--surface)}.nc-feed-item:hover{border-color:var(--accent)}.nc-feed-item.fresh{border-color:#10b981;background:#f0fdf4}
 .nc-feed-item .nc-fi-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -146,7 +251,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 <link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
-<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="textimage">Text + Image</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button><button class="wf-tab" data-wf="identify">Artwork Identification</button><button class="wf-tab" data-wf="printready">Print Ready QA</button><button class="wf-tab" data-wf="colorway">Colorways</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><button id="adminUsersBtn" onclick="openAdminUsers()" style="display:none;font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:8px">Users</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
+<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="textimage">Text + Image</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button><button class="wf-tab" data-wf="identify">Artwork Identification</button><button class="wf-tab" data-wf="printready">Print Ready QA</button><button class="wf-tab" data-wf="colorway">Colorways</button><button class="wf-tab" data-wf="geometry">Pixel Geometry</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><button id="adminUsersBtn" onclick="openAdminUsers()" style="display:none;font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:8px">Users</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
 <div class="columns">
 <div class="col" id="col1"></div>
 <div class="col" id="col2"></div>
@@ -223,32 +328,42 @@ var currentWorkflow="nextcloud";
 // them in state, update on each keystroke, and restore after every render. The
 // client/job inputs differ by workflow but hold the SAME job metadata, so one
 // shared pair of values is correct.
-var jobClient="",jobTask="";
-// The client/job input ids per workflow (text and textimage share col2).
-var _CT_IDS={text:["cn","ti"],textimage:["cn","ti"],mockup:["mcn","mti"],
-             artwork:["acn","ati"],custom:["ccn","cti"]};
-function _ctInputs(){
-  var ids=_CT_IDS[currentWorkflow];if(!ids)return [null,null];
-  return [$(ids[0]),$(ids[1])];
+// The client name is shared job metadata across workflows. The JOB NUMBER is no
+// longer entered or shown — the server generates it (JOB-YYYYMMDD-<id>, or from
+// a vault AW-code when available). jobClientFromVault is true when the client
+// came from a Nextcloud customer folder, so the slot renders a read-only chip
+// instead of an editable input.
+var jobClient="",jobClientFromVault=false;
+
+// A single reusable "client slot" shown at the top of every workflow's panel:
+//   - from the vault  -> read-only chip  "Client: <name>"
+//   - manual upload   -> one small optional "Client name" input
+// id="jobClientInput" is the only input it ever renders; wireClientSlot binds it.
+function clientSlotHtml(){
+  if(jobClientFromVault&&jobClient){
+    return '<div class="client-slot"><span class="client-chip">'
+      +'<i class="ti ti-user"></i> Client: <b>'+esc(jobClient)+'</b></span></div>';
+  }
+  return '<div class="client-slot"><div class="field-group" style="margin:0">'
+    +'<label>Client name <span style="color:var(--muted);font-weight:400">(optional)</span></label>'
+    +'<input type="text" id="jobClientInput" placeholder="e.g. Westside Athletics" value="'+esc(jobClient)+'"></div></div>';
 }
-// Read the live inputs into state (call BEFORE a re-render / on each keystroke).
-function saveClientTask(){
-  var io=_ctInputs();
-  if(io[0])jobClient=io[0].value;
-  if(io[1])jobTask=io[1].value;
-}
-// Write state back into whatever client/job inputs exist (call AFTER a render).
-function restoreClientTask(){
-  var io=_ctInputs();
-  if(io[0]&&jobClient)io[0].value=jobClient;
-  if(io[1]&&jobTask)io[1].value=jobTask;
-}
-// Wire an input pair so typing keeps state live (used by every col2 renderer).
-function wireClientTask(clientId,taskId,updFn){
-  var c=$(clientId),t=$(taskId);
+// Bind the slot's input (if editable) so typing keeps jobClient live across
+// re-renders. updFn re-runs the workflow's generate-button gate. Safe to call
+// when the slot is a read-only chip (no input present).
+function wireClientSlot(updFn){
+  var c=$("jobClientInput");
   if(c){c.value=jobClient;c.oninput=function(){jobClient=c.value;if(updFn)updFn()}}
-  if(t){t.value=jobTask;t.oninput=function(){jobTask=t.value;if(updFn)updFn()}}
 }
+// Back-compat shims: older per-workflow renderers call wireClientTask(cId,tId,fn)
+// and the vault prefill calls restoreClientTask(). Both now just drive the
+// single client slot; the task-id argument is ignored (server generates it).
+function wireClientTask(_clientId,_taskId,updFn){ wireClientSlot(updFn); }
+function restoreClientTask(){ var c=$("jobClientInput");if(c&&jobClient)c.value=jobClient; }
+// Older renderers call saveClientTask() before a re-render to preserve the
+// typed client across it. The single client slot keeps jobClient live via its
+// oninput, so this just captures the current field value if the slot is present.
+function saveClientTask(){ var c=$("jobClientInput");if(c)jobClient=c.value; }
 
 // --- Edited prompts survive re-renders -----------------------------------
 // A prompt textarea the operator edited must not reset to the server default on
@@ -406,9 +521,27 @@ function switchWorkflow(wf){document.querySelectorAll(".wf-tab").forEach(functio
 document.querySelectorAll(".wf-tab").forEach(function(t){t.addEventListener("click",function(){if(t.disabled)return;switchWorkflow(t.dataset.wf)})});
 
 function renderCols(){
+  // Pixel Geometry runs full-width: toggle the single-column override on
+  // .columns and hide the "Results" column chrome. Every other workflow keeps
+  // the normal 3-column layout, so clear the class whenever we are not on it.
+  var _colsEl=document.querySelector(".columns");
+  var _col3Title=document.querySelector("#col3 .col-title");
+  if(_colsEl){
+    // Pixel Geometry: full-width single page in #col3. Nextcloud: its own
+    // two-panel layout (customer list | file grid), no empty Results column.
+    _colsEl.classList.toggle("geo-full",currentWorkflow==="geometry");
+    _colsEl.classList.toggle("nc-full",currentWorkflow==="nextcloud");
+  }
+  if(_col3Title)_col3Title.style.display=(currentWorkflow==="geometry")?"none":"";
+  // Switching tabs abandons the current view: clear the shared Results column so
+  // one workflow's output (e.g. the full-width Pixel Geometry page) never bleeds
+  // onto another page. Only when NOT on geometry AND no job is in flight — a live
+  // job owns resultArea via the poll, so we must not wipe it mid-run. renderCols
+  // only runs on a real tab switch / page load, never from the poll.
+  if(resultArea&&currentWorkflow!=="geometry"&&activeJobId===null){resultArea.innerHTML="";statusArea.innerHTML=""}
   if(currentWorkflow==="nextcloud"){renderNextcloudCol1();renderNextcloudCol2();ncStartPolling();return}
   ncStopPolling();
-  if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else if(currentWorkflow==="custom"){textImageFile="";mockupImageFile="";renderCustomCol1();renderCustomCol2()}else if(currentWorkflow==="identify"){textImageFile="";mockupImageFile="";artworkFiles=[];renderIdentifyCol1();renderIdentifyCol2()}else if(currentWorkflow==="printready"){textImageFile="";mockupImageFile="";artworkFiles=[];renderPrintReadyCol1();renderPrintReadyCol2()}else if(currentWorkflow==="colorway"){textImageFile="";mockupImageFile="";artworkFiles=[];renderColorwayCol1();renderColorwayCol2()}else{
+  if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else if(currentWorkflow==="custom"){textImageFile="";mockupImageFile="";renderCustomCol1();renderCustomCol2()}else if(currentWorkflow==="identify"){textImageFile="";mockupImageFile="";artworkFiles=[];renderIdentifyCol1();renderIdentifyCol2()}else if(currentWorkflow==="printready"){textImageFile="";mockupImageFile="";artworkFiles=[];renderPrintReadyCol1();renderPrintReadyCol2()}else if(currentWorkflow==="colorway"){textImageFile="";mockupImageFile="";artworkFiles=[];renderColorwayCol1();renderColorwayCol2()}else if(currentWorkflow==="geometry"){textImageFile="";mockupImageFile="";artworkFiles=[];renderGeometryPage()}else{
     // "text" and "textimage" share the same renderers; they differ only in which
     // modes they expose. Keep text_mode valid for the active tab — EXCEPT the
     // deliberate unset state ("") used when a Text + Image file arrives from the
@@ -446,7 +579,8 @@ function renderCol1(){
       +'<span class="tmode-name">'+m[1]+'</span><span class="tmode-desc">'+m[2]+'</span></button>';
   });
   tabs+='</div>';
-  col1.innerHTML='<div class="col-title">'+title+'</div>'+tabs+'<div id="tmodePanel"></div>';
+  col1.innerHTML=clientSlotHtml()+'<div class="col-title">'+title+'</div>'+tabs+'<div id="tmodePanel"></div>';
+  wireClientSlot(updBtn);
   col1.querySelectorAll(".tmode-tab").forEach(function(b){b.onclick=function(){
     saveClientTask();   // keep client/job across the mode-switch re-render
     textMode=b.dataset.tmode;
@@ -539,8 +673,7 @@ function renderCol2(){
     var tpl1Id="tpl1__"+textMode;
     promptBlock='<div class="edit-toggle" id="tplTog">Edit prompt for step 1</div><div class="edit-body" id="tplBody"><textarea id="tpl1" data-prompt-id="'+tpl1Id+'">'+esc(seedPromptText(tpl1Id,step1Tpl))+'</textarea><div class="tpl-error" id="tplErr"></div></div>';
   }
-  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="cn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="ti" placeholder="e.g. JOB-0042"></div>'+promptBlock+'<button class="gen-btn" id="genBtn" disabled>Generate</button><div class="blocker-msg" id="blkMsg"></div>';
-  wireClientTask("cn","ti",updBtn);
+  col2.innerHTML=promptBlock+'<button class="gen-btn" id="genBtn" disabled>Generate</button><div class="blocker-msg" id="blkMsg"></div>';
   wirePromptEdits(col2);
   $("tplTog").onclick=function(){$("tplTog").classList.toggle("open");$("tplBody").classList.toggle("open")};
   var t2=$("tplTog2");if(t2)t2.onclick=function(){t2.classList.toggle("open");$("tplBody2").classList.toggle("open")};
@@ -549,20 +682,19 @@ function renderCol2(){
 }
 function updBtn(){
   var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();updIdentifyBtn();updPrintReadyBtn();updColorwayBtn();return}
-  var dt=$("designText"),cn=$("cn"),ti=$("ti");
+  var dt=$("designText");
   var hasInput;
   if(textMode===""){hasInput=false}  // Text + Image mode not yet chosen — nothing to submit
   else if(textMode==="replace"){hasInput=replaceImageFile&&(replaceNewText||"").trim()}
   else if(textMode==="from_image"){hasInput=textImageFile}
   else if(textMode==="image_element"||textMode==="image_style"){hasInput=referenceImageFile&&(imageModeText||"").trim()}
   else{hasInput=(dt&&dt.value.trim())||(currentTypedText||"").trim()}
-  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
-  btn.disabled=!hasInput||!hasDetails||blocked;
+  btn.disabled=!hasInput||blocked;
   if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is waiting for the client\u2019s choice. Cancel it or complete it to start a new one.");else blk.textContent=""}
 }
 function submitJob(){
-  var body={workflow:"text",text_mode:textMode,client:$("cn").value.trim(),task_id:$("ti").value.trim(),files:[],options:[],params:{},custom_note:""};
+  var body={workflow:"text",text_mode:textMode,client:jobClient.trim(),files:[],options:[],params:{},custom_note:""};
   if(textMode==="replace"){
     var rc=$("tplRC"),rf=$("tplRF"),err=$("tplErr"),err2=$("tplErr2");
     if(err)err.textContent="";if(err2)err2.textContent="";
@@ -703,6 +835,10 @@ function render(job){
       // still running (renderPrintReadyResults shows "Waiting…" for the text).
       if(job.workflow==="printready")resultArea.innerHTML=renderPrintReadyResults(job)+cancelHtml(job);
       else if(job.workflow==="colorway")resultArea.innerHTML=renderColorwayRunning(job)+cancelHtml(job);
+      // Pixel Geometry: the BEFORE panel is measured on the server at job
+      // creation, so show it IMMEDIATELY; the AFTER panel shows "Generating…"
+      // until the output is measured (a later poll flips it in via imgKey).
+      else if(job.workflow==="geometry")resultArea.innerHTML=renderGeometryResults(job)+cancelHtml(job);
       else resultArea.innerHTML=renderStages(job)+cancelHtml(job);
       // Ensure exactly one elapsed timer runs, counting from the fixed stepStart.
       if(elapsedTimer)clearInterval(elapsedTimer);
@@ -740,6 +876,7 @@ function render(job){
     else if(job.workflow==="identify")resultArea.innerHTML=renderIdentifyResults(job);
     else if(job.workflow==="printready")resultArea.innerHTML=renderPrintReadyResults(job);
     else if(job.workflow==="colorway")resultArea.innerHTML=renderColorwayResults(job);
+    else if(job.workflow==="geometry")resultArea.innerHTML=renderGeometryResults(job);
     else if(job.workflow==="text"&&job.text_mode==="replace")resultArea.innerHTML=renderReplaceResults(job);
     else resultArea.innerHTML=renderStages(job);
     clearActiveJob();updBtn();addHist(job);
@@ -778,7 +915,9 @@ function renderAwaiting(job){
     return html;
   }
   var stageKey=stage===1?"stage1":"stage2";
-  if(stage===2&&si.stage1){html+=stageBlock("Step 1 \u2014 Style variations \u2014 chosen: #"+(choices[0]||"?"),job.id,"stage1",prompts,hasT0,false)}
+  // Earlier stage (step 1) collapses to a thumbnail during the step-2 pause so
+  // only the CURRENT collage is shown large (click the thumb to view it).
+  if(stage===2&&si.stage1){html+=_stageThumbRow(job.id,[{key:"stage1",label:"Step 1 \u2014 Style variations"+(choices[0]?" (chose #"+choices[0]+")":"")}])}
   if(!si[stageKey]){html+='<div class="status-box failed">Error: The collage image could not be loaded.</div>'+cancelHtml(job);return html}
   var title=stage===1?"Step 1 \u2014 Style variations":"Step 2 \u2014 Colour variations";
   html+=stageBlock(title,job.id,stageKey,prompts,hasT0+(stage-1),false);
@@ -809,11 +948,36 @@ function renderStages(job){
   var si=job.stage_images||{},choices=job.choices||[],prompts=job.prompts||[],hasT0=job.text_image?1:0;
   var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
   html+=_referenceBlock(job);
-  if(si.stage1){html+=stageBlock("Step 1 \u2014 Style variations"+(choices[0]?" \u2014 chosen: #"+choices[0]:""),job.id,"stage1",prompts,hasT0,false)}
-  if(si.stage2){html+=stageBlock("Step 2 \u2014 Colour variations"+(choices[1]?" \u2014 chosen: #"+choices[1]:""),job.id,"stage2",prompts,hasT0+1,false)}
-  if(si.final){html+=stageBlock("Final artwork",job.id,"final",prompts,hasT0+2,true)}
+  // Build the ordered list of stages this job has produced. Only the CURRENT
+  // (latest) stage is shown large; earlier stages collapse into a small
+  // thumbnail row above it. Clicking a thumbnail opens it in the shared
+  // lightbox (the #resultArea image-click handler does this automatically).
+  var steps=[];
+  if(si.stage1)steps.push({key:"stage1",label:"Step 1 \u2014 Style variations"+(choices[0]?" (chose #"+choices[0]+")":""),pIdx:hasT0,isFinal:false});
+  if(si.stage2)steps.push({key:"stage2",label:"Step 2 \u2014 Colour variations"+(choices[1]?" (chose #"+choices[1]+")":""),pIdx:hasT0+1,isFinal:false});
+  if(si.final)steps.push({key:"final",label:"Final artwork",pIdx:hasT0+2,isFinal:true});
+  if(steps.length){
+    var cur=steps[steps.length-1];
+    var earlier=steps.slice(0,-1);
+    if(earlier.length)html+=_stageThumbRow(job.id,earlier);
+    html+=stageBlock(cur.label,job.id,cur.key,prompts,cur.pIdx,cur.isFinal);
+  }
   if(job.status==="done"&&job.vault_folder){html+='<div class="vault-info">Saved to:<br><code>'+esc(job.vault_folder)+'</code><br><button class="vault-btn" data-action="open-folder" data-path="'+esc(job.vault_folder)+'">Open folder</button></div>'}
   return html;
+}
+// A compact row of earlier-stage thumbnails. Each is a plain clickable <img>
+// inside #resultArea, so the global image-click handler opens it in the
+// lightbox (grouped with every result image). Labelled "Step 1", "Step 2", …
+function _stageThumbRow(jobId,steps){
+  var h='<div class="stage-thumbs">';
+  for(var i=0;i<steps.length;i++){
+    var s=steps[i],url="/api/jobs/"+jobId+"/stage/"+s.key+".png";
+    var num=s.key==="stage1"?"Step 1":(s.key==="stage2"?"Step 2":"Step");
+    h+='<div class="stage-thumb" title="'+esc(s.label)+'">'
+      +'<img src="'+url+'" alt="'+esc(s.label)+'">'
+      +'<span class="st-lbl">'+num+'</span></div>';
+  }
+  return h+'</div>';
 }
 
 function stageBlock(title,jobId,stageKey,prompts,pIdx,isFinal){
@@ -875,7 +1039,7 @@ function startPauseTimer(){if(pauseTimer)clearInterval(pauseTimer);pauseTimer=se
 
 // === MOCKUP WORKFLOW UI ===
 function renderMockupCol1(){
-  col1.innerHTML='<div class="col-title">Mockup Image</div><div class="drop-zone" id="mdz"><p>Drag mockup image here or</p><button class="browse-btn" id="mdzBtn">Choose file</button><input type="file" id="mdzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="mdzErr"></div><div class="uploaded-preview" id="mdzPrev"></div><p style="font-size:.72rem;color:var(--muted);margin-top:8px;">Upload the client\'s mockup sheet. The system will extract individual designs from it.</p>';
+  col1.innerHTML=''+clientSlotHtml()+'<div class="col-title">Mockup Image</div><div class="drop-zone" id="mdz"><p>Drag mockup image here or</p><button class="browse-btn" id="mdzBtn">Choose file</button><input type="file" id="mdzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="mdzErr"></div><div class="uploaded-preview" id="mdzPrev"></div><p style="font-size:.72rem;color:var(--muted);margin-top:8px;">Upload the client\'s mockup sheet. The system will extract individual designs from it.</p>';
   var dz=$("mdz"),btn=$("mdzBtn"),fi=$("mdzFile");
   btn.onclick=function(e){e.stopPropagation();fi.click()};dz.onclick=function(){fi.click()};
   dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
@@ -884,13 +1048,14 @@ function renderMockupCol1(){
   if(mockupImageFile)$("mdzPrev").innerHTML='<img src="/input/'+mockupImageFile+'" style="max-height:180px">';
 }
 function upMockup(file){
+  jobClientFromVault=false;   // a manual upload is not vault-sourced
   $("mdzErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
   if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$("mdzErr").textContent="Only .png .jpg .jpeg .webp accepted.";return}
   var fd=new FormData();fd.append("files",file);
   fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){mockupImageFile=d.saved[0].name;$("mdzPrev").innerHTML='<img src="/input/'+mockupImageFile+'" style="max-height:180px">';updMockupBtn()}}).catch(function(e){$("mdzErr").textContent=e.message});
 }
 function renderMockupCol2(){
-  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="mcn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="mti" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="mTplTog">Edit detection prompt</div><div class="edit-body" id="mTplBody"><textarea id="tplExtract" data-prompt-id="tplExtract">'+esc(seedPromptText("tplExtract",tpl("extract")))+'</textarea><div class="tpl-error" id="mTplErr"></div></div><div class="edit-toggle" id="mAdvTog">Advanced settings</div><div class="edit-body" id="mAdvBody"><div class="field-group"><label>Manual grid override (leave 0 for ChatGPT auto-detect)</label></div><div style="display:flex;gap:8px"><div class="field-group"><label>Cols</label><input type="number" id="mCols" value="0" min="0" max="10"></div><div class="field-group"><label>Rows</label><input type="number" id="mRows" value="0" min="0" max="10"></div></div><div class="field-group"><label>Padding (px around each design)</label><input type="number" id="mPad" value="0" min="0" max="50"></div></div><button class="gen-btn" id="mGenBtn" disabled>Extract Artworks</button><div class="blocker-msg" id="mBlkMsg"></div>';
+  col2.innerHTML='<div class="edit-toggle" id="mTplTog">Edit detection prompt</div><div class="edit-body" id="mTplBody"><textarea id="tplExtract" data-prompt-id="tplExtract">'+esc(seedPromptText("tplExtract",tpl("extract")))+'</textarea><div class="tpl-error" id="mTplErr"></div></div><div class="edit-toggle" id="mAdvTog">Advanced settings</div><div class="edit-body" id="mAdvBody"><div class="field-group"><label>Manual grid override (leave 0 for ChatGPT auto-detect)</label></div><div style="display:flex;gap:8px"><div class="field-group"><label>Cols</label><input type="number" id="mCols" value="0" min="0" max="10"></div><div class="field-group"><label>Rows</label><input type="number" id="mRows" value="0" min="0" max="10"></div></div><div class="field-group"><label>Padding (px around each design)</label><input type="number" id="mPad" value="0" min="0" max="50"></div></div><button class="gen-btn" id="mGenBtn" disabled>Extract Artworks</button><div class="blocker-msg" id="mBlkMsg"></div>';
   wireClientTask("mcn","mti",updMockupBtn);
   wirePromptEdits(col2);
   $("mTplTog").onclick=function(){$("mTplTog").classList.toggle("open");$("mTplBody").classList.toggle("open")};
@@ -900,11 +1065,9 @@ function renderMockupCol2(){
 }
 function updMockupBtn(){
   var btn=$("mGenBtn"),blk=$("mBlkMsg");if(!btn)return;
-  var cn=$("mcn"),ti=$("mti");
   var hasImg=!!mockupImageFile;
-  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
-  btn.disabled=!hasImg||!hasDetails||blocked;
+  btn.disabled=!hasImg||blocked;
   if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is waiting for input. Cancel or complete it first.");else blk.textContent=""}
 }
 function submitMockupJob(){
@@ -913,7 +1076,7 @@ function submitMockupJob(){
   var mode=(cols>0&&rows>0)?"grid":"auto";
   var tplExt=$("tplExtract");
   if($("mTplErr"))$("mTplErr").textContent="";
-  var body={workflow:"mockup",mockup_image:mockupImageFile,extract_mode:mode,grid_cols:cols||4,grid_rows:rows||2,client:$("mcn").value.trim(),task_id:$("mti").value.trim(),text:"",text_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:tplExt?tplExt.value:"",template_regen:""};
+  var body={workflow:"mockup",mockup_image:mockupImageFile,extract_mode:mode,grid_cols:cols||4,grid_rows:rows||2,client:jobClient.trim(),text:"",text_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:tplExt?tplExt.value:"",template_regen:""};
   console.log("[submitMockupJob] body:",body);
   $("mGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("mGenBtn").disabled=false});
@@ -922,7 +1085,7 @@ function submitMockupJob(){
 // === ARTWORK GENERATION WORKFLOW UI ===
 var artworkFiles=[];
 function renderArtworkCol1(){
-  col1.innerHTML='<div class="col-title">Artwork Files</div><div class="drop-zone" id="adz"><p>Drag artwork files here or</p><button class="browse-btn" id="adzBtn">Choose files</button><input type="file" id="adzFile" multiple accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="adzErr"></div><div id="adzList"></div>';
+  col1.innerHTML=''+clientSlotHtml()+'<div class="col-title">Artwork Files</div><div class="drop-zone" id="adz"><p>Drag artwork files here or</p><button class="browse-btn" id="adzBtn">Choose files</button><input type="file" id="adzFile" multiple accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="adzErr"></div><div id="adzList"></div>';
   var dz=$("adz"),btn=$("adzBtn"),fi=$("adzFile");
   btn.onclick=function(e){e.stopPropagation();fi.click()};dz.onclick=function(){fi.click()};
   dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
@@ -931,6 +1094,7 @@ function renderArtworkCol1(){
   renderArtworkList();
 }
 function upArtworks(fileList){
+  jobClientFromVault=false;
   $("adzErr").textContent="";
   var fd=new FormData();
   for(var i=0;i<fileList.length;i++)fd.append("files",fileList[i]);
@@ -957,7 +1121,7 @@ function renderArtworkList(){
 window.removeArtwork=function(idx){artworkFiles.splice(idx,1);renderArtworkList();updArtworkBtn()};
 function renderArtworkCol2(){
   var artTpl=tpl("artwork")||tpl("artwork_regen")||"Regenerate this artwork as a clean final version suitable for DTF garment printing.";
-  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="acn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="ati" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="aTplTog">Edit regeneration prompt</div><div class="edit-body" id="aTplBody"><textarea id="tplArtRegen" data-prompt-id="tplArtRegen">'+esc(seedPromptText("tplArtRegen",artTpl))+'</textarea></div><button class="gen-btn" id="aGenBtn" disabled>Generate</button><div class="blocker-msg" id="aBlkMsg"></div>';
+  col2.innerHTML='<div class="edit-toggle" id="aTplTog">Edit regeneration prompt</div><div class="edit-body" id="aTplBody"><textarea id="tplArtRegen" data-prompt-id="tplArtRegen">'+esc(seedPromptText("tplArtRegen",artTpl))+'</textarea></div><button class="gen-btn" id="aGenBtn" disabled>Generate</button><div class="blocker-msg" id="aBlkMsg"></div>';
   wireClientTask("acn","ati",updArtworkBtn);
   wirePromptEdits(col2);
   $("aTplTog").onclick=function(){$("aTplTog").classList.toggle("open");$("aTplBody").classList.toggle("open")};
@@ -966,16 +1130,14 @@ function renderArtworkCol2(){
 }
 function updArtworkBtn(){
   var btn=$("aGenBtn"),blk=$("aBlkMsg");if(!btn)return;
-  var cn=$("acn"),ti=$("ati");
   var hasFiles=artworkFiles.length>0;
-  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
-  btn.disabled=!hasFiles||!hasDetails||blocked;
+  btn.disabled=!hasFiles||blocked;
   if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is in progress. Cancel or complete it first.");else blk.textContent=""}
 }
 function submitArtworkJob(){
   var tpl=$("tplArtRegen");
-  var body={workflow:"artwork",artwork_files:artworkFiles,client:$("acn").value.trim(),task_id:$("ati").value.trim(),template_regen:tpl?tpl.value:"",text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
+  var body={workflow:"artwork",artwork_files:artworkFiles,client:jobClient.trim(),template_regen:tpl?tpl.value:"",text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
   console.log("[submitArtworkJob] artworkFiles:",artworkFiles,"body:",body);
   $("aGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("aGenBtn").disabled=false});
@@ -990,7 +1152,7 @@ fetch("/api/custom-operations").then(function(r){return r.json()}).then(function
 
 var customDpi=0;  // 0 = use file DPI / 300 fallback (server decides)
 function renderCustomCol1(){
-  col1.innerHTML='<div class="col-title">Artwork File</div><div class="drop-zone" id="cdz"><p>Drag artwork here or</p><button class="browse-btn" id="cdzBtn">Choose file</button><input type="file" id="cdzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="cdzErr"></div><div class="uploaded-preview" id="cdzPrev"></div><div id="cInfoBox"></div>';
+  col1.innerHTML=''+clientSlotHtml()+'<div class="col-title">Artwork File</div><div class="drop-zone" id="cdz"><p>Drag artwork here or</p><button class="browse-btn" id="cdzBtn">Choose file</button><input type="file" id="cdzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="cdzErr"></div><div class="uploaded-preview" id="cdzPrev"></div><div id="cInfoBox"></div>';
   var dz=$("cdz"),btn=$("cdzBtn"),fi=$("cdzFile");
   btn.onclick=function(e){e.stopPropagation();fi.click()};dz.onclick=function(){fi.click()};
   dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
@@ -999,6 +1161,7 @@ function renderCustomCol1(){
   if(customFile){$("cdzPrev").innerHTML='<img src="/input/'+customFile+'" style="max-height:120px">';loadArtworkInfo()}
 }
 function upCustom(file){
+  jobClientFromVault=false;
   $("cdzErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
   if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$("cdzErr").textContent="Only .png .jpg .jpeg .webp accepted.";return}
   var fd=new FormData();fd.append("files",file);
@@ -1042,7 +1205,9 @@ function renderArtworkInfo(info){
 function renderCustomCol2(){
   var html='<div class="col-title">Operations</div>';
   if(!CUSTOM_OPS_LIST.length){html+='<p style="font-size:.8rem;color:var(--muted)">Loading operations...</p>';col2.innerHTML=html;return}
-  html+='<div style="margin-bottom:12px">';
+  // The operations list is its OWN scroll container (.custom-ops-list) so a long
+  // list scrolls inside the card — the Generate button below stays visible.
+  html+='<div class="custom-ops-list">';
   for(var i=0;i<CUSTOM_OPS_LIST.length;i++){
     var op=CUSTOM_OPS_LIST[i];
     var checked=customOps.indexOf(op.key)>=0?"checked":"";
@@ -1096,8 +1261,6 @@ function renderCustomCol2(){
   }
   html+='</div>';
   html+='<div id="cOpWarnings"></div>';
-  html+='<div class="field-group"><label>Client name</label><input type="text" id="ccn" placeholder="e.g. Acme Corp"></div>';
-  html+='<div class="field-group"><label>Job number</label><input type="text" id="cti" placeholder="e.g. JOB-0042"></div>';
   html+='<button class="gen-btn" id="cGenBtn" disabled>Run Operations</button>';
   html+='<div class="blocker-msg" id="cBlkMsg"></div>';
   col2.innerHTML=html;
@@ -1134,12 +1297,10 @@ function renderCustomWarnings(){
 }
 function updCustomBtn(){
   var btn=$("cGenBtn"),blk=$("cBlkMsg");if(!btn)return;
-  var cn=$("ccn"),ti=$("cti");
   var hasFile=!!customFile;
   var hasOps=customOps.length>0;
-  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
-  btn.disabled=!hasFile||!hasOps||!hasDetails||blocked;
+  btn.disabled=!hasFile||!hasOps||blocked;
   if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is in progress.");else blk.textContent=""}
 }
 function submitCustomJob(){
@@ -1170,7 +1331,7 @@ function submitCustomJob(){
     var bt=$("boThreshold");
     if(bt&&bt.value)blackout.threshold=parseInt(bt.value,10);
   }
-  var body={workflow:"custom",artwork_files:[customFile],custom_operations:customOps,custom_prompts:prompts,aspect_dpi:customDpi,halftone_settings:halftone,blackout_settings:blackout,client:$("ccn").value.trim(),task_id:$("cti").value.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
+  var body={workflow:"custom",artwork_files:[customFile],custom_operations:customOps,custom_prompts:prompts,aspect_dpi:customDpi,halftone_settings:halftone,blackout_settings:blackout,client:jobClient.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
   $("cGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("cGenBtn").disabled=false});
 }
@@ -1184,7 +1345,7 @@ var printReadyFile="";
 var printReadyDpi=0;   // 0 = server decides (file DPI / 300 fallback)
 
 function renderPrintReadyCol1(){
-  col1.innerHTML='<div class="col-title">Artwork File</div>'
+  col1.innerHTML=clientSlotHtml()+'<div class="col-title">Artwork File</div>'
     +'<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Upload the finished artwork. It is checked for DTF print-readiness — resolution, transparency, fine detail, halo, black level and more — then a printer\u2019s written assessment is added.</p>'
     +'<div class="drop-zone" id="prz"><p>Drag artwork here or</p><button class="browse-btn" id="przBtn">Choose file</button><input type="file" id="przFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div>'
     +'<div class="upload-error" id="przErr"></div><div class="uploaded-preview" id="przPrev"></div>';
@@ -1196,6 +1357,7 @@ function renderPrintReadyCol1(){
   if(printReadyFile){$("przPrev").innerHTML='<img src="/input/'+printReadyFile+'" style="max-height:120px">'}
 }
 function upPrintReady(file){
+  jobClientFromVault=false;
   $("przErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
   if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$("przErr").textContent="Only .png .jpg .jpeg .webp accepted.";return}
   var fd=new FormData();fd.append("files",file);
@@ -1204,27 +1366,23 @@ function upPrintReady(file){
 function renderPrintReadyCol2(){
   var html='<div class="col-title">Print Ready QA</div>';
   html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">A full set of measurements runs on the server the moment you submit; ChatGPT then judges the artwork against them.</p>';
-  html+='<div class="field-group"><label>Client name</label><input type="text" id="prcn" placeholder="e.g. Acme Corp"></div>';
-  html+='<div class="field-group"><label>Job number</label><input type="text" id="prti" placeholder="e.g. JOB-0042"></div>';
   html+='<button class="gen-btn" id="prGenBtn" disabled>Check print readiness</button>';
   html+='<div class="blocker-msg" id="prBlkMsg"></div>';
   col2.innerHTML=html;
-  wireClientTask("prcn","prti",updPrintReadyBtn);
+  wireClientSlot(updPrintReadyBtn);
   $("prGenBtn").onclick=submitPrintReadyJob;
   updPrintReadyBtn();
 }
 window.updPrintReadyBtn=function(){
   var btn=$("prGenBtn"),blk=$("prBlkMsg");if(!btn)return;
-  var cn=$("prcn"),ti=$("prti");
   var hasFile=!!printReadyFile;
-  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
-  btn.disabled=!hasFile||!hasDetails||blocked;
+  btn.disabled=!hasFile||blocked;
   if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is in progress.");else blk.textContent=""}
 };
 function submitPrintReadyJob(){
   var body={workflow:"printready",artwork_files:[printReadyFile],aspect_dpi:printReadyDpi,
-    client:$("prcn").value.trim(),task_id:$("prti").value.trim(),
+    client:jobClient.trim(),
     text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",
     template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},
     extract_mode:"auto",grid_cols:4,grid_rows:2};
@@ -1314,6 +1472,625 @@ window.printReadyDownload=function(jobId){
 var _prCurrentJob=null;
 
 
+// === PIXEL GEOMETRY (Before -> Generate -> After) WORKFLOW UI ==============
+// Upload (or vault send) a source -> operator fills a few DTF job inputs ->
+// the SERVER measures the source immediately (BEFORE panel fills before any
+// ChatGPT turn) -> one generation turn -> the SERVER measures the output
+// (AFTER panel fills). Every BEFORE/AFTER field is shown in order; a field that
+// cannot be measured or was left blank shows "N/A" (never hidden, never
+// guessed). The source + output images reuse the shared lightbox, and each gets
+// a bbox + padding overlay drawn over it.
+var geometryFile="";
+// Operator inputs, kept in module state so a re-render never loses them.
+var geoInputs={
+  reconstruction_mode:"EXACT_RECONSTRUCTION", print_location:"Full Back",
+  garment_style:"", garment_color:"", target_print_width_in:"12.5", target_dpi:"300",
+  aspect_ratio_policy:"LOCKED", background_requirement:"Transparent",
+  white_elements_policy:"", black_elements_policy:"", semi_transparency_allowed:"",
+  distress_policy:"Preserve"
+};
+
+// Human labels for every field, in the EXACT order the panels render them. The
+// keys here are also the field order — the renderer walks these lists so a row
+// is shown for every field, N/A when the value is null.
+var GEO_BEFORE_LABELS=[
+  ["artwork_id","Artwork ID"],["source_filename","Source filename"],
+  ["source_width_px","Source width (px)"],["source_height_px","Source height (px)"],
+  ["source_aspect_ratio","Source aspect ratio"],["source_orientation","Orientation"],
+  ["source_has_alpha","Has alpha"],["source_background_type","Background type"],
+  ["source_bbox_x","BBox X (px)"],["source_bbox_y","BBox Y (px)"],
+  ["source_bbox_width","BBox width (px)"],["source_bbox_height","BBox height (px)"],
+  ["source_padding_left","Padding left (px)"],["source_padding_right","Padding right (px)"],
+  ["source_padding_top","Padding top (px)"],["source_padding_bottom","Padding bottom (px)"],
+  ["source_center_x_pct","Centre X (%)"],["source_center_y_pct","Centre Y (%)"],
+  ["reconstruction_mode","Reconstruction mode"],["print_method","Print method"],
+  ["print_location","Print location"],["garment_style","Garment style"],["garment_color","Garment colour"],
+  ["target_print_width_in","Target print width (in)"],["target_print_height_in","Target print height (in)"],
+  ["target_dpi","Target DPI"],["target_width_px","Target width (px)"],["target_height_px","Target height (px)"],
+  ["target_aspect_ratio","Target aspect ratio"],["aspect_ratio_policy","Aspect ratio policy"],
+  ["max_ratio_variance_pct","Max ratio variance (%)"],
+  ["crop_allowed","Crop allowed"],["stretch_allowed","Stretch allowed"],["reposition_allowed","Reposition allowed"],
+  ["background_requirement","Background requirement"],["max_transparent_margin_in","Max transparent margin (in)"],
+  ["white_elements_policy","White elements policy"],["black_elements_policy","Black elements policy"],
+  ["semi_transparency_allowed","Semi-transparency allowed"],["semi_transparency_types","Semi-transparency types"],
+  ["distress_present","Distress present"],["distress_policy","Distress policy"],
+  ["text_present","Text present"],["text_must_match_exactly","Text must match exactly"],
+  ["object_count","Object count (component estimate)"],["text_region_count","Text region count"],
+  ["important_object_geometry","Important object geometry"],
+  ["generation_prompt_version","Generation prompt version"],["dtf_profile_id","DTF profile ID"]
+];
+var GEO_AFTER_LABELS=[
+  ["output_width_px","Output width (px)"],["output_height_px","Output height (px)"],
+  ["output_aspect_ratio","Output aspect ratio"],["output_orientation","Orientation"],["output_has_alpha","Has alpha"],
+  ["effective_dpi_x","Effective DPI X"],["effective_dpi_y","Effective DPI Y"],
+  ["output_bbox_x","BBox X (px)"],["output_bbox_y","BBox Y (px)"],
+  ["output_bbox_width","BBox width (px)"],["output_bbox_height","BBox height (px)"],
+  ["padding_left","Padding left (px)"],["padding_right","Padding right (px)"],
+  ["padding_top","Padding top (px)"],["padding_bottom","Padding bottom (px)"],
+  ["padding_left_in","Padding left (in)"],["padding_right_in","Padding right (in)"],
+  ["padding_top_in","Padding top (in)"],["padding_bottom_in","Padding bottom (in)"],
+  ["output_center_x_pct","Centre X (%)"],["output_center_y_pct","Centre Y (%)"],
+  ["alpha_zero_count","Alpha = 0"],["alpha_1_10_count","Alpha 1–10"],["alpha_11_50_count","Alpha 11–50"],
+  ["alpha_51_200_count","Alpha 51–200"],["alpha_201_254_count","Alpha 201–254"],["alpha_255_count","Alpha = 255"],
+  ["low_alpha_outside_intent_count","Low alpha outside intent"],
+  ["semi_transparent_inside_effects_count","Semi-transparent inside effects"],
+  ["edge_pixel_count","Edge pixels"],["edge_contamination_count","Edge contamination"],
+  ["edge_contamination_pct","Edge contamination (%)"],
+  ["halo_white_px","Halo white px"],["halo_dark_px","Halo dark px"],["fringe_pixel_count","Fringe pixels"],
+  ["connected_component_count","Connected components"],["isolated_component_count","Isolated components"],
+  ["micro_component_count","Micro components (<10 px)"],["smallest_component_area_px","Smallest component (px)"],
+  ["minimum_line_width_px","Min line width (px)"],["minimum_line_width_in","Min line width (in)"],
+  ["minimum_text_stroke_px","Min text stroke (px)"],["minimum_hole_size_px","Min hole size (px)"],
+  ["distance_left_edge_px","Distance to left edge (px)"],["distance_right_edge_px","Distance to right edge (px)"],
+  ["distance_top_edge_px","Distance to top edge (px)"],["distance_bottom_edge_px","Distance to bottom edge (px)"],
+  ["clipping_detected","Clipping detected"],
+  ["source_ratio_difference_pct","Source ratio difference (%)"],["bbox_similarity_pct","BBox similarity (%)"],
+  ["object_position_similarity_pct","Object position similarity (%)"],
+  ["object_scale_similarity_pct","Object scale similarity (%)"],
+  ["text_geometry_similarity_pct","Text geometry similarity (%)"],
+  ["overall_geometry_similarity_pct","Overall geometry similarity (%)"],
+  ["text_ocr_match_pct","Text OCR match (%)"],["semantic_similarity_pct","Semantic similarity (pHash %)"],
+  ["missing_objects_count","Missing objects"],["extra_objects_count","Extra objects"],
+  ["background_transparency_status","Background transparency"],["resolution_status","Resolution"],
+  ["geometry_status","Geometry"],["alpha_status","Alpha"],["halo_status","Halo"],
+  ["stray_pixel_status","Stray pixels"],["fine_detail_status","Fine detail"],["clipping_status","Clipping"],
+  ["text_status","Text"],["semantic_status","Semantic"],["overall_qa_status","Overall QA"]
+];
+var GEO_AUTOFIX_LABELS=[
+  ["autofix_required","Auto-fix required"],["autofix_count","Auto-fix count"],
+  ["autofix_trim_padding","Trim padding"],["autofix_remove_strays","Remove strays"],
+  ["autofix_clean_halo","Clean halo"],["autofix_alpha_cleanup","Alpha cleanup"],
+  ["autofix_resize","Resize"],["autofix_upscale","Upscale"],
+  ["autofix_strengthen_details","Strengthen details"],["qa_rerun_required","QA rerun required"],
+  ["qa_rerun_count","QA rerun count"],["final_after_autofix_status","Final after auto-fix"]
+];
+var GEO_APPROVAL_LABELS=[
+  ["approved_version_id","Approved version ID"],["customer_approved","Customer approved"],
+  ["approval_timestamp","Approval timestamp"],["approved_print_width_in","Approved print width (in)"],
+  ["approved_print_height_in","Approved print height (in)"],["approved_file_hash","Approved file hash"],
+  ["production_locked","Production locked"],["final_machine_qa_status","Final machine QA"],
+  ["production_master_version","Production master version"],["artwork_vault_status","Artwork vault status"],
+  ["gangsheet_ready","Gangsheet ready"]
+];
+// The set of AFTER fields that are QA statuses (rendered as chips).
+var GEO_STATUS_FIELDS={background_transparency_status:1,resolution_status:1,geometry_status:1,
+  alpha_status:1,halo_status:1,stray_pixel_status:1,fine_detail_status:1,clipping_status:1,
+  text_status:1,semantic_status:1,overall_qa_status:1,final_after_autofix_status:1,final_machine_qa_status:1};
+
+// The whole Pixel Geometry page renders full-width into #resultArea (col1/col2
+// are hidden by the .geo-full override). renderGeometryPage builds the PRE-RUN
+// state (upload + settings interactive) once, from renderCols; the status poll
+// then calls renderGeometryResults on state change (same change-guard as before).
+function renderGeometryPage(){
+  // No live job yet: show the page with an empty-ish BEFORE half (upload +
+  // settings) and a "Waiting for generation…" AFTER half. If a geometry job is
+  // the active job, the poll will immediately overwrite this with live data.
+  resultArea.innerHTML=renderGeometryResults(_geoDraftJob());
+  _wireGeometryPage(null);
+}
+// A synthetic "job" object for the pre-run page so renderGeometryResults can
+// render uniformly. geometry_before is null until the server measures it.
+function _geoDraftJob(){
+  return {id:"",client:jobClient||"",task_id:"",
+    status:"draft",workflow:"geometry",
+    geometry_before:null,geometry_after:null,geometry_autofix:null,geometry_approval:null,
+    geometry_error:"",geometry_original_file:geometryFile||""};
+}
+function upGeometry(file){
+  jobClientFromVault=false;
+  var ext="."+file.name.split(".").pop().toLowerCase();
+  if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){var e=$("gezErr");if(e)e.textContent="Only .png .jpg .jpeg .webp accepted.";return}
+  var fd=new FormData();fd.append("files",file);
+  fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){
+    if(d.saved&&d.saved.length){geometryFile=d.saved[0].name;
+      // Only redraw the whole page when NOT mid-job (a live job owns the DOM).
+      if(activeJobId===null)renderGeometryPage();else updGeometryBtn();}
+  }).catch(function(e){var el=$("gezErr");if(el)el.textContent=e.message});
+}
+// Generation-settings radio cards (Exact / DTF Optimized / Redesign).
+var GEO_MODES=[
+  ["EXACT_RECONSTRUCTION","Exact Reconstruction","Recreate artwork exactly as-is","Recommended"],
+  ["DTF_OPTIMIZED","DTF Optimized","Clean, enhance and optimize for DTF",""],
+  ["REDESIGN","Redesign / Enhance","Improve quality, details and style",""]
+];
+window.updGeometryBtn=function(){
+  var btn=$("geGenBtn"),blk=$("geBlkMsg");if(!btn)return;
+  var hasFile=!!geometryFile;
+  var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
+  btn.disabled=!hasFile||blocked;
+  if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is in progress.");else blk.textContent=""}
+};
+// Wire the interactive controls after each full page render. job=null means the
+// pre-run page (upload + settings live); a real job means read-only (controls
+// are not rendered). All handlers no-op gracefully when their element is absent.
+function _wireGeometryPage(job){
+  var dz=$("gez"),fi=$("gezFile");
+  if(dz&&fi){
+    dz.onclick=function(){fi.click()};
+    dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};
+    dz.ondragleave=function(){dz.classList.remove("dragover")};
+    dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)upGeometry(e.dataTransfer.files[0])};
+    fi.onchange=function(){if(fi.files.length)upGeometry(fi.files[0]);fi.value=""};
+  }
+  // settings inputs -> module state
+  ["print_location","garment_style","garment_color","target_print_width_in","target_dpi",
+   "background_requirement","white_elements_policy","black_elements_policy",
+   "semi_transparency_allowed","distress_policy"].forEach(function(k){
+    var el=$("geo_"+k);if(!el)return;
+    el.onchange=el.oninput=function(){geoInputs[k]=el.value};
+  });
+  // mode radio cards
+  var cards=document.querySelectorAll("[data-geo-mode]");
+  for(var i=0;i<cards.length;i++){
+    cards[i].onclick=function(){
+      geoInputs.reconstruction_mode=this.getAttribute("data-geo-mode");
+      var all=document.querySelectorAll("[data-geo-mode]");
+      for(var j=0;j<all.length;j++)all[j].classList.toggle("sel",all[j]===this);
+    };
+  }
+  var gcn=$("gecn");
+  if(gcn&&!gcn.readOnly)gcn.oninput=function(){jobClient=gcn.value;updGeometryBtn()};
+  var gb=$("geGenBtn");if(gb)gb.onclick=submitGeometryJob;
+  updGeometryBtn();
+}
+function submitGeometryJob(){
+  var w=parseFloat(geoInputs.target_print_width_in);var dpi=parseInt(geoInputs.target_dpi,10);
+  var body={workflow:"geometry",artwork_files:[geometryFile],
+    client:jobClient.trim(),
+    reconstruction_mode:geoInputs.reconstruction_mode,print_location:geoInputs.print_location,
+    garment_style:geoInputs.garment_style,garment_color:geoInputs.garment_color,
+    target_print_width_in:isNaN(w)?0:w,target_dpi:isNaN(dpi)?0:dpi,
+    aspect_ratio_policy:geoInputs.aspect_ratio_policy,background_requirement:geoInputs.background_requirement,
+    white_elements_policy:geoInputs.white_elements_policy,black_elements_policy:geoInputs.black_elements_policy,
+    semi_transparency_allowed:geoInputs.semi_transparency_allowed,distress_policy:geoInputs.distress_policy,
+    text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",
+    template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},
+    extract_mode:"auto",grid_cols:4,grid_rows:2};
+  var gb=$("geGenBtn");if(gb)gb.disabled=true;statusArea.innerHTML="";lastStatus="";
+  fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';var b=$("geGenBtn");if(b)b.disabled=false});
+}
+
+// --- rendering the result (redesigned dashboard) -------------------------
+function _geoVal(v){
+  // null/undefined/"" -> N/A; booleans -> Yes/No; everything else as-is.
+  if(v===null||v===undefined||v==="")return null;
+  if(v===true)return "Yes";if(v===false)return "No";
+  return v;
+}
+function _geoShow(v){var x=_geoVal(v);return x===null?'<span style="color:#94a3b8">N/A</span>':esc(String(x))}
+function _geoRound(v){var n=Number(v);if(isNaN(n))return v;return Math.abs(n%1)<1e-9?String(n):n.toFixed(2)}
+function _geoColour(s){s=(s||"").toUpperCase();return s==="PASS"?"#16a34a":(s==="WARN"?"#d97706":(s==="FAIL"?"#dc2626":"#94a3b8"))}
+function _geoChip(status){
+  var s=(status||"").toUpperCase();var c=_geoColour(s);
+  var t=(s==="PASS"||s==="WARN"||s==="FAIL")?s:"N/A";
+  return '<span style="display:inline-block;min-width:44px;text-align:center;font-size:.66rem;font-weight:700;color:#fff;background:'+c+';border-radius:10px;padding:2px 8px">'+t+'</span>';
+}
+// bbox + padding overlay with px labels. url=full image; w/h=canvas px; bbox={x,y,width,height}.
+function _geoOverlay(url,w,h,bbox){
+  if(!w||!h)return url?'<img src="'+url+'" style="max-width:100%;border-radius:6px">':'<div style="color:var(--muted);font-size:.78rem;padding:20px;text-align:center">No image</div>';
+  var DW=300;var scale=DW/w;var DH=Math.round(h*scale);
+  var inner='<image href="'+esc(url)+'" x="0" y="0" width="'+DW+'" height="'+DH+'" preserveAspectRatio="none"/>';
+  inner+='<rect x="0.5" y="0.5" width="'+(DW-1)+'" height="'+(DH-1)+'" fill="none" stroke="#cbd5e1" stroke-width="1"/>';
+  inner+='<text x="4" y="12" fill="#475569" font-size="9" font-family="monospace">'+w+' x '+h+' px (canvas)</text>';
+  if(bbox&&bbox.width&&bbox.height){
+    var bx=bbox.x*scale,by=bbox.y*scale,bw=bbox.width*scale,bh=bbox.height*scale;
+    inner+='<rect x="'+bx+'" y="'+by+'" width="'+bw+'" height="'+bh+'" fill="none" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="4 2"/>';
+    inner+='<text x="'+(bx+2)+'" y="'+(by-3>10?by-3:by+11)+'" fill="#2563eb" font-size="9" font-family="monospace">'
+      +Math.round(bbox.width)+' x '+Math.round(bbox.height)+' bbox</text>';
+  }
+  return '<svg viewBox="0 0 '+DW+' '+DH+'" width="100%" preserveAspectRatio="xMidYMid meet" '
+    +'style="display:block;max-height:300px;border-radius:8px;background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/14px 14px">'+inner+'</svg>';
+}
+// A key/value card. items = [[label,value]...] already formatted.
+function _geoCard2(title,items){
+  var h='<div class="geo-card2"><h4>'+esc(title)+'</h4>';
+  for(var i=0;i<items.length;i++)h+='<div class="geo-kv"><span class="k">'+esc(items[i][0])+'</span><span class="v">'+items[i][1]+'</span></div>';
+  return h+'</div>';
+}
+// A horizontal bar (for the alpha histogram). pct 0..100.
+function _geoBarRow(label,count,pct){
+  var p=Math.max(0,Math.min(100,pct||0));
+  return '<div class="geo-bar"><div class="bar-top"><span>'+esc(label)+'</span><span>'
+    +(count==null?'N/A':esc(String(count))+(pct!=null?' · '+_geoRound(pct)+'%':''))+'</span></div>'
+    +'<div class="bar-track"><div class="bar-fill" style="width:'+p+'%"></div></div></div>';
+}
+
+// The compact comparison table. Each row names a before key, an after key and a
+// unit; the Δ is shown ONLY when both are finite numbers (fixes the "every row
+// shows +1.29" bug — status/text/boolean rows get no diff).
+var GEO_CMP_ROWS=[
+  {label:"Width",b:"source_width_px",a:"output_width_px",unit:"px"},
+  {label:"Height",b:"source_height_px",a:"output_height_px",unit:"px"},
+  {label:"Aspect ratio",b:"source_aspect_ratio",a:"output_aspect_ratio",unit:""},
+  {label:"BBox (W×H)",b:["source_bbox_width","source_bbox_height"],a:["output_bbox_width","output_bbox_height"],pair:true},
+  {label:"Padding (L/R/T/B)",b:["source_padding_left","source_padding_right","source_padding_top","source_padding_bottom"],
+    a:["padding_left","padding_right","padding_top","padding_bottom"],quad:true},
+  {label:"Effective DPI",b:"target_dpi",a:"effective_dpi_x",unit:""},
+  {label:"Alpha 0 (transparent)",b:null,a:"alpha_zero_count",unit:""},
+  {label:"Halo (white / dark px)",b:null,a:["halo_white_px","halo_dark_px"],pair:true},
+  {label:"Stray / micro comps",b:null,a:["low_alpha_outside_intent_count","micro_component_count"],pair:true},
+  {label:"Min line width",b:null,a:"minimum_line_width_px",unit:"px"},
+  {label:"Clipping",b:null,a:"clipping_detected",unit:""},
+  {label:"Geometry similarity",b:null,a:"overall_geometry_similarity_pct",unit:"%"}
+];
+// Numbered horizontal step bar (Source → Geometry → AI Generation → QA → Ready).
+var GEO_STEPS2=[["Source","Upload artwork"],["Geometry","Analyze pixels & shape"],
+  ["AI Generation","Create / enhance"],["QA","Analyze output"],["Ready","Production ready"]];
+function _geoStepIndex2(job){
+  var s=job.status;
+  if(s==="done")return 4;                        // Ready
+  if(job.geometry_after)return 3;                // measured output -> QA
+  if(s==="running"||s==="queued")return 2;       // generating
+  if(job.geometry_before)return 1;               // source measured -> Geometry
+  return 0;                                       // Source (pre-run)
+}
+function _geoStepRow(job){
+  var cur=_geoStepIndex2(job);
+  var h='<div class="geo-steps">';
+  for(var i=0;i<GEO_STEPS2.length;i++){
+    if(i)h+='<div class="geo-step-sep"></div>';
+    var cls=i<cur?"done":(i===cur?"cur":"");
+    h+='<div class="geo-step '+cls+'"><div class="s-num">'+(i+1)+'</div>'
+      +'<div class="s-txt"><div class="s-name">'+esc(GEO_STEPS2[i][0])+'</div>'
+      +'<div class="s-desc">'+esc(GEO_STEPS2[i][1])+'</div></div></div>';
+  }
+  return h+'</div>';
+}
+
+// Image with bbox + px labels on ALL FOUR sides (matches the reference). url =
+// full image; w/h = canvas px; bbox = {x,y,width,height}. side labels show the
+// canvas dims (left/bottom) and bbox dims (right/top) when a bbox is present.
+function _geoMeasPreview(url,w,h,bbox){
+  if(!url)return '<div style="color:var(--muted);font-size:.74rem;padding:24px;text-align:center">No image</div>';
+  if(!w||!h)return '<div class="geo-imgbox"><img src="'+esc(url)+'"></div>';
+  var DW=320;var scale=DW/w;var DH=Math.round(h*scale);
+  var PT=16,PR=42,PB=16,PL=10;   // label gutters around the SVG
+  var VW=DW+PL+PR,VH=DH+PT+PB;
+  var ox=PL,oy=PT;
+  var s='<svg viewBox="0 0 '+VW+' '+VH+'" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;max-height:280px">';
+  s+='<image href="'+esc(url)+'" x="'+ox+'" y="'+oy+'" width="'+DW+'" height="'+DH+'" preserveAspectRatio="none"/>';
+  s+='<rect x="'+ox+'" y="'+oy+'" width="'+DW+'" height="'+DH+'" fill="none" stroke="#cbd5e1" stroke-width="1"/>';
+  // top: canvas width ; bottom-left/right small ticks
+  s+='<text x="'+(ox+DW/2)+'" y="10" text-anchor="middle" fill="#2563eb" font-size="9" font-family="monospace">'+w+' px (canvas)</text>';
+  if(bbox&&bbox.width&&bbox.height){
+    var bx=ox+bbox.x*scale,by=oy+bbox.y*scale,bw=bbox.width*scale,bh=bbox.height*scale;
+    s+='<rect x="'+bx+'" y="'+by+'" width="'+bw+'" height="'+bh+'" fill="none" stroke="#dc2626" stroke-width="1.3" stroke-dasharray="4 2"/>';
+    // right: bbox height ; and bbox width label near the box
+    s+='<text x="'+(VW-3)+'" y="'+(oy+DH/2)+'" text-anchor="end" fill="#dc2626" font-size="9" font-family="monospace" transform="rotate(90 '+(VW-3)+' '+(oy+DH/2)+')">'+Math.round(bbox.height)+' px (bbox)</text>';
+    s+='<text x="'+(bx+bw/2)+'" y="'+(by-2>oy+8?by-2:by+10)+'" text-anchor="middle" fill="#dc2626" font-size="9" font-family="monospace">'+Math.round(bbox.width)+' px (bbox)</text>';
+  }
+  // left: canvas height (rotated)
+  s+='<text x="6" y="'+(oy+DH/2)+'" text-anchor="middle" fill="#2563eb" font-size="9" font-family="monospace" transform="rotate(-90 6 '+(oy+DH/2)+')">'+h+' px (canvas)</text>';
+  // bottom: px ticks on the two bottom corners
+  s+='<text x="'+ox+'" y="'+(VH-3)+'" fill="#64748b" font-size="8" font-family="monospace">0</text>';
+  s+='<text x="'+(ox+DW)+'" y="'+(VH-3)+'" text-anchor="end" fill="#64748b" font-size="8" font-family="monospace">'+w+'</text>';
+  s+='</svg>';
+  return '<div class="geo-imgbox">'+s+'</div>';
+}
+
+// Generation-settings radio cards + the extra inputs, for the BEFORE half.
+function _geoSettingsCard(){
+  var h='<div class="geo-card2 span2"><h4>⚙ Generation Settings</h4>';
+  for(var i=0;i<GEO_MODES.length;i++){
+    var m=GEO_MODES[i];var sel=geoInputs.reconstruction_mode===m[0];
+    h+='<div class="geo-radio'+(sel?' sel':'')+'" data-geo-mode="'+m[0]+'">'
+      +'<div class="r-name">'+esc(m[1])+(m[3]?'<span class="r-rec">'+esc(m[3])+'</span>':'')+'</div>'
+      +'<div class="r-desc">'+esc(m[2])+'</div></div>';
+  }
+  // the other inputs, compact
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px">';
+  h+='<div class="field-group" style="margin:0"'+(jobClientFromVault?'':' ')+'><label>Client '+(jobClientFromVault?'(from vault)':'(optional)')+'</label><input type="text" id="gecn"'+(jobClientFromVault?' readonly':'')+' value="'+esc(jobClient)+'" placeholder="Westside Athletics"></div>';
+  h+='<div class="field-group" style="margin:0"><label>Print location</label><input type="text" id="geo_print_location" value="'+esc(geoInputs.print_location)+'"></div>';
+  h+='<div class="field-group" style="margin:0"><label>Garment style</label><input type="text" id="geo_garment_style" value="'+esc(geoInputs.garment_style)+'" placeholder="optional"></div>';
+  h+='<div class="field-group" style="margin:0"><label>Garment colour</label><input type="text" id="geo_garment_color" value="'+esc(geoInputs.garment_color)+'" placeholder="optional"></div>';
+  h+='<div class="field-group" style="margin:0"><label>Print width (in)</label><input type="text" id="geo_target_print_width_in" value="'+esc(geoInputs.target_print_width_in)+'"></div>';
+  h+='<div class="field-group" style="margin:0"><label>Target DPI</label><input type="text" id="geo_target_dpi" value="'+esc(geoInputs.target_dpi)+'"></div>';
+  h+='<div class="field-group" style="margin:0"><label>Aspect policy</label><select id="geo_aspect_ratio_policy"><option'+(geoInputs.aspect_ratio_policy==="LOCKED"?" selected":"")+'>LOCKED</option><option'+(geoInputs.aspect_ratio_policy==="FLEXIBLE"?" selected":"")+'>FLEXIBLE</option></select></div>';
+  h+='<div class="field-group" style="margin:0"><label>Background</label><input type="text" id="geo_background_requirement" value="'+esc(geoInputs.background_requirement)+'"></div>';
+  h+='<div class="field-group" style="margin:0"><label>Distress</label><select id="geo_distress_policy"><option'+(geoInputs.distress_policy==="Preserve"?" selected":"")+'>Preserve</option><option'+(geoInputs.distress_policy==="Remove"?" selected":"")+'>Remove</option></select></div>';
+  h+='</div>';
+  h+='<button class="gen-btn" id="geGenBtn" style="margin-top:8px" disabled>Measure &amp; generate</button>';
+  h+='<div class="blocker-msg" id="geBlkMsg"></div>';
+  return h+'</div>';
+}
+function _geoClient(){var e=$("gecn");return e?e.value:"";}
+
+// Build the Production Spec JSON (the measured BEFORE block) for the Copy card.
+function _geoSpecJson(before){
+  if(!before)return "{\n  \"status\": \"waiting for measurement…\"\n}";
+  var pick={source_width:before.source_width_px,source_height:before.source_height_px,
+    source_ratio:before.source_aspect_ratio,
+    bbox:{x:before.source_bbox_x,y:before.source_bbox_y,width:before.source_bbox_width,height:before.source_bbox_height},
+    padding:{left:before.source_padding_left,right:before.source_padding_right,top:before.source_padding_top,bottom:before.source_padding_bottom},
+    target_width:before.target_width_px,target_height:before.target_height_px,
+    target_dpi:before.target_dpi,aspect_policy:before.aspect_ratio_policy,
+    reconstruction_mode:before.reconstruction_mode,dtf_profile_id:before.dtf_profile_id};
+  try{return JSON.stringify(pick,null,2)}catch(e){return "{}"}
+}
+
+function renderGeometryResults(job){
+  var before=job.geometry_before, after=job.geometry_after;
+  var pre=(job.status==="draft");   // pre-run interactive page
+  var html='<div class="geo-page">';
+
+  // ---- TOP ROW: title + step bar -----------------------------------------
+  html+='<div class="geo-top">';
+  html+='<div><div class="gt-title">DTF Artwork Preparation</div>'
+    +'<div class="gt-sub">AI-powered artwork generation and geometry analysis for production-ready DTF prints.'
+    +(job.client||job.task_id?('  <b>'+esc(job.client||"")+(job.task_id?(' / '+esc(job.task_id)):"")+'</b>'):'')+'</div></div>';
+  html+=_geoStepRow(job);
+  html+='</div>';
+  if(job.geometry_error){html+='<div class="status-box failed" style="margin:0 0 12px">'+esc(job.geometry_error)+'</div>'}
+
+  html+='<div class="geo-halves">';
+
+  // ================= LEFT: BEFORE ANALYSIS ================================
+  html+='<div class="geo-half before"><div class="gh-head"><span class="gh-title">BEFORE ANALYSIS</span>'
+    +'<span class="gh-tag">Original Input</span></div>';
+  html+='<div class="geo-grid">';
+  // Source Artwork (image + upload). Interactive only pre-run.
+  var srcUrl=job.geometry_original_file?("/input/"+esc(job.geometry_original_file)):"";
+  var srcCard='<div class="geo-card2"><h4>🖼 Source Artwork</h4>';
+  if(srcUrl)srcCard+='<div class="geo-imgbox"><img src="'+srcUrl+'"></div>';
+  if(pre){
+    srcCard+='<div class="geo-uploadbox" id="gez">Drop image here or click to upload<br><span style="font-size:.64rem">PNG, JPG, WEBP (max 50MB)</span>'
+      +'<input type="file" id="gezFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div>'
+      +'<div class="upload-error" id="gezErr"></div>';
+  }
+  srcCard+='</div>';
+  html+=srcCard;
+  // Source Pixel Geometry.
+  html+=_geoCard2("📐 Source Pixel Geometry",[
+    ["Canvas Width",_geoShow(before&&before.source_width_px)+' px'],
+    ["Canvas Height",_geoShow(before&&before.source_height_px)+' px'],
+    ["Aspect Ratio",_geoShow(before&&before.source_aspect_ratio)],
+    ["Orientation",_geoShow(before&&before.source_orientation)]
+  ]);
+  // Bounding Box.
+  html+=_geoCard2("⬚ Artwork Bounding Box",[
+    ["X (left)",_geoShow(before&&before.source_bbox_x)+' px'],["Y (top)",_geoShow(before&&before.source_bbox_y)+' px'],
+    ["Width",_geoShow(before&&before.source_bbox_width)+' px'],["Height",_geoShow(before&&before.source_bbox_height)+' px']
+  ]);
+  // Transparent Padding.
+  html+=_geoCard2("▦ Transparent Padding",[
+    ["Left",_geoShow(before&&before.source_padding_left)+' px'],["Right",_geoShow(before&&before.source_padding_right)+' px'],
+    ["Top",_geoShow(before&&before.source_padding_top)+' px'],["Bottom",_geoShow(before&&before.source_padding_bottom)+' px']
+  ]);
+  // Source Preview with measurements (span 2).
+  var sbb=before?{x:before.source_bbox_x,y:before.source_bbox_y,width:before.source_bbox_width,height:before.source_bbox_height}:null;
+  html+='<div class="geo-card2 span2"><h4>📏 Source Preview with Measurements</h4>'
+    +_geoMeasPreview(srcUrl,before?before.source_width_px:0,before?before.source_height_px:0,sbb)+'</div>';
+  // Target Print Geometry.
+  html+=_geoCard2("🖨 Target Print Geometry",[
+    ["Print Width",_geoShow(before&&before.target_print_width_in)+' in'],
+    ["Print Height",_geoShow(before&&before.target_print_height_in)+' in'],
+    ["Target DPI",_geoShow(before&&before.target_dpi)],
+    ["Target Width",_geoShow(before&&before.target_width_px)+' px'],
+    ["Target Height",_geoShow(before&&before.target_height_px)+' px'],
+    ["Aspect Policy",_geoShow(before&&before.aspect_ratio_policy)]
+  ]);
+  // Generation Settings (radio cards) — interactive pre-run, read-only after.
+  if(pre){
+    html+=_geoSettingsCard();
+  }else{
+    html+=_geoCard2("⚙ Generation Settings",[
+      ["Mode",_geoShow(before&&before.reconstruction_mode)],
+      ["Print location",_geoShow(before&&before.print_location)],
+      ["Garment",_geoShow(before&&before.garment_style)+' / '+_geoShow(before&&before.garment_color)],
+      ["Aspect policy",_geoShow(before&&before.aspect_ratio_policy)],
+      ["Distress",_geoShow(before&&before.distress_policy)]
+    ]);
+  }
+  // Production Spec (JSON + copy).
+  html+='<div class="geo-card2 span3"><h4>{ } Production Spec (JSON)<span class="h4-right">'
+    +'<button class="geo-json-copy" data-action="copy-text" data-target="geoSpecJson" style="font-size:.62rem;font-weight:700;padding:2px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);cursor:pointer">Copy</button></span></h4>'
+    +'<pre class="geo-json" id="geoSpecJson">'+esc(_geoSpecJson(before))+'</pre></div>';
+  html+='</div></div>';   // end before grid + half
+
+  // ================= RIGHT: AFTER ANALYSIS ================================
+  html+='<div class="geo-half after"><div class="gh-head"><span class="gh-title">AFTER ANALYSIS</span>'
+    +'<span class="gh-tag">'+(after?'AI Generated Output':'Awaiting generation')+'</span></div>';
+  if(!after){
+    // Waiting state: show the same cards, empty, with a single notice.
+    html+='<div class="geo-grid">';
+    html+='<div class="geo-card2 span3" style="text-align:center;color:var(--muted);padding:22px">'
+      +(pre?'Upload a source and run <b>Measure &amp; generate</b> to see the AI output analysis here.':'Waiting for generation…')+'</div>';
+    html+=_geoCard2("🖼 Generated Artwork Output",[["Status",pre?'<span style="color:#94a3b8">—</span>':'Generating…']]);
+    html+=_geoCard2("📐 Output Geometry",[["Width",_geoShow(null)],["Height",_geoShow(null)],["Ratio",_geoShow(null)],["Effective DPI",_geoShow(null)]]);
+    html+=_geoCard2("📊 Alpha Analysis",[["Alpha",_geoShow(null)]]);
+    html+=_geoCard2("✎ Edge / Halo QA",[["Edge contamination",_geoShow(null)],["Status",_geoChip(null)]]);
+    html+=_geoCard2("⬡ Connected Components",[["Component count",_geoShow(null)]]);
+    html+=_geoCard2("◎ Geometry Similarity",[["Overall",_geoShow(null)]]);
+    html+='</div>';
+  }else{
+    html+='<div class="geo-grid">';
+    // Generated Artwork Output.
+    var outUrl="/api/jobs/"+job.id+"/stage/output.png";
+    html+='<div class="geo-card2"><h4>🖼 Generated Artwork Output</h4>'
+      +'<div class="geo-imgbox"><img src="'+outUrl+'"></div>'
+      +'<div class="geo-ready">✓ Transparent PNG (Production Ready)</div>'
+      +'<a class="geo-dlbtn" href="'+outUrl+'" download>Download PNG</a> '
+      +'<a class="geo-dlbtn" style="background:#64748b" href="/api/jobs/'+job.id+'/geometry.json" download>JSON</a></div>';
+    // Output Geometry.
+    html+=_geoCard2("📐 Output Geometry",[
+      ["Output Width",_geoShow(after.output_width_px)+' px'],["Output Height",_geoShow(after.output_height_px)+' px'],
+      ["Output Ratio",_geoShow(after.output_aspect_ratio)],
+      ["Effective DPI",_geoShow(after.effective_dpi_x)+' × '+_geoShow(after.effective_dpi_y)]
+    ]);
+    // Alpha Analysis (bars).
+    var alphaCard='<div class="geo-card2"><h4>📊 Alpha Analysis</h4>';
+    if(after.output_has_alpha){
+      var tot=(after.alpha_zero_count||0)+(after.alpha_1_10_count||0)+(after.alpha_11_50_count||0)
+        +(after.alpha_51_200_count||0)+(after.alpha_201_254_count||0)+(after.alpha_255_count||0);
+      function ap(n){return tot>0?100*(n||0)/tot:0}
+      alphaCard+=_geoBarRow("0 (Transparent)",after.alpha_zero_count,ap(after.alpha_zero_count));
+      alphaCard+=_geoBarRow("1–10",after.alpha_1_10_count,ap(after.alpha_1_10_count));
+      alphaCard+=_geoBarRow("11–50",after.alpha_11_50_count,ap(after.alpha_11_50_count));
+      alphaCard+=_geoBarRow("51–254",((after.alpha_51_200_count||0)+(after.alpha_201_254_count||0)),ap((after.alpha_51_200_count||0)+(after.alpha_201_254_count||0)));
+      alphaCard+=_geoBarRow("255 (Solid)",after.alpha_255_count,ap(after.alpha_255_count));
+    }else{alphaCard+='<div style="font-size:.74rem;color:var(--muted)">No alpha channel — N/A.</div>';}
+    html+=alphaCard+'</div>';
+    // Output Preview with measurements (span 2).
+    var obb={x:after.output_bbox_x,y:after.output_bbox_y,width:after.output_bbox_width,height:after.output_bbox_height};
+    html+='<div class="geo-card2 span2"><h4>📏 Output Preview with Measurements</h4>'
+      +_geoMeasPreview(outUrl,after.output_width_px,after.output_height_px,obb)+'</div>';
+    // Edge / Halo QA.
+    html+='<div class="geo-card2"><h4>✎ Edge / Halo QA<span class="h4-right">'+_geoChip(after.halo_status)+'</span></h4>'
+      +'<div class="geo-kv"><span class="k">Edge Contamination</span><span class="v">'+_geoShow(after.edge_contamination_pct)+(after.edge_contamination_pct!=null?'%':'')+'</span></div>'
+      +'<div class="geo-kv"><span class="k">Halo Width (w/d)</span><span class="v">'+_geoShow(after.halo_white_px)+' / '+_geoShow(after.halo_dark_px)+'</span></div>'
+      +'<div class="geo-kv"><span class="k">Fringe Pixels</span><span class="v">'+_geoShow(after.fringe_pixel_count)+'</span></div></div>';
+    // Connected Components.
+    html+=_geoCard2("⬡ Connected Components",[
+      ["Component Count",_geoShow(after.connected_component_count)],
+      ["Isolated Components",_geoShow(after.isolated_component_count)],
+      ["Micro Components (<10 px)",_geoShow(after.micro_component_count)],
+      ["Smallest Area",_geoShow(after.smallest_component_area_px)+(after.smallest_component_area_px!=null?' px':'')]
+    ]);
+    // Geometry Similarity (big %).
+    var sim=after.overall_geometry_similarity_pct;
+    var simCard='<div class="geo-card2"><h4>◎ Geometry Similarity</h4><div class="geo-simbig">'
+      +'<div class="sb-pct">'+(sim==null?'N/A':_geoRound(sim)+'%')+'</div>'
+      +'<div class="geo-simbar"><div class="sb-fill" style="width:'+(sim==null?0:Math.max(0,Math.min(100,sim)))+'%"></div></div></div>'
+      +'<div class="geo-kv"><span class="k">Aspect Ratio Match</span><span class="v">'+_geoShow(after.source_ratio_difference_pct!=null?_geoRound(100-after.source_ratio_difference_pct)+'%':null)+'</span></div>'
+      +'<div class="geo-kv"><span class="k">Bounding Box Match</span><span class="v">'+_geoShow(after.bbox_similarity_pct!=null?after.bbox_similarity_pct+'%':null)+'</span></div>'
+      +'<div class="geo-kv"><span class="k">Object Placement</span><span class="v">'+_geoShow(after.object_position_similarity_pct!=null?after.object_position_similarity_pct+'%':null)+'</span></div>';
+    html+=simCard+'</div>';
+    // Auto-fix Actions (V1: none implemented — show placeholder).
+    html+='<div class="geo-card2"><h4>✦ Auto-Fix Actions<span class="h4-right" style="color:var(--muted);font-weight:600">V1</span></h4>'
+      +'<div class="geo-autofix"><div class="af-row" style="color:var(--muted)">Not implemented yet — see the Auto-fix section below.</div></div></div>';
+    // Final QA Status chips.
+    var FQ=[["Resolution","resolution_status"],["Transparency","background_transparency_status"],
+      ["Geometry","geometry_status"],["Alpha","alpha_status"],["Halo","halo_status"],["Stray","stray_pixel_status"],
+      ["Fine detail","fine_detail_status"],["Clipping","clipping_status"]];
+    var qCard='<div class="geo-card2 span2"><h4>✓ Final QA Status<span class="h4-right">'+_geoChip(after.overall_qa_status)+'</span></h4><div class="geo-qgrid">';
+    for(var q=0;q<FQ.length;q++){qCard+='<div class="geo-qrow"><span>'+esc(FQ[q][0])+'</span>'+_geoChip(after[FQ[q][1]])+'</div>';}
+    html+=qCard+'</div></div>';
+  }
+  html+='</div>';   // end after half
+  html+='</div>';   // end halves
+
+  // ================= BELOW: comparison + all fields =======================
+  html+='<div class="geo-below">';
+  // Comparison table (collapsed).
+  html+='<div class="geo-section-toggle" data-action="toggle" data-target="geoCmpBody">Before | After | Δ comparison</div>';
+  html+='<div class="geo-section-body" id="geoCmpBody">';
+  html+='<table class="geo-cmp"><thead><tr><th>Metric</th><th>Before</th><th>After</th><th>Δ</th></tr></thead><tbody>';
+  for(var r=0;r<GEO_CMP_ROWS.length;r++){
+    var row=GEO_CMP_ROWS[r];
+    var bCell,aCell,dCell='';
+    if(row.pair){
+      var b0=before&&row.b?before[row.b[0]]:null,b1=before&&row.b?before[row.b[1]]:null;
+      var a0=after?after[row.a[0]]:null,a1=after?after[row.a[1]]:null;
+      bCell=(!row.b)?'<span style="color:#94a3b8">—</span>':((b0==null&&b1==null)?_geoShow(null):_geoShow(b0)+' / '+_geoShow(b1));
+      aCell=after?((a0==null&&a1==null)?_geoShow(null):_geoShow(a0)+' / '+_geoShow(a1)):'…';
+    }else if(row.quad){
+      var bv=before&&row.b?row.b.map(function(k){return _geoShow(before[k])}).join('/'):'<span style="color:#94a3b8">—</span>';
+      var av=after?row.a.map(function(k){return _geoShow(after[k])}).join('/'):'…';
+      bCell=row.b?bv:'<span style="color:#94a3b8">—</span>';aCell=av;
+    }else{
+      var bval=(before&&row.b)?before[row.b]:null;
+      var aval=after?after[row.a]:null;
+      bCell=(!row.b)?'<span style="color:#94a3b8">—</span>':_geoShow(bval);
+      aCell=after?_geoShow(aval):'…';
+      dCell=_geoDiffCell(bval,aval);
+    }
+    html+='<tr><td>'+esc(row.label)+(row.unit?' <span style="color:#94a3b8;font-weight:400">('+row.unit+')</span>':'')
+      +'</td><td>'+bCell+'</td><td>'+aCell+'</td><td>'+dCell+'</td></tr>';
+  }
+  html+='</tbody></table></div>';
+
+  // All fields (collapsed + search).
+  html+='<div class="geo-section-toggle" data-action="toggle" data-target="geoAllBody">All fields ('
+    +(GEO_BEFORE_LABELS.length+GEO_AFTER_LABELS.length)+')</div>';
+  html+='<div class="geo-section-body" id="geoAllBody">';
+  html+='<input type="text" class="geo-search" id="geoFieldSearch" placeholder="Search fields… (name or value)" oninput="window.geoFilterFields(this.value)">';
+  html+='<div id="geoAllRows" class="geo-allcols"><div>'+_geoAllTable("Before — source",GEO_BEFORE_LABELS,before)
+    +'</div><div>'+_geoAllTable("After — output",GEO_AFTER_LABELS,after)+'</div></div></div>';
+
+  // Auto-fix + Approval (collapsed, all N/A).
+  html+='<div class="geo-section-toggle" data-action="toggle" data-target="geoAutofixBody">Auto-fix (V1: not implemented yet)</div>';
+  html+='<div class="geo-section-body" id="geoAutofixBody">'+_geoFieldTable(GEO_AUTOFIX_LABELS,job.geometry_autofix)+'</div>';
+  html+='<div class="geo-section-toggle" data-action="toggle" data-target="geoApprovalBody">Approval (V1: not implemented yet)</div>';
+  html+='<div class="geo-section-body" id="geoApprovalBody">'+_geoFieldTable(GEO_APPROVAL_LABELS,job.geometry_approval)+'</div>';
+  html+='</div>';   // end below
+
+  html+='</div>';   // end geo-page
+  return html;
+}
+// Δ cell: ONLY when both values are finite numbers; green when closer-is-not-
+// implied so we simply colour by sign (up green, down red), zero muted. Empty
+// string for any non-numeric pair (status/text/boolean rows) — this fixes the
+// "every row shows the same +1.29" bug.
+function _geoDiffCell(b,a){
+  if(typeof b!=="number"||typeof a!=="number"||!isFinite(b)||!isFinite(a))return '';
+  var d=a-b;
+  if(Math.abs(d)<1e-9)return '<span class="d-zero">0</span>';
+  var cls=d>0?"d-up":"d-down";
+  return '<span class="'+cls+'">'+(d>0?"+":"")+_geoRound(d)+'</span>';
+}
+// A plain label/value field table (used for Auto-fix / Approval).
+function _geoFieldTable(labels,blk){
+  var h='<table class="geo-allrows">';
+  for(var i=0;i<labels.length;i++){
+    var k=labels[i][0],v=blk?blk[k]:null;
+    var shown=GEO_STATUS_FIELDS[k]?_geoChip(v):_geoShow(v);
+    h+='<tr data-geo-field="'+esc((labels[i][1]+' '+k).toLowerCase())+'"><td>'+esc(labels[i][1])
+      +'<div class="fkey">'+esc(k)+'</div></td><td class="v">'+shown+'</td></tr>';
+  }
+  return h+'</table>';
+}
+// The "All fields" table for one block — same rows as _geoFieldTable but with a
+// sub-heading, and each row tagged for the search filter.
+function _geoAllTable(title,labels,blk){
+  return '<div class="col-title" style="font-size:.72rem;margin:10px 0 4px">'+esc(title)+'</div>'
+    +_geoFieldTable(labels,blk);
+}
+// Copy an element's text to the clipboard (used by the Production Spec card's
+// Copy button via data-action="copy-text"). Reads textContent so it works on a
+// <pre>; briefly flips the button label to confirm. Guarded for older engines.
+if(typeof window.copyElementText!=="function"){
+  window.copyElementText=function(targetId,btn){
+    var el=document.getElementById(targetId);if(!el)return;
+    var txt=el.textContent||el.innerText||"";
+    function flash(){if(btn){var old=btn.textContent;btn.textContent="Copied ✓";setTimeout(function(){btn.textContent=old},1200)}}
+    try{
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(txt).then(flash,flash);return}
+    }catch(e){}
+    try{var ta=document.createElement("textarea");ta.value=txt;document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);flash()}catch(e){}
+  };
+}
+// Live search over the All-fields rows — operates on the EXISTING DOM, so it
+// never triggers a re-render (and polling can't fight it).
+window.geoFilterFields=function(q){
+  q=(q||"").trim().toLowerCase();
+  var rows=document.querySelectorAll('#geoAllRows tr[data-geo-field]');
+  for(var i=0;i<rows.length;i++){
+    var hay=rows[i].getAttribute("data-geo-field")||"";
+    rows[i].style.display=(!q||hay.indexOf(q)>=0)?"":"none";
+  }
+};
+
+
 // === COLORWAYS (UC-6) WORKFLOW UI ==========================================
 // Upload -> local dominant colours shown -> ChatGPT recommends garment colours
 // -> operator ticks colours -> one mockup per colour (beside a pixel-accurate
@@ -1330,7 +2107,7 @@ var _cwJob="";         // job id the maps belong to, so a new job resets them
 var CW_NOTE="ChatGPT redraws the artwork to place it on a shirt, so the mockup is an impression. The preview beside it uses your actual file.";
 
 function renderColorwayCol1(){
-  col1.innerHTML='<div class="col-title">Artwork File</div>'
+  col1.innerHTML=clientSlotHtml()+'<div class="col-title">Artwork File</div>'
     +'<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Upload the artwork. Its dominant colours are read locally and shown; ChatGPT then recommends the garment colours it suits.</p>'
     +'<div class="drop-zone" id="cwz"><p>Drag artwork here or</p><button class="browse-btn" id="cwzBtn">Choose file</button><input type="file" id="cwzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div>'
     +'<div class="upload-error" id="cwzErr"></div><div class="uploaded-preview" id="cwzPrev"></div>';
@@ -1342,6 +2119,7 @@ function renderColorwayCol1(){
   if(colorwayFile){$("cwzPrev").innerHTML='<img src="/input/'+colorwayFile+'" style="max-height:120px">'}
 }
 function upColorway(file){
+  jobClientFromVault=false;
   $("cwzErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
   if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$("cwzErr").textContent="Only .png .jpg .jpeg .webp accepted.";return}
   var fd=new FormData();fd.append("files",file);
@@ -1350,8 +2128,6 @@ function upColorway(file){
 function renderColorwayCol2(){
   var html='<div class="col-title">Colorways</div>';
   html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Find which garment colours the artwork suits, see it on those shirts, and optionally have it adapted for the ones you pick.</p>';
-  html+='<div class="field-group"><label>Client name</label><input type="text" id="cwcn" placeholder="e.g. Acme Corp"></div>';
-  html+='<div class="field-group"><label>Job number</label><input type="text" id="cwti" placeholder="e.g. JOB-0042"></div>';
   html+='<button class="gen-btn" id="cwGenBtn" disabled>Recommend garment colours</button>';
   html+='<div class="blocker-msg" id="cwBlkMsg"></div>';
   col2.innerHTML=html;
@@ -1361,16 +2137,14 @@ function renderColorwayCol2(){
 }
 window.updColorwayBtn=function(){
   var btn=$("cwGenBtn"),blk=$("cwBlkMsg");if(!btn)return;
-  var cn=$("cwcn"),ti=$("cwti");
   var hasFile=!!colorwayFile;
-  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
-  btn.disabled=!hasFile||!hasDetails||blocked;
+  btn.disabled=!hasFile||blocked;
   if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is in progress.");else blk.textContent=""}
 };
 function submitColorwayJob(){
   var body={workflow:"colorway",artwork_files:[colorwayFile],
-    client:$("cwcn").value.trim(),task_id:$("cwti").value.trim(),
+    client:jobClient.trim(),
     text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",
     template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},
     extract_mode:"auto",grid_cols:4,grid_rows:2};
@@ -1575,7 +2349,7 @@ function renderIdentifyCol1(){
   modeHtml+=_idModeCard("object","By object","List the things in the artwork \u2014 subjects, elements, text, logos, background pieces.");
   modeHtml+=_idModeCard("colour","By colour group","List the distinct colour regions \u2014 every area sharing a colour, even across different elements.");
   modeHtml+='</div>';
-  col1.innerHTML=modeHtml+'<div class="col-title">Artwork File</div><div class="drop-zone" id="idz"><p>Drag artwork here or</p><button class="browse-btn" id="idzBtn">Choose file</button><input type="file" id="idzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="idzErr"></div><div class="uploaded-preview" id="idzPrev"></div><div id="iInfoBox"></div>';
+  col1.innerHTML=clientSlotHtml()+modeHtml+'<div class="col-title">Artwork File</div><div class="drop-zone" id="idz"><p>Drag artwork here or</p><button class="browse-btn" id="idzBtn">Choose file</button><input type="file" id="idzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="idzErr"></div><div class="uploaded-preview" id="idzPrev"></div><div id="iInfoBox"></div>';
   var dz=$("idz"),btn=$("idzBtn"),fi=$("idzFile");
   btn.onclick=function(e){e.stopPropagation();fi.click()};dz.onclick=function(){fi.click()};
   dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
@@ -1584,6 +2358,7 @@ function renderIdentifyCol1(){
   if(identifyFile){$("idzPrev").innerHTML='<img src="/input/'+identifyFile+'" style="max-height:120px">';loadIdentifyInfo()}
 }
 function upIdentify(file){
+  jobClientFromVault=false;
   $("idzErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
   if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$("idzErr").textContent="Only .png .jpg .jpeg .webp accepted.";return}
   var fd=new FormData();fd.append("files",file);
@@ -1628,8 +2403,6 @@ function renderIdentifyCol2(){
   var lister=isColour?"the distinct colour groups":"the objects";
   var html='<div class="col-title">Identify &amp; Regenerate</div>';
   html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">ChatGPT lists '+lister+' it finds. You then say what to do with each one, and it redraws the artwork with your changes applied.</p>';
-  html+='<div class="field-group"><label>Client name</label><input type="text" id="icn" placeholder="e.g. Acme Corp"></div>';
-  html+='<div class="field-group"><label>Job number</label><input type="text" id="iti" placeholder="e.g. JOB-0042"></div>';
   // Collapsed prompt editors, remembered across re-renders via data-prompt-id.
   html+='<div class="edit-toggle" onclick="this.classList.toggle(\'open\');this.nextElementSibling.classList.toggle(\'open\')">'+listLabel+'</div>';
   html+='<div class="edit-body"><textarea id="tplIdentify" data-prompt-id="'+listId+'">'+esc(seedPromptText(listId,listTpl))+'</textarea></div>';
@@ -1645,16 +2418,14 @@ function renderIdentifyCol2(){
 }
 function updIdentifyBtn(){
   var btn=$("iGenBtn"),blk=$("iBlkMsg");if(!btn)return;
-  var cn=$("icn"),ti=$("iti");
   var hasFile=!!identifyFile;
-  var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
-  btn.disabled=!hasFile||!hasDetails||blocked;
+  btn.disabled=!hasFile||blocked;
   if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is in progress.");else blk.textContent=""}
 }
 function submitIdentifyJob(){
   var tObj=$("tplIdentify"),tRegen=$("tplIdentifyRegen");
-  var body={workflow:"identify",identify_mode:identifyMode,artwork_files:[identifyFile],aspect_dpi:identifyDpi,template_identify:tObj?tObj.value:"",template_identify_regen:tRegen?tRegen.value:"",client:$("icn").value.trim(),task_id:$("iti").value.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},extract_mode:"auto",grid_cols:4,grid_rows:2};
+  var body={workflow:"identify",identify_mode:identifyMode,artwork_files:[identifyFile],aspect_dpi:identifyDpi,template_identify:tObj?tObj.value:"",template_identify_regen:tRegen?tRegen.value:"",client:jobClient.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},extract_mode:"auto",grid_cols:4,grid_rows:2};
   $("iGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("iGenBtn").disabled=false});
 }
@@ -2285,32 +3056,57 @@ function doSubmitObjects(jid){
 }
 
 // Parse recommendation text for one ratio per recommendation.
-// Match only the value immediately after "Ratio:" at the start of a line, so the
-// parenthetical normalised form like "(0.75:1)" on the same line is ignored.
-// Dedupe on the reduced whole-number form so 3:4 and 0.75:1 can't both appear.
-function _extractRatios(text){
-  var found=[],seen={};
+// Format a number without a trailing ".0" (4.0 -> "4", 4.5 -> "4.5").
+function _fmtNum(n){var v=Math.round(n*100)/100;return (v%1===0)?String(v):String(v)}
+// Parse the advice text into one recommendation PER LINE. Each recommendation
+// carries its own ratio, print size and placement, so four "1:1" placements all
+// appear as four separate chips — we do NOT dedupe by ratio (the placement is
+// what distinguishes them). A line only counts as a recommendation if it has a
+// W:H ratio on it; anything else (the trailing upscale note, blank lines, a
+// preamble that slipped through) is ignored.
+//
+// Robust to the format GPT actually returns, e.g.
+//   "1:1 — 4 × 4 inches — Left Chest — keeps the badge compact"
+//   "- Ratio: 4:5 | Size: 10 x 12 in | Placement: Full Front | ..."
+//   "2) 4:5 (0.80:1), 10x13 inches, full back, ..."
+// Returns an array of {ratio:"W:H", sizeW:Number|null, sizeH:Number|null, placement:String}.
+function _extractRecommendations(text){
+  var out=[];
   var lines=(text||"").split(/\r?\n/);
-  var re=/^\s*(?:[-*\d.\)\s]*)?ratio\s*:?\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)/i;
+  var ratioRe=/(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)/;                 // first W:H on the line
+  // Size like "4 x 4 in", "10 × 12 inches", "4x4in" — the X can be x, ×, or *.
+  var sizeRe=/(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:in\b|inch|inches|")/i;
+  // Size without an explicit unit, used only as a fallback: "10 x 12".
+  var sizeNoUnitRe=/(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)/i;
+  // Known placements, matched case-insensitively anywhere on the line.
+  var placements=[
+    ["left chest","Left Chest"],["right chest","Right Chest"],
+    ["full front","Full Front"],["centre front","Centre Front"],["center front","Center Front"],
+    ["full back","Full Back"],["upper back","Upper Back"],["back","Back"],
+    ["sleeve","Sleeve"],["pocket","Pocket"],["front","Front"]
+  ];
   for(var i=0;i<lines.length;i++){
-    var m=re.exec(lines[i]);
-    if(!m)continue;
-    var raw=m[1]+":"+m[2];
-    var key=_wholeRatio(raw);   // reduced integer form for dedupe
-    if(!seen[key]){seen[key]=1;found.push(raw)}
-  }
-  // Fallback: if no "Ratio:" labels were found, take the first ratio on each line.
-  if(!found.length){
-    var re2=/(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)/;
-    for(var j=0;j<lines.length;j++){
-      var m2=re2.exec(lines[j]);
-      if(!m2)continue;
-      var raw2=m2[1]+":"+m2[2];
-      var key2=_wholeRatio(raw2);
-      if(!seen[key2]){seen[key2]=1;found.push(raw2)}
+    var line=lines[i];
+    var rm=ratioRe.exec(line);
+    if(!rm)continue;                                   // not a recommendation line
+    // The first "A:B" on the line is the recommended ratio. A size like "4x4"
+    // must NOT be read as the ratio, so we require a colon for the ratio match
+    // (ratioRe uses ':') — sizes use x/×/* and are matched separately below.
+    var ratio=rm[1]+":"+rm[2];
+    // Strip the ratio span before hunting for a size, so "4:5 ... 10x12 in"
+    // doesn't accidentally pick digits out of the ratio itself.
+    var afterRatio=line.slice(rm.index+rm[0].length);
+    var sm=sizeRe.exec(afterRatio)||sizeRe.exec(line)||sizeNoUnitRe.exec(afterRatio);
+    var sizeW=sm?parseFloat(sm[1]):null,sizeH=sm?parseFloat(sm[2]):null;
+    // Placement: first known phrase on the line (longer phrases listed first).
+    var placement="";
+    var lc=line.toLowerCase();
+    for(var p=0;p<placements.length;p++){
+      if(lc.indexOf(placements[p][0])>=0){placement=placements[p][1];break}
     }
+    out.push({ratio:ratio,sizeW:sizeW,sizeH:sizeH,placement:placement});
   }
-  return found;
+  return out;
 }
 function _gcd(a,b){a=Math.round(a);b=Math.round(b);while(b){var t=b;b=a%b;a=t}return a||1}
 // Convert a possibly-decimal ratio to reduced whole numbers. '4:1.25' -> '16:5'.
@@ -2343,16 +3139,24 @@ function renderRatioSelection(job){
   }
   // ChatGPT recommendations, verbatim
   if(recs){html+='<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:.8rem;white-space:pre-wrap">'+esc(recs)+'</div>'}
-  // Selectable ratio cards parsed from the advice
-  var ratios=_extractRatios(recs);
-  if(ratios.length){
+  // Selectable cards parsed from the advice — ONE per recommendation (ratio +
+  // size + placement), so four placements at the same ratio give four chips.
+  var recsList=_extractRecommendations(recs);
+  if(recsList.length){
     html+='<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">';
-    for(var i=0;i<ratios.length;i++){
-      var whole=_wholeRatio(ratios[i]);        // integer form, e.g. 16:5
-      var suffix=_normSuffix(ratios[i]);        // '1 : X.XX'
-      html+='<button class="choice-btn" data-action="pick-ratio" data-ratio="'+esc(whole)+'" style="min-width:96px;padding:8px 12px;display:inline-flex;flex-direction:column;align-items:center;line-height:1.2;white-space:nowrap">';
+    for(var i=0;i<recsList.length;i++){
+      var r=recsList[i];
+      var whole=_wholeRatio(r.ratio);          // integer form, e.g. 4:5
+      var sizeTxt=(r.sizeW>0&&r.sizeH>0)?(_fmtNum(r.sizeW)+'\u00d7'+_fmtNum(r.sizeH)+' in'):'';
+      html+='<button class="choice-btn" data-action="pick-ratio" data-ratio="'+esc(whole)+'"'
+        +(r.sizeW>0?(' data-size-w="'+esc(r.sizeW)+'"'):'')
+        +(r.sizeH>0?(' data-size-h="'+esc(r.sizeH)+'"'):'')
+        +' style="min-width:120px;padding:8px 12px;display:inline-flex;flex-direction:column;align-items:center;line-height:1.3;white-space:nowrap">';
       html+='<span style="font-weight:600">'+esc(whole)+'</span>';
-      if(suffix)html+='<span style="font-size:.68rem;font-weight:400;opacity:.7">'+esc(suffix)+'</span>';
+      var sub=[];
+      if(sizeTxt)sub.push(sizeTxt);
+      if(r.placement)sub.push(r.placement);
+      if(sub.length)html+='<span style="font-size:.68rem;font-weight:400;opacity:.75">'+esc(sub.join(' \u00b7 '))+'</span>';
       html+='</button>';
     }
     html+='</div>';
@@ -2454,9 +3258,23 @@ function _renderSimilarity(sim,heading){
   var detail=(sim.detail_pct!==undefined)?sim.detail_pct:sim.similarity_pct;
   var edges=(sim.edges_pct!==undefined)?sim.edges_pct:null;
   var colour=(sim.colour_pct!==undefined)?sim.colour_pct:null;
+  // Overall = the blended headline compare.py computes (overall_pct). For an
+  // older stored payload that predates overall_pct, fall back to the SAME blend
+  // in the UI (weights kept in sync with src/compare.py). We never average only
+  // some of the bars — a weak axis (e.g. low Edges) must move this number.
+  var overall=sim.overall_pct;
+  if(overall===undefined||overall===null){
+    var sp=(shape!=null?shape:detail),ep=(edges!=null?edges:detail),cp=(colour!=null?colour:detail);
+    overall=Math.round(0.40*detail+0.20*sp+0.20*ep+0.20*cp);
+  }
   var h='<div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:8px">';
   h+='<div style="font-size:.7rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-bottom:4px">'+esc(heading||"Compared against the cleaned baseline")+'</div>';
-  h+='<div style="font-size:.8rem;font-weight:600;margin-bottom:8px">'+esc(_simReading(shape,detail))+'</div>';
+  // Overall similarity headline, coloured by the blended score's own band.
+  if(overall!==undefined&&overall!==null){
+    h+='<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px"><span style="font-size:.78rem;color:var(--muted)">Overall similarity</span><span style="font-size:1.3rem;font-weight:800;color:'+_simColor(overall)+'">'+overall+'%</span></div>';
+  }
+  // Verdict follows the blended overall, not detail alone.
+  h+='<div style="font-size:.8rem;font-weight:600;margin-bottom:8px;color:'+_simColor(overall)+'">'+esc(_simLabel(overall))+'</div>';
   h+=_simBar("Shape \u2014 proportions & layout",shape);
   if(edges!==null)h+=_simBar("Edges \u2014 outline & structure",edges);
   if(colour!==null)h+=_simBar("Colour \u2014 palette & tone",colour);
@@ -2771,8 +3589,17 @@ function renderCustomResults(job){
     // Per-stage geometry for the aspect flow.
     if(s.method==="baseline")html+=_geomLine(job.aspect_baseline_features);
     else if(s.op==="aspect_ratio"&&s.similarity&&s.similarity.features_generated)html+=_geomLine(s.similarity.features_generated);
-    // Aspect regenerate: show similarity comparison (against the cleaned baseline).
-    if(s.op==="aspect_ratio"&&s.method==="regenerate"&&s.similarity){html+=_renderSimilarity(s.similarity)}
+    // Aspect regenerate: show the similarity comparison (result vs the baseline
+    // padded to the target ratio). If the comparison failed, say so plainly —
+    // never leave the operator without a signal. The Pad method has no redraw,
+    // so it shows no score at all (handled by this gate: method!=="regenerate").
+    if(s.op==="aspect_ratio"&&s.method==="regenerate"){
+      if(s.similarity){html+=_renderSimilarity(s.similarity,"Compared against the baseline padded to the target ratio")}
+      else{
+        var simErr=s.similarity_error||job.aspect_similarity_error||"";
+        html+='<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-top:8px;font-size:.78rem;color:var(--muted)">Similarity unavailable'+(simErr?(' \u2014 '+esc(simErr)):'')+'</div>';
+      }
+    }
     // Prompt disclosure only for ChatGPT steps; local ops (black_out/half_tone) carry no prompt.
     if(s.prompt){var pid="cpr_"+i+"_"+Math.random().toString(36).slice(2,5);html+='<div class="prompt-toggle" data-action="toggle" data-target="'+pid+'">Prompt used</div><div class="prompt-content" id="'+pid+'">'+esc(s.prompt)+'</div>'}
     html+='</div>';
@@ -3167,7 +3994,8 @@ var NC_TARGETS=[
   {key:"textimage",label:"Text + Image",multiple:false},
   {key:"identify",label:"Artwork Identification",multiple:false},
   {key:"printready",label:"Print Ready QA",multiple:false},
-  {key:"colorway",label:"Colorways",multiple:false}
+  {key:"colorway",label:"Colorways",multiple:false},
+  {key:"geometry",label:"Pixel Geometry",multiple:false}
 ];
 var ncPath="",ncCustomerFolder="",ncArtworks=null,ncSelected={},ncCustomers=[],ncCustomerSet={},ncCustomerFilter="";
 var ncStatusInfo=null,ncRecent=[],ncFresh={},ncPrefill=null,ncMsg="",ncBusy=false;
@@ -3324,7 +4152,10 @@ function ncRenderArtworks(){
   var el=$("ncBrowser");if(!el)return;
   var label=display=ncCustomerLabel();
   var h='<div class="nc-crumbs"><a data-nc-home="1">All customers</a> <span style="opacity:.45">/</span> <b>'+esc(label)+'</b></div>';
-  if(ncArtworks===null){h+='<div class="nc-empty">Loading '+esc(label)+"'s artwork…</div>"+ncSendBar();el.innerHTML=h;el.onclick=ncBrowserClick;return}
+  // Send-to-workflow toolbar sits ABOVE the grid (compact, sticky), enabled
+  // once a file is selected.
+  h+=ncSendBar();
+  if(ncArtworks===null){h+='<div class="nc-empty">Loading '+esc(label)+"'s artwork…</div>";el.innerHTML=h;el.onclick=ncBrowserClick;return}
   if(!ncArtworks.length){
     h+='<div class="nc-empty">No artwork found for '+esc(label)+'.</div>';
   }else{
@@ -3345,7 +4176,6 @@ function ncRenderArtworks(){
     }
     h+='</div>';
   }
-  h+=ncSendBar();
   el.innerHTML=h;
   el.onclick=ncBrowserClick;
 }
@@ -3412,6 +4242,7 @@ function ncSend(target){
       else if(target==="identify")identifyFile=names[0];
       else if(target==="printready")printReadyFile=names[0];
       else if(target==="colorway")colorwayFile=names[0];
+      else if(target==="geometry")geometryFile=names[0];
       // The vault path already says who the customer is and which artwork
       // number this is — no reason to make the operator retype it.
       ncPrefill={client:d.client||"",task_id:d.task_id||""};
@@ -3423,13 +4254,15 @@ function ncSend(target){
 }
 function applyNcPrefill(){
   if(!ncPrefill)return;
-  // Put the prefill into shared state so it survives every subsequent re-render
-  // (op toggles, mode switches), then reflect it into the current inputs.
-  if(ncPrefill.client&&!jobClient)jobClient=ncPrefill.client;
-  if(ncPrefill.task_id&&!jobTask)jobTask=ncPrefill.task_id;
+  // The artwork came from the Nextcloud vault, so the client name is known from
+  // its customer folder: adopt it and mark it vault-sourced so the slot renders
+  // a read-only chip. The job NUMBER is generated server-side (ignored here).
+  if(ncPrefill.client){jobClient=ncPrefill.client;jobClientFromVault=true;}
   restoreClientTask();
   ncPrefill=null;
-  updBtn();updMockupBtn();updArtworkBtn();updCustomBtn();updIdentifyBtn();updPrintReadyBtn();updColorwayBtn();
+  // Re-render the active workflow's panels so the client chip appears in place
+  // of the manual input, then re-gate the generate buttons.
+  renderCols();
 }
 
 // --- live feed ------------------------------------------------------------

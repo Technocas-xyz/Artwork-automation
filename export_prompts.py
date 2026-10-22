@@ -63,6 +63,12 @@ CATALOGUE: dict[str, tuple[str, int, str]] = {
     "COLORWAY_MOCKUP": ("colorway", 2, "Mock up the artwork on a chosen garment colour"),
     "COLORWAY_ADAPT": ("colorway", 3, "Adapt the artwork to read well on a chosen garment colour"),
 
+    # --- Pixel Geometry ---
+    # The source is measured locally (src/pixel_geometry.py); this is the single
+    # ChatGPT turn that recreates the artwork at the target DTF geometry, given
+    # the measured BEFORE values as data.
+    "GEOMETRY_GENERATE": ("geometry", 1, "Recreate a DTF artwork at target geometry, given local source measurements"),
+
     # --- Custom Operations ---
     "CUSTOM_RECONSTRUCT": ("custom", 1, "Redraw the design cleanly at high resolution"),
     "CUSTOM_REMOVE_BACKGROUND": ("custom", 2, "Isolate the design on transparency"),

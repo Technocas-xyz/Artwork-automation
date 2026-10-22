@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import sys
 import threading
 import traceback
 from pathlib import Path
@@ -103,7 +104,7 @@ class AgentGUI:
         # fix has landed without opening code_version.txt on their machine.
         self._code_version = getattr(agent, "AGENT_CODE_VERSION", "unknown")
         self.root.title(f"Artwork Agent  v{self._code_version}")
-        self.root.geometry("440x320")
+        self.root.geometry("440x440")
         self.root.resizable(False, False)
 
         cfg = load_config()
@@ -133,6 +134,16 @@ class AgentGUI:
         self._signed_in = False       # set True after a successful sign-in while the context stays open
         self._browser_thread = threading.Thread(target=self._browser_loop, daemon=True)
         self._browser_thread.start()
+        # Playwright's sync API is thread-bound: the context can ONLY be closed
+        # on the browser thread that created it. So ALL closes happen on
+        # _browser_thread — never from the Tk thread or atexit/signal handlers.
+        # "Restart to apply" just sets this flag; the browser thread acts on it
+        # (in run_loop's idle branch when running, or via the queue when stopped).
+        self._restart_requested = threading.Event()
+        # The browser thread closes the context before a self-update re-exec.
+        # agent._apply_and_restart calls this, and it only ever runs on the
+        # browser thread, so the close is always same-thread.
+        agent.set_browser_closer(self._close_context)
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -187,6 +198,39 @@ class AgentGUI:
         ttk.Label(frm, text=f"Code version v{self._code_version}",
                   foreground="#9ca3af").grid(row=7, column=0, columnspan=3,
                                              sticky="w", padx=12, pady=(10, 0))
+
+        # --- Browser profile location: shown so a designer/support can verify
+        #     where the ChatGPT session is stored, and open it directly. ---
+        prof_row = ttk.Frame(frm)
+        prof_row.grid(row=8, column=0, columnspan=3, sticky="we", padx=12, pady=(8, 0))
+        try:
+            from src.self_update import profiles_root
+            self._profile_path = str(profiles_root() / "acct1")
+        except Exception:
+            self._profile_path = "(unknown)"
+        ttk.Label(prof_row, text="ChatGPT session:", foreground="#6b7280").pack(side="left")
+        ttk.Button(prof_row, text="Show profile folder",
+                   command=self._open_profile_folder).pack(side="right")
+        ttk.Label(frm, text=self._profile_path, foreground="#9ca3af",
+                  wraplength=400).grid(row=9, column=0, columnspan=3,
+                                       sticky="w", padx=12, pady=(0, 0))
+
+        # --- Warning banner: the exe is running from a temp/zip-extraction path,
+        #     so the profile can never persist. Only shown when detected. ---
+        try:
+            from src.self_update import running_from_temp_location
+            temp_run = running_from_temp_location()
+        except Exception:
+            temp_run = False
+        if temp_run:
+            ttk.Label(
+                frm,
+                text=("⚠ The agent is running from a temporary folder (opened "
+                      "straight from the .zip). Your ChatGPT login will NOT be "
+                      "remembered. Extract the agent to a normal folder (e.g. "
+                      "Documents) and run it from there."),
+                foreground="#b45309", wraplength=400,
+            ).grid(row=10, column=0, columnspan=3, sticky="w", padx=12, pady=(8, 0))
 
         frm.columnconfigure(1, weight=1)
 
@@ -282,6 +326,12 @@ class AgentGUI:
             if cmd == "quit":
                 self._close_context()
                 return
+            elif cmd == "restart":
+                # Restart requested while the agent is STOPPED (we are idle in
+                # this loop, so no job is running). Apply the staged update on
+                # THIS owning thread: _apply_and_restart closes the context and
+                # re-execs. If nothing is staged / apply fails, we fall through.
+                self._do_restart_when_idle()
             elif cmd == "signin":
                 self._do_signin()
             elif cmd == "start":
@@ -291,6 +341,28 @@ class AgentGUI:
                 # (Stop) without killing the process. Next signin/start relaunches.
                 self._close_context()
                 self._events.put(("log", "browser fully torn down; ready to start again"))
+
+    def _do_restart_when_idle(self):
+        """Apply a staged update + re-exec, running ON THE BROWSER THREAD (the
+        stopped-agent path, reached via the 'restart' queue command). Closing
+        the context happens inside agent._apply_and_restart via the registered
+        browser-closer, so it is same-thread. Returns (without re-exec) if
+        nothing is staged or the apply fails."""
+        try:
+            if not agent.self_update.has_staged_update():
+                self._events.put(("log", "restart requested but no staged update to apply"))
+                self._events.put(("update", {"reason": "up_to_date"}))
+                return
+            self._events.put(("log", "applying staged update on browser thread (agent stopped)…"))
+            # _apply_and_restart closes the context (browser-closer) then re-execs.
+            agent._apply_and_restart(
+                log=lambda m: self._events.put(("log", m)),
+                status=lambda s, d="": self._events.put(("status", (s, d))),
+            )
+            # If we reach here, apply did NOT re-exec (nothing staged / failed).
+            self._events.put(("log", "restart did not occur (apply failed or nothing staged)"))
+        except Exception as exc:
+            self._events.put(("log", f"restart-when-idle error: {exc}"))
 
     def _ensure_context(self):
         """Launch the context exactly once; reuse it forever after.
@@ -315,6 +387,14 @@ class AgentGUI:
                     pass
             logged_in = agent.is_logged_in(page)
             self._signed_in = bool(logged_in)
+            # Prove whether the session reached disk: log the Cookies DB stat
+            # right after a sign-in. Compare this with the pre-launch line on
+            # the NEXT start to confirm the session persisted.
+            try:
+                from src.self_update import cookies_file_stat
+                self._events.put(("log", f"cookies (post-signin): {cookies_file_stat('acct1')}"))
+            except Exception:
+                pass
             self._events.put(("signin_done", logged_in))
         except Exception as exc:
             traceback.print_exc()
@@ -358,6 +438,7 @@ class AgentGUI:
             self._events.put(("log", f"Registered as {self._agent_id}"))
             agent.run_loop(
                 page, self._agent_id, stop_event=self._stop_event,
+                restart_requested=self._restart_requested,
                 on_status=lambda s, d="": self._events.put(("status", (s, d))),
                 on_log=lambda m: self._events.put(("log", m)),
                 # GUI does NOT auto-restart: a discovered update is staged while
@@ -395,6 +476,14 @@ class AgentGUI:
             self._context = None
             self._page = None
             self._signed_in = False
+            # Clear browser.py's module-level live refs so a later atexit/signal
+            # _close_live sees nothing to do (avoids a redundant cross-thread
+            # close attempt after we already closed on the owning thread).
+            try:
+                from src import browser as _browser_mod
+                _browser_mod._clear_live_refs()
+            except Exception:
+                pass
 
     # -------------------------------------------------- event pump
     def _drain_events(self):
@@ -485,21 +574,24 @@ class AgentGUI:
         self.update_frame.grid_remove()
 
     def _on_restart_update(self):
-        """Apply the staged update and re-exec. Only fires while idle (the agent
-        stages updates in the idle branch), so no job is running. On failure we
-        surface the message and keep the current code."""
-        self.update_var.set("Applying update and restarting…")
-        self.update_label.config(foreground="#b45309")
+        """Request a restart to apply the staged update — WITHOUT touching the
+        browser context on the Tk thread (Playwright is thread-bound).
+
+        The actual close + re-exec always happen on the BROWSER thread:
+          * agent RUNNING  -> set self._restart_requested; run_loop's idle branch
+            applies it after the current job finishes (jobs are never cut off).
+          * agent STOPPED  -> the browser loop isn't in run_loop, so post a
+            'restart' command to its queue; it applies on the browser thread.
+        Either way the Tk thread only signals; it never closes or re-execs."""
         self.restart_btn.config(state="disabled")
-        try:
-            result = agent.apply_pending_update()  # re-execs on success; returns on failure
-        except Exception as exc:
-            result = {"applied": False, "error": str(exc)}
-        # If we get here, the restart did not happen (apply failed).
-        err = (result or {}).get("error") or "unknown error"
-        self.update_var.set(f"Update failed — still running current version. {err}")
-        self.update_label.config(foreground="#dc2626")
-        self.restart_btn.config(state="normal")
+        running = self._state in ("connected", "running", "not_signed_in")
+        if running:
+            self._restart_requested.set()
+            self.update_var.set("Restarting to apply update (after the current job, if any)…")
+        else:
+            self._cmd_queue.put(("restart", None))
+            self.update_var.set("Restarting to apply update…")
+        self.update_label.config(foreground="#b45309")
 
     # -------------------------------------------------- tray
     def _ensure_tray(self):
@@ -541,6 +633,24 @@ class AgentGUI:
         if self._tray:
             self._tray.stop()
         self.root.after(0, self.root.destroy)
+
+    def _open_profile_folder(self):
+        """Open the browser-profile folder in Explorer so support can inspect a
+        designer's saved session (and whether Cookies exists) directly."""
+        try:
+            from src.self_update import profiles_root
+            path = profiles_root() / "acct1"
+            path.mkdir(parents=True, exist_ok=True)
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", str(path)])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:
+            messagebox.showinfo("Profile folder", f"Profile location:\n{self._profile_path}\n\n({exc})")
 
     def _on_close(self):
         # Minimise to tray instead of quitting.

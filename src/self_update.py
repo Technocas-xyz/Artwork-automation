@@ -134,22 +134,180 @@ def updates_allowed() -> tuple[bool, str]:
     return True, ""
 
 
-def profiles_root() -> Path:
-    """Fixed, writable root for browser profiles, as an ABSOLUTE path derived
-    from the app directory — never relative to the current working directory.
-
-    It sits next to the executable (frozen) or the project root (source),
-    OUTSIDE code/ and _internal/, so a self-update swap can never take the saved
-    ChatGPT session with it."""
+def _old_profiles_root() -> Path:
+    """The PREVIOUS profile location: next to the exe (or project root), in
+    <app>/profiles. Kept only so an existing session can be migrated once to the
+    new per-user location below."""
     return (app_dir() / PROFILES_NAME).resolve()
 
 
+def profiles_root() -> Path:
+    """Fixed, per-user, writable root for browser profiles.
+
+    Lives under the user's LOCALAPPDATA (Windows) — a stable location that does
+    NOT move when the agent is re-downloaded into a new folder, run from a
+    different directory, or extracted fresh from the zip on each launch. That
+    per-launch-fresh-folder case is exactly what made <app>/profiles an empty
+    profile every start. A per-user path is immune to where the exe sits.
+
+    Falls back to <app>/profiles if no suitable per-user dir is available (very
+    unusual). Never inside code/, _internal/, staging or backup, so a
+    self-update swap can never take the saved ChatGPT session with it."""
+    base = _user_data_base()
+    if base is not None:
+        return (base / "ArtworkAgent" / "chrome-profile").resolve()
+    return _old_profiles_root()
+
+
+def _user_data_base() -> Path | None:
+    """The per-user writable base for app data. LOCALAPPDATA on Windows, with
+    sensible fallbacks; None only if nothing usable is found."""
+    for env in ("LOCALAPPDATA", "APPDATA"):
+        v = os.environ.get(env)
+        if v:
+            try:
+                p = Path(v)
+                if p.is_absolute():
+                    return p
+            except Exception:
+                pass
+    # Non-Windows / unusual: ~/.local/share style fallback.
+    try:
+        home = Path.home()
+        return home / ".local" / "share"
+    except Exception:
+        return None
+
+
 def profile_dir(account: str) -> Path:
-    """Absolute per-account browser profile directory. Created if missing."""
+    """Absolute per-account browser profile directory. Created if missing.
+
+    On first run after this change, if a session already exists in the OLD
+    location (<app>/profiles/<account>) and the new per-user location is empty,
+    the old profile is migrated once so designers do not have to sign in again.
+    """
     safe = "".join(c for c in (account or "acct1") if c.isalnum() or c in ("-", "_")) or "acct1"
-    d = profiles_root() / safe
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    new_dir = profiles_root() / safe
+    _migrate_profile_if_needed(safe, new_dir)
+    new_dir.mkdir(parents=True, exist_ok=True)
+    return new_dir
+
+
+_MIGRATION_MARKER = ".migrated_from_old"
+
+
+def _migrate_profile_if_needed(safe_account: str, new_dir: Path) -> None:
+    """One-time copy of an existing profile from the old <app>/profiles/<acct>
+    location to the new per-user location, so the saved ChatGPT session carries
+    over this update.
+
+    Safety rules (learned from a real partial-copy failure):
+      * ATOMIC: copy into a temp sibling dir first; only promote it into place
+        when the FULL copy succeeds. A half-copied profile (e.g. because a live
+        Chrome still holds the old Cookies file) must never become the live
+        profile — a broken profile is worse than an empty one.
+      * Attempted AT MOST ONCE: a marker file records that we already tried, so
+        a partial failure can't leave a broken dir that later looks "populated"
+        and blocks a clean fresh sign-in.
+      * Never raises — on any failure the designer simply signs in once more,
+        which is exactly the pre-change behaviour.
+    """
+    try:
+        if new_dir.exists() and any(p.name != _MIGRATION_MARKER for p in new_dir.iterdir()):
+            return  # new profile already has real content — nothing to migrate
+        marker = new_dir / _MIGRATION_MARKER
+        if marker.exists():
+            return  # already attempted once; don't retry (avoids half-copies)
+        old_dir = _old_profiles_root() / safe_account
+        if not old_dir.is_dir() or not any(old_dir.iterdir()):
+            return  # no old session to carry over
+        if old_dir.resolve() == new_dir.resolve():
+            return  # old and new are the same path (source fallback)
+
+        new_dir.parent.mkdir(parents=True, exist_ok=True)
+        tmp = new_dir.parent / (new_dir.name + ".migrating")
+        _force_rmtree(tmp)
+        log(f"migrating browser profile from {old_dir} -> {new_dir} (atomic via {tmp.name})")
+        try:
+            # copytree WITHOUT dirs_exist_ok: a locked file raises here, before
+            # we have touched the real target, so the live profile stays clean.
+            shutil.copytree(old_dir, tmp)
+        except Exception as exc:
+            _force_rmtree(tmp)
+            # Record the attempt so we don't repeatedly half-copy on every start.
+            try:
+                new_dir.mkdir(parents=True, exist_ok=True)
+                (new_dir / _MIGRATION_MARKER).write_text("attempted", encoding="utf-8")
+            except Exception:
+                pass
+            log(f"profile migration could not copy (likely old profile still open): {exc}; "
+                "leaving a clean empty profile — one fresh sign-in needed")
+            return
+        # Full copy succeeded — promote atomically.
+        _force_rmtree(new_dir)
+        os.replace(str(tmp), str(new_dir))
+        try:
+            (new_dir / _MIGRATION_MARKER).write_text("done", encoding="utf-8")
+        except Exception:
+            pass
+        log("profile migration complete")
+    except Exception as exc:
+        log(f"profile migration skipped ({exc}); a fresh sign-in may be needed once")
+
+
+def running_from_temp_location() -> bool:
+    """True if the exe appears to run from a temp / zip-extraction folder.
+
+    Windows runs a .exe double-clicked INSIDE a .zip from a per-launch temp
+    extraction (…\\Temp\\Temp1_ArtworkAgent.zip\\…), which gives a brand-new
+    empty working area every start. Detect the common markers so the GUI can
+    tell the designer to extract properly. Source runs are never flagged."""
+    if not is_frozen():
+        return False
+    try:
+        p = str(app_dir()).lower()
+    except Exception:
+        return False
+    markers = (
+        "\\temp\\", "/temp/", "\\tmp\\", "/tmp/",
+        "temp1_", "temp2_", "temp3_",          # Windows Explorer zip-open prefixes
+        "\\appdata\\local\\temp", "rar$", "7z",
+        "\\windows\\temp",
+    )
+    return any(m in p for m in markers)
+
+
+def install_writable() -> bool:
+    """True if the install directory is writable. A read-only install (e.g.
+    Program Files without rights) can also stop the code dir / version file from
+    persisting. Profiles now live in LOCALAPPDATA so they are unaffected, but we
+    still surface this because it breaks self-update."""
+    try:
+        d = app_dir()
+        probe = d / ".write_test.tmp"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def cookies_file_stat(account: str) -> str:
+    """Human-readable existence/size/mtime of the profile's Cookies DB, for
+    diagnostics. Chromium stores cookies at <profile>/Default/Network/Cookies
+    (newer) or <profile>/Default/Cookies (older)."""
+    safe = "".join(c for c in (account or "acct1") if c.isalnum() or c in ("-", "_")) or "acct1"
+    base = profiles_root() / safe / "Default"
+    for rel in ("Network/Cookies", "Cookies"):
+        f = base / rel
+        try:
+            if f.is_file():
+                st = f.stat()
+                when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime))
+                return f"{f} exists size={st.st_size}B mtime={when}"
+        except Exception:
+            pass
+    return f"{base}/(Network/)Cookies MISSING"
 
 
 # ---------------------------------------------------------------------------

@@ -455,6 +455,21 @@ class GenerateRequest(BaseModel):
     aspect_dpi: int = 0  # operator-set DPI for Aspect Ratio Enhancement (0 = use file/300)
     halftone_settings: dict = {}  # {lpi, angle, dot} for the local Half Tone op
     blackout_settings: dict = {}  # {threshold} for the local Black Out op
+    # Pixel Geometry (Before -> Generate -> After) operator inputs. Blank values
+    # fall back to the DTF profile defaults in src/pixel_geometry.py; blank
+    # optional free-text (garment style/colour, element policies) renders N/A.
+    reconstruction_mode: str = ""        # EXACT_RECONSTRUCTION | DTF_OPTIMIZED | REDESIGN
+    print_location: str = ""             # e.g. "Full Back"
+    garment_style: str = ""              # optional
+    garment_color: str = ""              # optional (text or hex)
+    target_print_width_in: float = 0.0   # 0 -> profile default (12.5)
+    target_dpi: int = 0                  # 0 -> profile default (300); aspect_dpi reused for printready
+    aspect_ratio_policy: str = ""        # LOCKED | FLEXIBLE
+    background_requirement: str = ""     # e.g. "Transparent"
+    white_elements_policy: str = ""      # optional
+    black_elements_policy: str = ""      # optional
+    semi_transparency_allowed: str = ""  # optional (Yes/No/blank)
+    distress_policy: str = ""            # Preserve | Remove
 
 
 class SelectionRequest(BaseModel):
@@ -1173,6 +1188,102 @@ def _precompute_colorway(job: dict, artwork_file: str) -> None:
         job["colorway_error"] = f"Colour extraction failed: {exc}"
 
 
+def _geometry_inputs(job: dict) -> dict:
+    """The operator inputs for the Pixel Geometry measurement, pulled from the
+    job. Blank values are left for src/pixel_geometry.py to fill with the DTF
+    profile defaults; blank optional free-text stays blank -> N/A."""
+    return {
+        "reconstruction_mode": job.get("geometry_reconstruction_mode") or "",
+        "print_location": job.get("geometry_print_location") or "",
+        "garment_style": job.get("geometry_garment_style") or "",
+        "garment_color": job.get("geometry_garment_color") or "",
+        "target_print_width_in": job.get("geometry_target_print_width_in") or 0.0,
+        "target_dpi": job.get("geometry_target_dpi") or 0,
+        "aspect_ratio_policy": job.get("geometry_aspect_ratio_policy") or "",
+        "background_requirement": job.get("geometry_background_requirement") or "",
+        "white_elements_policy": job.get("geometry_white_elements_policy") or "",
+        "black_elements_policy": job.get("geometry_black_elements_policy") or "",
+        "semi_transparency_allowed": job.get("geometry_semi_transparency_allowed") or "",
+        "distress_policy": job.get("geometry_distress_policy") or "",
+    }
+
+
+def _precompute_geometry(job: dict, artwork_file: str) -> None:
+    """Pixel Geometry: measure the SOURCE artwork LOCALLY on the SERVER
+    (OpenCV/Pillow/numpy; the packaged agent has none) and store the BEFORE
+    block on the job BEFORE the agent can claim it, so the operator sees every
+    BEFORE field the instant the job opens — before any ChatGPT turn.
+
+    Mirrors _precompute_printready: every branch logs the file name, resolved
+    absolute path and whether it exists; exceptions log a full traceback and
+    record geometry_error. Unlike printready it does NOT hard-fail the job on a
+    measurement problem — the spec wants N/A rows, not a refused job — but a
+    MISSING FILE is still a hard error (nothing could be measured at all)."""
+    job["geometry_before"] = None
+    job["geometry_error"] = ""
+    try:
+        from src.pixel_geometry import measure_geometry
+        src = INPUT_DIR / Path(artwork_file).name
+        resolved = src.resolve()
+        exists = src.exists()
+        print(f"[geometry] precompute: file={artwork_file!r} resolved={resolved} "
+              f"exists={exists} cwd={Path.cwd()} INPUT_DIR={INPUT_DIR.resolve()}")
+        if not exists:
+            msg = (f"Artwork not found on the server at {resolved}. "
+                   f"The file must be uploaded to INPUT_DIR before the Pixel Geometry job is created.")
+            print(f"[geometry] precompute FAILED: {msg}")
+            job["geometry_error"] = msg
+            return
+        data = src.read_bytes()
+        artwork_id = f"ART-{time.strftime('%Y%m%d')}-{job['id']}"
+        before = measure_geometry(data, inputs=_geometry_inputs(job), role="before",
+                                  artwork_id=artwork_id, source_filename=src.name)
+        job["geometry_before"] = before
+        job["geometry_artwork_id"] = artwork_id
+        job["geometry_original_file"] = src.name
+        print(f"[geometry] measured {src.name}: {before['source_width_px']}x{before['source_height_px']}, "
+              f"bbox={before['source_bbox_width']}x{before['source_bbox_height']}, "
+              f"object_count={before['object_count']}, bg={before['source_background_type']}.")
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(f"[geometry] precompute EXCEPTION: {exc}\n{tb}")
+        job["geometry_error"] = f"Geometry measurement failed: {exc}"
+
+
+# Characters safe for a vault folder / file-name segment (client + job number
+# both become path segments: VAULT_DIR/<client>/<task_id>/…).
+_PATH_SAFE = re.compile(r"[^A-Za-z0-9 ._-]+")
+
+
+def _safe_client_name(raw: str) -> str:
+    """A folder-safe client label. Blank (manual upload, no name) falls back to
+    'Unassigned' so a vault save path never contains an empty segment."""
+    name = _PATH_SAFE.sub("", (raw or "").strip()).strip(" .")
+    return name or "Unassigned"
+
+
+def _first_artwork_name(req: "GenerateRequest") -> str:
+    """The first source file name across the fields a workflow might use, so a
+    job number can be derived from a vault AW-code when present."""
+    for v in ([req.mockup_image] + list(req.artwork_files or []) + list(req.files or [])):
+        if v and str(v).strip():
+            return str(v).strip()
+    return ""
+
+
+def _generate_job_number(req: "GenerateRequest", job_id: str) -> str:
+    """The job number, generated (never typed). Prefer an AW-<client>-<nnnn>
+    code embedded in the source file name (vault files carry it, e.g.
+    AW-DDA02-0001-SRC.jpg -> AW-DDA02-0001) so a job keeps its design identity;
+    otherwise JOB-YYYYMMDD-<first 4 chars of the job id>. Always path-safe."""
+    name = _first_artwork_name(req)
+    if name:
+        m = _ARTWORK_CODE.search(name)
+        if m:
+            return m.group(1).upper()
+    return "JOB-" + time.strftime("%Y%m%d") + "-" + (job_id[:4] or "0000").upper()
+
+
 @app.post("/api/generate")
 def create_job(req: GenerateRequest, request: Request):
     print(f"[create_job] workflow={req.workflow!r} mockup_image={req.mockup_image!r} files={req.files} artwork_files={req.artwork_files}")
@@ -1188,10 +1299,12 @@ def create_job(req: GenerateRequest, request: Request):
         raise HTTPException(
             status_code=503,
             detail="Your agent isn't running. Start the agent on your PC to generate.")
-    if not req.client.strip():
-        raise HTTPException(status_code=400, detail="Client name is required.")
-    if not req.task_id.strip():
-        raise HTTPException(status_code=400, detail="Job number is required.")
+    # Client name is OPTIONAL now (shown as a chip from the vault, or a small
+    # optional input for manual uploads). Fall back to a safe folder-safe label
+    # so vault save paths (VAULT_DIR/<client>/<task_id>/…) never get an empty
+    # segment. The JOB NUMBER is no longer typed — it is generated here so vault
+    # paths and chat titles still have a stable id.
+    _client = _safe_client_name(req.client)
     # The user's agent is online. If it is busy with their OWN earlier job we do
     # NOT refuse — we queue this one and say so plainly; their agent picks it up
     # when it finishes. Another user's busy agent never enters this decision.
@@ -1259,12 +1372,24 @@ def create_job(req: GenerateRequest, request: Request):
             custom_prompts[op] = _pick(dynamic_name(op), (custom_prompts.get(op) or "").strip())
 
     job_id = uuid.uuid4().hex[:12]
+    # Job number: a typed value never arrives now, so it is generated — from a
+    # vault AW-code when the source file carries one, else JOB-YYYYMMDD-<4 chars
+    # of this job id>. Used for job titles, chat rename and vault save paths.
+    _task = req.task_id.strip() or _generate_job_number(req, job_id)
     jobs[job_id] = {
-        "id": job_id, "status": "queued", "workflow": req.workflow or "",
+        # Inserted as "preparing", NOT "queued": the agent's next-job claim only
+        # ever selects status=="queued", so a job stays UNCLAIMABLE while the
+        # server runs its local precompute (printready measurements, colorway
+        # colours, geometry BEFORE). It is flipped to "queued" ONLY after
+        # precompute succeeds — this closes the race where the agent claimed a
+        # geometry job before geometry_before was measured and then failed with
+        # "no server-side source geometry measurements". A failed precompute is
+        # rejected with 400 and the job is deleted, never queued.
+        "id": job_id, "status": "preparing", "workflow": req.workflow or "",
         "text": req.text.strip(), "text_image": req.text_image.strip(),
         "files": req.files, "options": req.options, "params": req.params,
-        "custom_note": req.custom_note, "client": req.client.strip(),
-        "task_id": req.task_id.strip(), "images": [], "stage_images": {},
+        "custom_note": req.custom_note, "client": _client,
+        "task_id": _task, "images": [], "stage_images": {},
         "vault_folder": None, "error": None,
         "started_at": None, "finished_at": None, "created_at": time.time(),
         # Attribution: which user created this job (identity only — everyone
@@ -1330,6 +1455,28 @@ def create_job(req: GenerateRequest, request: Request):
         "colorway_avoid": [],
         "colorway_selected": [], "colorway_mockups": [],
         "colorway_adapt_selected": [], "colorway_adapted": [],
+        # Pixel Geometry (Before -> Generate -> After). geometry_before is
+        # SERVER-measured at job creation; geometry_after/_output_file are written
+        # by the agent after the generation turn. autofix/approval are V1 "N/A"
+        # blocks. All without a leading underscore so they survive _public_job to
+        # the UI. The geometry_* operator inputs are stashed for _precompute and
+        # the agent's prompt. geometry_target_* mirror the measured target.
+        "geometry_before": None, "geometry_after": None,
+        "geometry_autofix": None, "geometry_approval": None,
+        "geometry_error": "", "geometry_output_file": "",
+        "geometry_original_file": "", "geometry_artwork_id": "",
+        "geometry_reconstruction_mode": req.reconstruction_mode.strip(),
+        "geometry_print_location": req.print_location.strip(),
+        "geometry_garment_style": req.garment_style.strip(),
+        "geometry_garment_color": req.garment_color.strip(),
+        "geometry_target_print_width_in": req.target_print_width_in or 0.0,
+        "geometry_target_dpi": req.target_dpi or 0,
+        "geometry_aspect_ratio_policy": req.aspect_ratio_policy.strip(),
+        "geometry_background_requirement": req.background_requirement.strip(),
+        "geometry_white_elements_policy": req.white_elements_policy.strip(),
+        "geometry_black_elements_policy": req.black_elements_policy.strip(),
+        "geometry_semi_transparency_allowed": req.semi_transparency_allowed.strip(),
+        "geometry_distress_policy": req.distress_policy.strip(),
         "aspect_dpi": req.aspect_dpi, "aspect_info": None, "aspect_recommendations": "",
         "aspect_target": None, "aspect_method": "pad", "aspect_similarity": None,
         "aspect_original_file": "", "aspect_original_features": None,
@@ -1364,6 +1511,24 @@ def create_job(req: GenerateRequest, request: Request):
     # the swatches immediately and the agent hands them to ChatGPT as data.
     if req.workflow == "colorway" and req.artwork_files:
         _precompute_colorway(jobs[job_id], req.artwork_files[0])
+    # Pixel Geometry: measure the SOURCE on the server right away so the BEFORE
+    # panel fills before any ChatGPT turn. Unlike printready this does not refuse
+    # the job on a measurement problem (N/A rows are allowed), but a missing file
+    # means nothing could be measured, so fail with the clear reason.
+    if req.workflow == "geometry" and req.artwork_files:
+        _precompute_geometry(jobs[job_id], req.artwork_files[0])
+        _geo_err = jobs[job_id].get("geometry_error")
+        if _geo_err and jobs[job_id].get("geometry_before") is None:
+            del jobs[job_id]
+            raise HTTPException(status_code=400, detail=_geo_err)
+
+    # All server-side precompute finished successfully. ONLY NOW make the job
+    # claimable: flip "preparing" -> "queued" so the agent's next-job poll can
+    # pick it up with its BEFORE/measurement data already attached. A job that
+    # bailed out above (raised 400 + deleted) never reaches this line.
+    if job_id in jobs:
+        jobs[job_id]["status"] = "queued"
+
     resp = {"job_id": job_id}
     if _agent_busy_with_own:
         # Queued behind the user's own in-flight job on their agent.
@@ -1960,6 +2125,33 @@ def serve_stage_image(job_id: str, stage: str):
         raise HTTPException(status_code=404, detail="Image not available.")
 
     return FileResponse(str(path), media_type="image/png", filename=path.name)
+
+
+@app.get("/api/jobs/{job_id}/geometry.json")
+def serve_geometry_master(job_id: str):
+    """The Pixel Geometry master object as a downloadable JSON:
+    {artwork_id, before, after, autofix, approval} with null for every N/A.
+
+    Assembled from the stored blocks so the shape is always complete even before
+    the AFTER measurement arrives (missing blocks render as all-null)."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("workflow") != "geometry":
+        raise HTTPException(status_code=400, detail="This job is not a Pixel Geometry job.")
+    from src.pixel_geometry import build_master
+    master = build_master(
+        job.get("geometry_artwork_id") or job_id,
+        job.get("geometry_before"),
+        job.get("geometry_after"),
+        job.get("geometry_autofix"),
+        job.get("geometry_approval"),
+    )
+    fname = f"{(job.get('geometry_artwork_id') or job_id)}_geometry.json"
+    return JSONResponse(
+        content=master,
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @app.post("/api/open-folder")
@@ -2989,7 +3181,62 @@ async def agent_result(job_id: str, request: Request):
     _recompute_aspect_similarity(job)
     _recompute_replace_similarity(job)
     _recompute_colorway_similarity(job)
+    _recompute_geometry_after(job, saved_names=saved)
     return {"ok": True, "saved": saved}
+
+
+def _recompute_geometry_after(job: dict, saved_names: list | None = None) -> None:
+    """Pixel Geometry: measure the GENERATED output on the SERVER (cv2 lives
+    here; the packaged agent has none, so it only uploads the image). Mirrors
+    _recompute_aspect_similarity: triggered when the agent uploads its result.
+
+    Measures the ACTUAL output file at its real size (never resized before
+    measuring), compares it to the stored BEFORE block, and fills geometry_after
+    plus the V1 autofix/approval blocks (approval carries the output's SHA256).
+    Runs only for a geometry job that has a BEFORE block and an output file, and
+    skips re-measuring once geometry_after is set so a later heartbeat upload
+    does not redo the work.
+
+    The output file is resolved from the files JUST uploaded in this request
+    (saved_names) first — that is the only source guaranteed present before the
+    agent's slower progress sync carries stage_images — then from the synced
+    geometry_output_file / stage_images['output'] as a fallback."""
+    if job.get("workflow") != "geometry":
+        return
+    before = job.get("geometry_before")
+    if not before:
+        return
+    if job.get("geometry_after"):   # already measured
+        return
+    out_name = None
+    for cand in (saved_names or []):
+        if cand and "geometry_output" in cand:
+            out_name = cand
+            break
+    if not out_name and saved_names:
+        out_name = saved_names[0]      # a geometry job uploads exactly one image
+    out_name = out_name or job.get("geometry_output_file") \
+        or (job.get("stage_images") or {}).get("output")
+    if not out_name:
+        return
+    out_path = OUTPUT_DIR / Path(out_name).name
+    if not out_path.exists():
+        return
+    try:
+        from src.pixel_geometry import measure_geometry, autofix_block, approval_block
+        out_bytes = out_path.read_bytes()
+        after = measure_geometry(out_bytes, role="after", before=before)
+        job["geometry_after"] = after
+        job["geometry_autofix"] = autofix_block()
+        job["geometry_approval"] = approval_block(out_bytes, before)
+        print(f"[geometry] measured AFTER for job {job['id']}: "
+              f"{after['output_width_px']}x{after['output_height_px']}, "
+              f"overall_qa={after['overall_qa_status']}, "
+              f"geo_sim={after['overall_geometry_similarity_pct']}.")
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(f"[geometry] AFTER measurement failed for job {job['id']}: {exc}\n{tb}")
+        job["geometry_error"] = f"Output geometry measurement failed: {exc}"
 
 
 def _recompute_aspect_similarity(job: dict) -> None:
@@ -2998,7 +3245,14 @@ def _recompute_aspect_similarity(job: dict) -> None:
     The agent produces the baseline + final images but no longer runs the cv2
     comparison. Here (server-side, where cv2 is available) we compare the final
     against the baseline and populate the fields the UI reads. Runs only for a
-    regenerate aspect step and only when both files are present."""
+    regenerate aspect step and only when both files are present.
+
+    Like-for-like comparison: the GPT result was regenerated AT THE TARGET
+    RATIO, so we must compare it against the baseline PADDED TO THE SAME TARGET
+    RATIO — never against the unpadded baseline, whose canvas/aspect differ.
+    Padding adds only transparent space and preserves the baseline's pixels, so
+    the two images now share a canvas shape and the score reflects real redraw
+    differences rather than the ratio change."""
     baseline = job.get("aspect_baseline_file")
     if not baseline:
         return
@@ -3016,13 +3270,43 @@ def _recompute_aspect_similarity(job: dict) -> None:
         return
     try:
         from src.compare import similarity as _similarity
-        sim = _similarity(b_path.read_bytes(), f_path.read_bytes())
+        from src.aspect import fit_to_ratio
+        target = job.get("aspect_target") or {}
+        tw, th = float(target.get("w", 0)), float(target.get("h", 0))
+        baseline_bytes = b_path.read_bytes()
+        # Pad the baseline to the target ratio so both sides share a canvas.
+        if tw > 0 and th > 0:
+            compare_bytes = fit_to_ratio(baseline_bytes, tw, th)
+        else:
+            compare_bytes = baseline_bytes  # no target recorded — best effort
+        gen_bytes = f_path.read_bytes()
+        sim = _similarity(compare_bytes, gen_bytes)
         final_step["similarity"] = sim
+        final_step.pop("similarity_error", None)
         job["aspect_similarity"] = sim
-        print(f"[server] computed aspect similarity for job {job['id']}: "
-              f"shape={sim.get('shape_pct')} detail={sim.get('detail_pct')}")
+        job["aspect_similarity_error"] = None
+        bw, bh = _png_size(compare_bytes)
+        gw, gh = _png_size(gen_bytes)
+        print(f"[server] aspect similarity job {job['id']}: "
+              f"shape={sim.get('shape_pct')} detail={sim.get('detail_pct')} "
+              f"(padded baseline {bw}x{bh} vs result {gw}x{gh})")
     except Exception as exc:
-        print(f"[server] aspect similarity computation failed: {exc}")
+        # Never fail silently: record the error so the UI can say so.
+        msg = str(exc)
+        final_step["similarity_error"] = msg
+        job["aspect_similarity_error"] = msg
+        print(f"[server] aspect similarity computation failed for job {job['id']}: {msg}")
+
+
+def _png_size(data: bytes) -> tuple[int, int]:
+    """Width/height of PNG/image bytes, for logging. Best effort — (0,0) on error."""
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as im:
+            return im.size
+    except Exception:
+        return (0, 0)
 
 
 def _recompute_replace_similarity(job: dict) -> None:
@@ -3119,7 +3403,14 @@ async def agent_error(job_id: str, request: Request):
     ctype = request.headers.get("content-type", "")
     fields: dict[str, Any] = {}
     screenshot_name = None
-    if ctype.startswith("multipart/form-data"):
+    # The agent posts form fields EITHER as multipart (when a screenshot rides
+    # along) OR as urlencoded (requests' default for `data=` with no file).
+    # Both are form bodies, so parse them the same way via request.form() —
+    # earlier this branch only accepted multipart, so a urlencoded body (the
+    # no-screenshot failure path) fell through to JSON parsing, failed, and left
+    # fields empty, which is why a real exception message surfaced as the
+    # generic "Unknown error". JSON is still accepted as a fallback.
+    if ctype.startswith("multipart/form-data") or ctype.startswith("application/x-www-form-urlencoded"):
         form = await request.form()
         for key, value in form.multi_items():
             if hasattr(value, "filename") and value.filename:
@@ -3269,6 +3560,7 @@ WORKFLOW_TARGETS = {
     "identify": {"label": "Artwork Identification", "multiple": False},
     "printready": {"label": "Print Ready QA", "multiple": False},
     "colorway": {"label": "Colorways", "multiple": False},
+    "geometry": {"label": "Pixel Geometry", "multiple": False},
 }
 
 
