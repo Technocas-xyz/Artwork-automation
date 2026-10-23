@@ -483,8 +483,10 @@
     function annotateJobAgents() {
       fetch("/api/jobs", { headers: { "Accept": "application/json" } })
         .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (list) {
-          if (!list) return;
+        .then(function (data) {
+          if (!data) return;
+          // /api/jobs now returns {items,...}; tolerate the old plain-array shape too.
+          var list = Array.isArray(data) ? data : (data.items || []);
           list.forEach(function (j) {
             if (!j.claimed_by_name) return;
             var host = document.querySelector('[data-job="' + j.id + '"]');

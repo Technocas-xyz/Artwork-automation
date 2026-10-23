@@ -12,3 +12,20 @@ scipy==1.15.1
 requests==2.32.3
 pystray==0.19.5
 pyinstaller==6.22.2
+
+# --- Database (PostgreSQL persistence) ------------------------------------
+# SQLAlchemy 2.x ORM, Alembic migrations, psycopg 3 driver (binary wheel so no
+# system libpq needed in the slim image). The server uses these; the packaged
+# agent does NOT import them.
+#
+# Version pins must work on BOTH the container's Python 3.11 AND a dev machine's
+# Python 3.14, from the same file:
+#   * SQLAlchemy 2.0.45 is the first 2.0.x with cp314 wheels (and keeps cp311);
+#     staying on the 2.0 line (NOT 2.1) avoids the 2.1 behavioural changes.
+#     2.0.36 crashed to import on 3.14 (typing.Union change), which is why this
+#     is bumped.
+#   * psycopg[binary] 3.2.10 is the first 3.2.x with cp314 wheels (and keeps
+#     cp311); 3.2.3 had no 3.14 wheel.
+SQLAlchemy==2.0.45
+alembic==1.14.0
+psycopg[binary]==3.2.10

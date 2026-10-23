@@ -1,10 +1,37 @@
 services:
+  db:
+    image: postgres:16
+    container_name: artwork_db
+    restart: unless-stopped
+    # POSTGRES_* come from .env (same values as DATABASE_URL in the app).
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-artwork}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-artwork}
+      POSTGRES_DB: ${POSTGRES_DB:-artwork}
+    volumes:
+      # Named volume for the database data — the ONLY named volume we add; vault/
+      # input/output/etc. stay as host bind mounts on the app service below.
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The app waits for this to be healthy before it starts (depends_on below),
+      # so `docker compose up -d` creates the DB and runs migrations with no
+      # manual step.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-artwork} -d ${POSTGRES_DB:-artwork}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Not published to the host — only the app container talks to it over the
+    # compose network. Expose a port here only if you need external DB access.
+
   artwork-automation:
     build: .
     container_name: artwork_automation
     restart: unless-stopped
     env_file: .env
     shm_size: '1gb'
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       # nginx owns 4400 now: it is the authentik gate for the web UI and the
       # pass-through for the designers' agents, so the app itself is only
@@ -24,3 +51,8 @@ services:
       # designer account and re-seed only the .env admin.
       - ./users.json:/app/users.json
       - ./downloads:/app/downloads
+
+volumes:
+  # Postgres data — the one named volume this project uses. Everything else
+  # (vault/input/output/logs/profiles/downloads) stays on host bind mounts.
+  pgdata:

@@ -30,5 +30,31 @@ else
 fi
 websockify --web=/usr/share/novnc 6080 localhost:5900 >/dev/null 2>&1 &
 
+# --- database: wait, then migrate -----------------------------------------
+# The db service has a healthcheck and the app `depends_on` it being healthy,
+# but we still wait+retry here so the app never starts against a db that is
+# mid-init, and so local-dev (no compose healthcheck) also comes up cleanly.
+# `alembic upgrade head` creates/updates every table automatically on each
+# deploy — no manual SQL step. A failed migration aborts startup loudly rather
+# than running the app against a half-migrated schema.
+echo "[entrypoint] waiting for database…"
+python - <<'PY'
+import sys
+from db.session import wait_for_db
+sys.exit(0 if wait_for_db(max_seconds=90) else 1)
+PY
+if [ $? -ne 0 ]; then
+    echo "[entrypoint] database never became reachable; aborting." >&2
+    exit 1
+fi
+
+echo "[entrypoint] running alembic upgrade head…"
+alembic upgrade head
+
+# --- one-time, idempotent imports (users/tokens, vault folders, prompts) ---
+# Safe to run on every boot: each importer is a no-op once its data is present.
+echo "[entrypoint] running first-start imports (idempotent)…"
+python -m scripts.first_start_import || echo "[entrypoint] import step reported an issue (continuing)"
+
 # --- app -------------------------------------------------------------------
 exec uvicorn app:app --host 0.0.0.0 --port 8000

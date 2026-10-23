@@ -251,11 +251,11 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 <link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
-<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="textimage">Text + Image</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button><button class="wf-tab" data-wf="identify">Artwork Identification</button><button class="wf-tab" data-wf="printready">Print Ready QA</button><button class="wf-tab" data-wf="colorway">Colorways</button><button class="wf-tab" data-wf="geometry">Pixel Geometry</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><button id="adminUsersBtn" onclick="openAdminUsers()" style="display:none;font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:8px">Users</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
+<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="textimage">Text + Image</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button><button class="wf-tab" data-wf="identify">Artwork Identification</button><button class="wf-tab" data-wf="printready">Print Ready QA</button><button class="wf-tab" data-wf="colorway">Colorways</button><button class="wf-tab" data-wf="geometry">Pixel Geometry</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><button id="adminUsersBtn" onclick="openAdminUsers()" style="display:none;font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:8px">Users</button><a id="adminPromptsBtn" href="/prompts" style="display:none;font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:8px;text-decoration:none">Prompts</a><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
 <div class="columns">
 <div class="col" id="col1"></div>
 <div class="col" id="col2"></div>
-<div class="col" id="col3"><div class="col-title">Results</div><div id="workerStatus"></div><div id="statusArea"></div><div id="resultArea"></div><div class="history-section" id="historySection" style="display:none"><h3>Previous Runs</h3><div id="historyList"></div></div></div>
+<div class="col" id="col3"><div class="col-title">Results</div><div id="workerStatus"></div><div id="statusArea"></div><div id="resultArea"></div><div class="history-section" id="historySection" style="display:none"><h3>Previous Runs</h3><div id="historyList"></div><button id="histMoreBtn" class="browse-btn" style="display:none;margin-top:8px" onclick="loadHistory(false)">Load more</button></div></div>
 </div>
 <div id="agentSetupOverlay" class="vm-overlay" style="display:none">
   <div class="vm-modal" style="max-width:560px;width:100%;max-height:88vh;display:flex;flex-direction:column;background:var(--surface);border-radius:12px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)">
@@ -3724,7 +3724,37 @@ function createdByLine(job){
   if(!n)return "";
   return '<div class="job-header" style="margin-bottom:8px">Created by '+esc(n)+'</div>';
 }
-function addHist(job){historyItems.unshift(job);historySection.style.display="block";renderHist()}
+function addHist(job){
+  // De-dupe: a job seeded from the server (page load) must not double up when
+  // it also finishes live in this tab.
+  historyItems=historyItems.filter(function(h){return h.id!==job.id});
+  historyItems.unshift(job);historySection.style.display="block";renderHist()
+}
+// Previous Runs now PERSIST: seed the list from the server on load (own runs
+// for a designer, everyone's for an admin), newest first, paginated. Without
+// this the panel was empty after a reload or a server restart.
+var _histPage=0,_histDone=false,_histLoading=false;
+function loadHistory(reset){
+  if(_histLoading)return;
+  if(reset){_histPage=0;_histDone=false;historyItems=[]}
+  if(_histDone)return;
+  _histLoading=true;
+  var next=_histPage+1;
+  fetch("/api/jobs?page="+next+"&page_size=20").then(function(r){return r.ok?r.json():null}).then(function(d){
+    _histLoading=false;
+    if(!d||!d.items)return;
+    _histPage=d.page;
+    // Only terminal jobs belong in Previous Runs (active ones show live).
+    var done=d.items.filter(function(j){return j.status==="done"||j.status==="done_with_errors"||j.status==="failed"||j.status==="cancelled"});
+    done.forEach(function(j){
+      if(!historyItems.some(function(h){return h.id===j.id})) historyItems.push(j);
+    });
+    if(historyItems.length)historySection.style.display="block";
+    renderHist();
+    if(!d.has_more)_histDone=true;
+    var more=$("histMoreBtn");if(more)more.style.display=_histDone?"none":"block";
+  }).catch(function(){_histLoading=false});
+}
 function renderHist(){
   historyList.innerHTML="";
   historyItems.forEach(function(job,i){
@@ -3747,7 +3777,11 @@ function renderHist(){
 setInterval(function(){fetch("/api/status").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(s){if(!s)return;var wasAlive=workerAlive;workerAlive=s.worker_alive;isLoggedIn=!!s.logged_in;workerStatus.innerHTML=agentBannerHtml(s);if(!s.worker_alive&&wasAlive){clr();var b=$("genBtn");if(b)b.disabled=true}updBtn()})},5000);
 // Auth: load user info and handle 401 globally
 var CURRENT_USER={username:"",display_name:"",role:""};
-fetch("/api/auth/me").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(d){if(d){CURRENT_USER=d;var ui=$("userInfo");if(ui)ui.innerHTML='<span>'+esc(d.display_name||d.username)+(d.role==="admin"?' · admin':'')+'</span><a href="#" onclick="doLogout();return false" style="color:var(--accent);text-decoration:none;font-weight:600">Sign out</a>';var ab=$("adminUsersBtn");if(ab)ab.style.display=(d.role==="admin")?"inline-block":"none"}});
+fetch("/api/auth/me").then(function(r){if(r.status===401){window.location.href="/login";return null}return r.json()}).then(function(d){if(d){CURRENT_USER=d;var ui=$("userInfo");if(ui)ui.innerHTML='<span>'+esc(d.display_name||d.username)+(d.role==="admin"?' · admin':'')+'</span><a href="#" onclick="doLogout();return false" style="color:var(--accent);text-decoration:none;font-weight:600">Sign out</a>';var ab=$("adminUsersBtn");if(ab)ab.style.display=(d.role==="admin")?"inline-block":"none";
+  var pb=$("adminPromptsBtn");if(pb)pb.style.display=(d.role==="admin")?"inline-block":"none";
+  // Seed Previous Runs from the server now that we know the user (role scopes it).
+  loadHistory(true);
+}});
 window.doLogout=function(){fetch("/api/auth/logout",{method:"POST"}).then(function(){window.location.href="/login"})};
 
 // === AGENT SETUP =========================================================

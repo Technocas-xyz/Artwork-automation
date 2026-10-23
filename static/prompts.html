@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompts — Artwork Automation</title>
+<style>
+  :root{--accent:#4f46e5;--border:#e5e7eb;--muted:#6b7280;--surface:#fff;--bg:#f5f6fa}
+  *{box-sizing:border-box}
+  body{font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;margin:0;background:var(--bg);color:#111827}
+  header{background:#1e2a4a;color:#fff;padding:12px 20px;display:flex;align-items:center;gap:16px}
+  header h1{font-size:1rem;margin:0;font-weight:600}
+  header a{color:#c7d2fe;text-decoration:none;font-size:.85rem}
+  .wrap{display:flex;gap:16px;padding:16px;max-width:1200px;margin:0 auto}
+  .list{width:340px;flex-shrink:0}
+  .group{margin-bottom:14px}
+  .group h3{font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:0 0 6px}
+  .pitem{padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:4px;cursor:pointer;background:var(--surface);font-size:.82rem}
+  .pitem:hover{border-color:var(--accent)}
+  .pitem.active{border-color:var(--accent);background:#eef2ff}
+  .pitem .k{font-weight:600}
+  .pitem .v{color:var(--muted);font-size:.72rem}
+  .editor{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;min-height:420px}
+  .editor h2{font-size:.95rem;margin:0 0 4px}
+  .editor .sub{color:var(--muted);font-size:.76rem;margin-bottom:10px}
+  textarea{width:100%;min-height:300px;font-family:Consolas,Monaco,monospace;font-size:.8rem;padding:10px;border:1px solid var(--border);border-radius:8px;resize:vertical}
+  .row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+  button{font:inherit;font-size:.82rem;padding:8px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface);cursor:pointer}
+  button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .ph{font-size:.72rem;color:var(--muted)}
+  .msg{font-size:.8rem;margin-left:auto}
+  .msg.ok{color:#16a34a}.msg.err{color:#dc2626}
+  .hist{margin-top:14px;border-top:1px solid var(--border);padding-top:10px}
+  .hist h3{font-size:.76rem;margin:0 0 6px}
+  .hrow{display:flex;gap:8px;align-items:center;font-size:.76rem;padding:4px 0;border-bottom:1px dashed var(--border)}
+  .hrow .hv{font-weight:600;width:44px}
+  .hrow .ht{color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .empty{color:var(--muted);font-size:.84rem;padding:40px;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>Prompt Management</h1>
+  <a href="/">← Back to app</a>
+  <button id="reimportBtn" style="margin-left:12px;font-size:.78rem;padding:6px 12px;border-radius:8px;border:1px solid #c7d2fe;background:transparent;color:#c7d2fe;cursor:pointer">Re-import from Decoinks…</button>
+  <span style="margin-left:auto;font-size:.76rem;opacity:.8">Edits create a new version. Our database is the source of truth.</span>
+</header>
+<div class="wrap">
+  <div class="list" id="list"><div class="empty">Loading…</div></div>
+  <div class="editor" id="editor"><div class="empty">Select a prompt on the left to edit it.</div></div>
+</div>
+<div id="reimportOverlay" style="display:none;position:fixed;inset:0;background:rgba(20,24,40,.45);z-index:100;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border-radius:12px;max-width:860px;width:92%;max-height:86vh;display:flex;flex-direction:column;overflow:hidden">
+    <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
+      <strong>Re-import prompts from Decoinks</strong>
+      <span style="color:var(--muted);font-size:.78rem">Only ticked keys are overwritten (each as a new version).</span>
+      <button id="reimportClose" style="margin-left:auto;border:none;background:none;font-size:1.2rem;cursor:pointer">&times;</button>
+    </div>
+    <div id="reimportBody" style="padding:14px 18px;overflow:auto"><div class="empty">Loading diff…</div></div>
+    <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center">
+      <button id="reimportAll" class="">Tick all that differ / are new</button>
+      <button id="reimportApply" class="primary" style="margin-left:auto">Overwrite ticked keys</button>
+      <span class="msg" id="reimportMsg"></span>
+    </div>
+  </div>
+</div>
+<script>
+var PROMPTS=[], CURRENT=null;
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
+function $(id){return document.getElementById(id)}
+
+function load(){
+  fetch("/api/admin/prompts").then(function(r){
+    if(r.status===401||r.status===403){document.body.innerHTML="<p style='padding:40px'>Admin access required. <a href='/'>Back</a></p>";return null}
+    return r.json();
+  }).then(function(d){ if(!d)return; PROMPTS=d.prompts||[]; renderList(); });
+}
+
+function renderList(){
+  var groups={};
+  PROMPTS.forEach(function(p){(groups[p.workflow]=groups[p.workflow]||[]).push(p)});
+  var html="";
+  Object.keys(groups).sort().forEach(function(wf){
+    html+='<div class="group"><h3>'+esc(wf)+'</h3>';
+    groups[wf].forEach(function(p){
+      var src=p.seed_source?(' · '+esc(p.seed_source)):'';
+      html+='<div class="pitem'+(CURRENT===p.key?' active':'')+'" data-key="'+esc(p.key)+'">'
+        +'<div class="k">'+esc(p.label||p.key)+'</div>'
+        +'<div class="v">'+esc(p.key)+' · v'+p.version+src+'</div></div>';
+    });
+    html+='</div>';
+  });
+  var list=$("list"); list.innerHTML=html||'<div class="empty">No prompts.</div>';
+  Array.prototype.forEach.call(list.querySelectorAll(".pitem"),function(el){
+    el.onclick=function(){openPrompt(el.getAttribute("data-key"))};
+  });
+}
+
+function openPrompt(key){
+  CURRENT=key; renderList();
+  fetch("/api/admin/prompts/"+encodeURIComponent(key)).then(function(r){return r.json()}).then(function(p){
+    if(p.detail){ $("editor").innerHTML='<div class="empty">'+esc(p.detail)+'</div>'; return; }
+    var hist=(p.history||[]).map(function(h){
+      return '<div class="hrow"><span class="hv">v'+h.version+'</span>'
+        +'<span class="ht">'+esc((h.text||"").slice(0,80))+'</span>'
+        +'<button data-restore="'+h.version+'">Restore</button></div>';
+    }).join("");
+    $("editor").innerHTML=''
+      +'<h2>'+esc(p.label||p.key)+'</h2>'
+      +'<div class="sub">'+esc(p.key)+' · workflow: '+esc(p.workflow)+' · current v'+p.version+'</div>'
+      +'<textarea id="ptext">'+esc(p.text||"")+'</textarea>'
+      +'<div class="ph">Placeholders use {{name}}. They must match what the code fills, or the built-in text is used instead.</div>'
+      +'<div class="row"><button class="primary" id="saveBtn">Save new version</button>'
+      +'<span class="msg" id="msg"></span></div>'
+      +'<div class="hist"><h3>Version history</h3>'+(hist||'<div class="empty" style="padding:10px">No history yet.</div>')+'</div>';
+    $("saveBtn").onclick=function(){save(key)};
+    Array.prototype.forEach.call($("editor").querySelectorAll("[data-restore]"),function(b){
+      b.onclick=function(){restore(key,b.getAttribute("data-restore"))};
+    });
+  });
+}
+
+function save(key){
+  var text=$("ptext").value;
+  var msg=$("msg"); msg.className="msg"; msg.textContent="Saving…";
+  fetch("/api/admin/prompts/"+encodeURIComponent(key),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:text})})
+    .then(function(r){return r.json()}).then(function(d){
+      if(d.ok){msg.className="msg ok";msg.textContent="Saved as v"+d.version;load();openPrompt(key)}
+      else{msg.className="msg err";msg.textContent=d.detail||"Save failed"}
+    }).catch(function(){msg.className="msg err";msg.textContent="Save failed"});
+}
+
+function restore(key,version){
+  if(!confirm("Restore v"+version+" as a new current version?"))return;
+  fetch("/api/admin/prompts/"+encodeURIComponent(key)+"/restore/"+version,{method:"POST"})
+    .then(function(r){return r.json()}).then(function(d){ if(d.ok){load();openPrompt(key)} });
+}
+
+// --- Re-import from Decoinks ---------------------------------------------
+var REIMPORT=[];
+function openReimport(){
+  $("reimportOverlay").style.display="flex";
+  $("reimportBody").innerHTML='<div class="empty">Loading diff…</div>';
+  $("reimportMsg").textContent="";
+  fetch("/api/admin/prompts-reimport/diff").then(function(r){return r.json()}).then(function(d){
+    if(!d.reachable){ $("reimportBody").innerHTML='<div class="empty">Decoinks is not reachable: '+esc(d.error||"")+'</div>'; REIMPORT=[]; return; }
+    REIMPORT=d.rows||[];
+    var html='<table style="width:100%;border-collapse:collapse;font-size:.78rem">';
+    html+='<tr><th></th><th style="text-align:left">Key</th><th style="text-align:left">Status</th><th style="text-align:left">Decoinks preview</th></tr>';
+    REIMPORT.forEach(function(row,i){
+      var dis=(row.status==="same"||row.status==="only_db");
+      html+='<tr style="border-top:1px solid var(--border)">'
+        +'<td><input type="checkbox" data-i="'+i+'"'+(dis?' disabled':'')+'></td>'
+        +'<td><code>'+esc(row.key)+'</code></td>'
+        +'<td>'+esc(row.status)+(row.in_db?(' (v'+row.db_version+')'):' (new)')+'</td>'
+        +'<td style="color:var(--muted)">'+esc(row.decoinks_preview)+'…</td></tr>';
+    });
+    html+='</table>';
+    $("reimportBody").innerHTML=html;
+  });
+}
+function reimportSelectedKeys(){
+  var keys=[];
+  Array.prototype.forEach.call($("reimportBody").querySelectorAll('input[type=checkbox]:checked'),function(cb){
+    var row=REIMPORT[parseInt(cb.getAttribute("data-i"),10)]; if(row)keys.push(row.key);
+  });
+  return keys;
+}
+document.addEventListener("DOMContentLoaded",function(){});
+$("reimportBtn").onclick=openReimport;
+$("reimportClose").onclick=function(){$("reimportOverlay").style.display="none"};
+$("reimportAll").onclick=function(){
+  Array.prototype.forEach.call($("reimportBody").querySelectorAll('input[type=checkbox]:not([disabled])'),function(cb){cb.checked=true});
+};
+$("reimportApply").onclick=function(){
+  var keys=reimportSelectedKeys();
+  if(!keys.length){$("reimportMsg").className="msg err";$("reimportMsg").textContent="Tick at least one key.";return}
+  if(!confirm("Overwrite "+keys.length+" key(s) from Decoinks? Each becomes a new version."))return;
+  $("reimportMsg").className="msg";$("reimportMsg").textContent="Applying…";
+  fetch("/api/admin/prompts-reimport/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({keys:keys})})
+    .then(function(r){return r.json()}).then(function(d){
+      if(d.ok){$("reimportMsg").className="msg ok";$("reimportMsg").textContent="Overwrote "+d.count+" key(s).";load();openReimport()}
+      else{$("reimportMsg").className="msg err";$("reimportMsg").textContent=d.detail||"Failed"}
+    }).catch(function(){$("reimportMsg").className="msg err";$("reimportMsg").textContent="Failed"});
+};
+
+load();
+</script>
+</body>
+</html>

@@ -40,6 +40,10 @@ import requests
 BACKEND = os.getenv("PRINTSHOP_BACKEND", "http://172.17.0.1:8094").rstrip("/")
 SOURCE_APP = "artwork-automation"
 TTL_SECONDS = float(os.getenv("PROMPT_CACHE_SECONDS", "60"))
+# How long the in-process prompt cache (now backed by our DB) is held before a
+# reload. Short so a Prompts-page edit is visible within seconds, but non-zero
+# so the 2s poll path / per-job snapshots don't hit the DB on every call.
+PROMPT_DB_TTL = float(os.getenv("PROMPT_DB_TTL_SECONDS", "15"))
 RETRY_SECONDS = 15.0
 _CACHE_FILE = Path(os.getenv(
     "PROMPT_CACHE_FILE",
@@ -259,44 +263,73 @@ class PromptRegistry:
             print(f"[prompts] could not write prompt cache: {exc}")
 
     def refresh(self, force: bool = False) -> dict[str, Any]:
+        """Return the live prompt set, now sourced from OUR PostgreSQL (not
+        Decoinks). Shape is kept identical to the old Decoinks cache so the rest
+        of this class is unchanged:
+            {"revision", "prompts": {AIS_key: {"text", "version": {...}, ...}},
+             "missing", "fetched_at"}
+        Cached in-process for PROMPT_DB_TTL seconds so the 2s poll path and
+        per-job snapshots never hammer the DB. On any DB error we keep serving
+        the last good copy (and ultimately the built-in text via template()).
+        Decoinks is NO LONGER read here — only report_runs()/publish_manifest()
+        still talk to Decoinks, unchanged.
+        """
         now = time.time()
         with self._lock:
-            if self._data is None:
-                self._data = self._load_disk()
-            fresh = self._data is not None and now - self._fetched_at < TTL_SECONDS
-            if (fresh and not force) or (not force and now < self._next_try) or not _secret():
+            fresh = self._data is not None and now - self._fetched_at < PROMPT_DB_TTL
+            if fresh and not force:
                 return self._data or {}
         try:
-            r = requests.get(
-                f"{BACKEND}/api/ai/prompts",
-                params={"keys": ",".join(sorted(set(PROMPT_KEYS.values()))), "prefix": DYNAMIC_PREFIX},
-                headers={"x-decoinks-sso-secret": _secret()},
-                timeout=5,
-            )
-            r.raise_for_status()
-            body = (r.json() or {}).get("data") or {}
+            rows = self._load_db_prompts()
             data = {
-                "revision": body.get("revision"),
-                "prompts": {p["prompt_key"]: p for p in body.get("prompts", []) if p.get("prompt_key")},
-                "missing": body.get("missing", []),
+                "revision": rows.get("_revision"),
+                "prompts": rows["prompts"],
+                "missing": [],
                 "fetched_at": time.time(),
             }
             with self._lock:
-                changed = (self._data or {}).get("revision") != data["revision"]
                 self._data = data
                 self._fetched_at = time.time()
                 self.last_error = None
                 self.last_success_at = self._fetched_at
-            if changed:
-                self._save_disk(data)
-                print(f"[prompts] loaded {len(data['prompts'])} live prompts from Decoinks (revision {data['revision']})")
             return data
         except Exception as exc:
             with self._lock:
                 self.last_error = str(exc)
                 self._next_try = time.time() + RETRY_SECONDS
-                print(f"[prompts] Decoinks unreachable, using {'cached' if self._data else 'built-in'} prompts: {exc}")
-                return self._data or {}
+                print(f"[prompts] DB unreachable, using {'cached' if self._data else 'built-in'} prompts: {exc}")
+                return self._data or {"prompts": {}, "revision": None, "missing": []}
+
+    def _load_db_prompts(self) -> dict[str, Any]:
+        """Read all active prompts from the DB into the Decoinks-cache shape.
+
+        Each prompt becomes {AIS_key: {"prompt_key", "text", "name",
+        "description", "version": {"id", "number"}}}. Text is stored canonically
+        as {{name}}, exactly what the old Decoinks payload carried, so the
+        unchanged template() resolution keeps working."""
+        from sqlalchemy import select
+        from db.session import get_session
+        from db.models import Prompt
+
+        prompts: dict[str, Any] = {}
+        revision_parts: list[str] = []
+        s = get_session()
+        try:
+            for p in s.scalars(select(Prompt).where(Prompt.active.is_(True))).all():
+                prompts[p.key] = {
+                    "prompt_key": p.key,
+                    "text": p.text or "",
+                    "name": p.label or p.key,
+                    "description": "",
+                    "version": {"id": f"{p.key}:v{p.version}", "number": p.version},
+                }
+                revision_parts.append(f"{p.key}:{p.version}")
+        finally:
+            s.close()
+        # A cheap revision string so status()/manifest change-detection still works.
+        import hashlib
+        revision = hashlib.sha1("|".join(sorted(revision_parts)).encode()).hexdigest()[:12]
+        return {"prompts": prompts, "_revision": revision}
 
     # ── resolving ───────────────────────────────────────────────────────────
     def template(self, name: str) -> tuple[str, dict[str, Any]]:
@@ -410,15 +443,25 @@ class PromptRegistry:
             print(f"[prompts] could not send the manifest: {exc}")
 
     def status(self) -> dict[str, Any]:
-        data = self._data or {}
+        data = self.refresh() if self._data is None else self._data
         return {
-            "configured": bool(_secret()),
+            "configured": True,              # our DB is always the source now
+            "source": "database",
+            "decoinks_logging": bool(_secret()),  # run-log/manifest still go to Decoinks if a secret is set
             "live_prompts": len(data.get("prompts") or {}),
             "revision": data.get("revision"),
             "missing": data.get("missing", []),
             "last_success_at": self.last_success_at,
             "last_error": self.last_error,
         }
+
+    def invalidate(self) -> None:
+        """Drop the cached prompt set so the next read reloads from the DB.
+        Called right after a Prompts-page edit so the change is visible at once
+        rather than after PROMPT_DB_TTL."""
+        with self._lock:
+            self._data = None
+            self._fetched_at = 0.0
 
 
 registry = PromptRegistry()

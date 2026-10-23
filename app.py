@@ -215,6 +215,52 @@ except Exception as _seed_exc:  # never block startup on the seed
 jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
 
+# How long a `running` job with no agent contact is kept running across a server
+# restart before being marked interrupted (owner-agreed default: 10 minutes).
+JOB_RUNNING_GRACE_SECONDS = float(os.getenv("JOB_RUNNING_GRACE_SECONDS", "600"))
+
+
+def _persist(job: dict) -> None:
+    """Write a job through to Postgres (best-effort; the in-memory `jobs` dict
+    stays the authoritative hot cache that the 2s poll reads). NEVER raises —
+    on a DB error the job is marked dirty and a background worker retries it so
+    the row catches up once the DB returns."""
+    try:
+        from db.jobs_repo import persist_job
+        persist_job(job)
+    except Exception as exc:  # pragma: no cover - defensive belt-and-braces
+        print(f"[db] _persist skipped: {exc}")
+
+
+def _persist_pause(job: dict) -> None:
+    """Persist a job the moment the operator answers a pause, so the answer
+    survives a restart even before the agent next polls. Same never-raise
+    guarantee as _persist. Called from every pause-answer endpoint."""
+    _persist(job)
+
+
+def _job_from_cache_or_db(job_id: str) -> dict | None:
+    """Return a job from the in-memory cache, or — if it was evicted (a finished
+    run older than the cache window) — rehydrate it READ-ONLY from the DB back
+    into the cache so opening an old run from Previous Runs does not 404.
+
+    Only FINISHED jobs are rehydrated this way (active jobs are always in the
+    cache while live). The rehydrated copy is harmless to keep in the cache; the
+    eviction sweep will drop it again later."""
+    job = jobs.get(job_id)
+    if job is not None:
+        return job
+    try:
+        from db.jobs_repo import load_one
+        loaded = load_one(job_id)
+    except Exception as exc:
+        print(f"[db] rehydrate {job_id} failed: {exc}")
+        loaded = None
+    if loaded is not None:
+        jobs[job_id] = loaded   # read-only rehydration; eviction can drop it again
+    return loaded
+
+
 INPUT_DIR = Path("./input")
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR = Path("./output")
@@ -1528,6 +1574,7 @@ def create_job(req: GenerateRequest, request: Request):
     # bailed out above (raised 400 + deleted) never reaches this line.
     if job_id in jobs:
         jobs[job_id]["status"] = "queued"
+        _persist(jobs[job_id])   # first write-through: job survives a restart
 
     resp = {"job_id": job_id}
     if _agent_busy_with_own:
@@ -1568,6 +1615,7 @@ def submit_selection(job_id: str, req: SelectionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _persist_pause(job)
     return {"ok": True, "choice": req.choice}
 
 
@@ -1594,6 +1642,7 @@ def regenerate_stage(job_id: str, req: RegenerateRequest):
     job["_regenerate"] = True
     job["status"] = "running"
     job["awaiting_input"] = False
+    _persist_pause(job)
     return {"ok": True}
 
 
@@ -1618,6 +1667,7 @@ def cancel_job(job_id: str):
     job["status"] = "cancelled"
     job["finished_at"] = time.time()
     job["awaiting_input"] = False
+    _persist_pause(job)
 
     # The agent detects the "cancelled" status on its next poll (progress or
     # paused-input) and aborts the job cleanly. No local event to signal.
@@ -1646,6 +1696,7 @@ def confirm_text(job_id: str, req: TextConfirmRequest):
         job["_answered_pause_stages"] = [s for s in answered if s != stg]
         job["status"] = "running"
         job["awaiting_input"] = False
+        _persist_pause(job)
         return {"ok": True, "retry": True}
     else:
         if not req.text.strip():
@@ -1655,6 +1706,7 @@ def confirm_text(job_id: str, req: TextConfirmRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _persist_pause(job)
     return {"ok": True}
 
 
@@ -1696,6 +1748,7 @@ def handle_crops(job_id: str, req: CropActionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _persist_pause(job)
     return {"ok": True}
 
 
@@ -1717,6 +1770,7 @@ def select_multi(job_id: str, req: MultiSelectRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _persist_pause(job)
     return {"ok": True}
 
 
@@ -1737,6 +1791,7 @@ def select_numbers(job_id: str, req: NumberSelectionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _persist_pause(job)
     return {"ok": True, "numbers": req.numbers}
 
 
@@ -1754,6 +1809,7 @@ def select_objects(job_id: str, req: ObjectSelectionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _persist_pause(job)
     return {"ok": True}
 
 
@@ -1784,6 +1840,7 @@ def submit_object_instructions(job_id: str, req: ObjectInstructionsRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _persist_pause(job)
     return {"ok": True, "count": len(cleaned)}
 
 
@@ -1822,6 +1879,7 @@ def select_colours(job_id: str, req: ColourSelectionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _persist_pause(job)
     return {"ok": True, "count": len(cleaned)}
 
 
@@ -1839,6 +1897,7 @@ def select_adapt(job_id: str, req: AdaptSelectionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _persist_pause(job)
     return {"ok": True, "count": len(cleaned)}
 
 
@@ -1887,6 +1946,7 @@ def select_ratio(job_id: str, req: RatioSelectionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _persist_pause(job)
     return {"ok": True, "target": {"w": w, "h": h}, "method": method}
 
 
@@ -1908,6 +1968,7 @@ async def agent_signin_resume(job_id: str, request: Request):
         job["awaiting_input"] = False
         job["stage_label"] = "Resumed after sign-in"
         job["last_progress_at"] = time.time()
+        _persist_pause(job)
         print(f"[server] job {job_id} resumed after agent sign-in")
     return {"ok": True, "status": job.get("status")}
 
@@ -1915,7 +1976,7 @@ async def agent_signin_resume(job_id: str, request: Request):
 @app.get("/api/jobs/{job_id}/crop/{index}")
 def serve_crop(job_id: str, index: int):
     """Serve a specific crop image by index (1-based)."""
-    job = jobs.get(job_id)
+    job = _job_from_cache_or_db(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     crop_names = job.get("crop_names", [])
@@ -1931,7 +1992,7 @@ def serve_crop(job_id: str, index: int):
 @app.get("/api/jobs/{job_id}/source")
 def serve_source_image(job_id: str):
     """Serve the original mockup source image for the box editor."""
-    job = jobs.get(job_id)
+    job = _job_from_cache_or_db(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     mockup_image = job.get("mockup_image", "")
@@ -1946,7 +2007,7 @@ def serve_source_image(job_id: str):
 @app.get("/api/jobs/{job_id}/final/{index}")
 def serve_final(job_id: str, index: int):
     """Serve a regenerated final image by index."""
-    job = jobs.get(job_id)
+    job = _job_from_cache_or_db(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     final_names = job.get("final_names", [])
@@ -1962,7 +2023,7 @@ def serve_final(job_id: str, index: int):
 
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str):
-    job = jobs.get(job_id)
+    job = _job_from_cache_or_db(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     return _public_job(job)
@@ -2020,15 +2081,46 @@ def _public_job(job: dict) -> dict:
 
 
 @app.get("/api/jobs")
-def list_jobs():
-    return sorted([_public_job(j) for j in jobs.values()], key=lambda j: j["created_at"], reverse=True)
+def list_jobs(request: Request, page: int = 1, page_size: int = 20):
+    """Previous Runs, newest first, paginated — queried DIRECTLY from the DB
+    (not the in-memory cache, which only holds active + last-24h jobs). Scope: a
+    designer sees only jobs they created; an admin sees everyone's. 1-based page.
+
+    Returns {items, page, page_size, total, has_more}. Each item is shaped by
+    _public_job (internal fields stripped, image names withheld until on disk).
+    If the DB is unreachable, falls back to the cache so the panel is not blank.
+    """
+    user = _current_user_record(request)
+    is_admin = bool(user and user.get("role") == "admin")
+    uname = (user or {}).get("username", "").strip().lower()
+    try:
+        from db.jobs_repo import query_history
+        res = query_history(uname, is_admin, page, page_size)
+        if res["items"] or res["total"]:
+            res["items"] = [_public_job(j) for j in res["items"]]
+            return res
+    except Exception as exc:
+        print(f"[db] list_jobs DB query failed, falling back to cache: {exc}")
+    # Fallback: serve from the in-memory cache (DB down or empty).
+    rows = sorted(
+        [j for j in jobs.values() if is_admin or (j.get("created_by") or "").strip().lower() == uname],
+        key=lambda j: j.get("created_at") or 0, reverse=True,
+    )
+    page = max(1, int(page or 1)); page_size = max(1, min(int(page_size or 20), 100))
+    start = (page - 1) * page_size
+    window = rows[start:start + page_size]
+    return {
+        "items": [_public_job(j) for j in window],
+        "page": page, "page_size": page_size,
+        "total": len(rows), "has_more": start + page_size < len(rows),
+    }
 
 
 @app.get("/api/jobs/{job_id}/logs")
 def get_job_logs(job_id: str):
     """Return the agent's captured console log, warnings and error details for a
     job, so a designer can inspect what happened from the browser."""
-    job = jobs.get(job_id)
+    job = _job_from_cache_or_db(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     return {
@@ -2042,7 +2134,7 @@ def get_job_logs(job_id: str):
 @app.get("/api/jobs/{job_id}/error-screenshot/{name}")
 def get_error_screenshot(job_id: str, name: str):
     """Serve a failure screenshot the agent uploaded for this job (from logs/)."""
-    job = jobs.get(job_id)
+    job = _job_from_cache_or_db(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     safe = Path(name).name
@@ -2075,7 +2167,7 @@ def serve_stage_image(job_id: str, stage: str):
         TypeError on a non-str path;
       * a bad/again-unavailable vault_folder made iterdir() raise OSError.
     We now treat every "cannot resolve a real file" outcome as a clean 404."""
-    job = jobs.get(job_id)
+    job = _job_from_cache_or_db(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
 
@@ -2134,7 +2226,7 @@ def serve_geometry_master(job_id: str):
 
     Assembled from the stored blocks so the shape is always complete even before
     the AFTER measurement arrives (missing blocks render as all-null)."""
-    job = jobs.get(job_id)
+    job = _job_from_cache_or_db(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     if job.get("workflow") != "geometry":
@@ -2416,6 +2508,252 @@ def admin_regenerate_token(username: str, request: Request):
         raise HTTPException(status_code=404, detail="User not found.")
     return {"ok": True, "username": username.strip().lower(),
             "agent_token": token, "token_shown_once": True}
+
+
+# ---------------------------------------------------------------------------
+# Prompts admin API — our PostgreSQL is the source of truth for prompt text.
+# Admin-only (the user model has roles). Declared well before app.mount().
+# ---------------------------------------------------------------------------
+
+class PromptSaveRequest(BaseModel):
+    text: str
+    label: str | None = None
+
+
+@app.get("/api/admin/prompts")
+def admin_list_prompts(request: Request):
+    """Every prompt, grouped by workflow, for the Prompts page. Text is returned
+    in the canonical {{name}} form stored in the DB."""
+    _require_admin(request)
+    from sqlalchemy import select as _select
+    from db.models import Prompt
+    from db.session import get_session
+    s = get_session()
+    try:
+        rows = s.scalars(_select(Prompt).order_by(Prompt.workflow, Prompt.key)).all()
+        out = [{
+            "key": p.key, "workflow": p.workflow or "other", "label": p.label or p.key,
+            "text": p.text or "", "version": p.version, "active": bool(p.active),
+            "seed_source": p.seed_source,
+            "placeholders": (p.placeholders or {}).get("fields", []),
+            "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+            "updated_by": p.updated_by,
+        } for p in rows]
+    finally:
+        s.close()
+    return {"prompts": out}
+
+
+@app.get("/api/admin/prompts/{key}")
+def admin_get_prompt(key: str, request: Request):
+    """One prompt plus its full version history (newest first)."""
+    _require_admin(request)
+    from sqlalchemy import select as _select
+    from db.models import Prompt, PromptVersion
+    from db.session import get_session
+    s = get_session()
+    try:
+        p = s.get(Prompt, key)
+        if not p:
+            raise HTTPException(status_code=404, detail="Prompt not found.")
+        versions = s.scalars(
+            _select(PromptVersion).where(PromptVersion.key == key)
+            .order_by(PromptVersion.version.desc())
+        ).all()
+        return {
+            "key": p.key, "workflow": p.workflow, "label": p.label,
+            "text": p.text, "version": p.version, "active": bool(p.active),
+            "history": [{
+                "version": v.version, "text": v.text,
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+                "created_by": v.created_by,
+            } for v in versions],
+        }
+    finally:
+        s.close()
+
+
+@app.post("/api/admin/prompts/{key}")
+def admin_save_prompt(key: str, req: PromptSaveRequest, request: Request):
+    """Save an edit: create the next version, make it current, and invalidate the
+    registry cache so the new text is served at once. Text is stored canonically
+    as {{name}}; if the editor typed Python-style {name} we convert it."""
+    user = _require_admin(request)
+    import datetime as _dt
+    from src.prompt_registry import to_python_template, from_python_template, template_fields
+    from db.models import Prompt, PromptVersion
+    from db.session import get_session
+
+    text = req.text or ""
+    # Normalise to canonical {{name}}: if it looks like a Python template
+    # (has {name} but no {{name}}), convert; otherwise keep as-is.
+    if "{{" not in text and "{" in text:
+        text = from_python_template(text)
+    placeholders = sorted(template_fields(to_python_template(text)))
+
+    s = get_session()
+    try:
+        p = s.get(Prompt, key)
+        if not p:
+            raise HTTPException(status_code=404, detail="Prompt not found.")
+        new_version = (p.version or 0) + 1
+        p.text = text
+        p.version = new_version
+        p.placeholders = {"fields": placeholders}
+        p.seed_source = "edited"
+        p.updated_by = user.get("username")
+        p.updated_at = _dt.datetime.now(_dt.timezone.utc)
+        if req.label is not None:
+            p.label = req.label
+        s.add(PromptVersion(key=key, version=new_version, text=text,
+                            created_by=user.get("username")))
+        s.commit()
+    finally:
+        s.close()
+    prompt_registry.registry.invalidate()
+    return {"ok": True, "key": key, "version": new_version, "placeholders": placeholders}
+
+
+@app.post("/api/admin/prompts/{key}/restore/{version}")
+def admin_restore_prompt(key: str, version: int, request: Request):
+    """Restore an old version by copying its text into a NEW current version
+    (history is append-only; nothing is overwritten)."""
+    user = _require_admin(request)
+    import datetime as _dt
+    from sqlalchemy import select as _select
+    from src.prompt_registry import to_python_template, template_fields
+    from db.models import Prompt, PromptVersion
+    from db.session import get_session
+
+    s = get_session()
+    try:
+        p = s.get(Prompt, key)
+        if not p:
+            raise HTTPException(status_code=404, detail="Prompt not found.")
+        old = s.scalar(_select(PromptVersion).where(
+            PromptVersion.key == key, PromptVersion.version == version))
+        if not old:
+            raise HTTPException(status_code=404, detail=f"Version {version} not found.")
+        new_version = (p.version or 0) + 1
+        p.text = old.text
+        p.version = new_version
+        p.placeholders = {"fields": sorted(template_fields(to_python_template(old.text)))}
+        p.seed_source = "edited"
+        p.updated_by = user.get("username")
+        p.updated_at = _dt.datetime.now(_dt.timezone.utc)
+        s.add(PromptVersion(key=key, version=new_version, text=old.text,
+                            created_by=user.get("username")))
+        s.commit()
+    finally:
+        s.close()
+    prompt_registry.registry.invalidate()
+    return {"ok": True, "key": key, "restored_from": version, "version": new_version}
+
+
+class ReimportApplyRequest(BaseModel):
+    keys: list[str]   # only these keys are overwritten from Decoinks
+
+
+@app.get("/api/admin/prompts-reimport/diff")
+def admin_reimport_diff(request: Request):
+    """Compare the live Decoinks text against what is in our DB, per key, so an
+    admin can choose which keys to pull. Read-only. Requires Decoinks reachable."""
+    _require_admin(request)
+    from scripts.prompt_seed import fetch_decoinks
+    from sqlalchemy import select as _select
+    from db.models import Prompt
+    from db.session import get_session
+    from src.prompt_registry import to_python_template
+
+    deco, err = fetch_decoinks(save_backup=True)
+    if err is not None:
+        return {"reachable": False, "error": err, "rows": []}
+    s = get_session()
+    try:
+        db_rows = {p.key: p for p in s.scalars(_select(Prompt)).all()}
+    finally:
+        s.close()
+    rows = []
+    for key in sorted(set(deco) | set(db_rows)):
+        d = deco.get(key)
+        p = db_rows.get(key)
+        cur = p.text if p else None
+        if d is not None and cur is not None:
+            status = "same" if d.strip() == cur.strip() else "differs"
+        elif d is not None:
+            status = "only_decoinks"
+        else:
+            status = "only_db"
+        rows.append({
+            "key": key, "status": status,
+            "in_db": p is not None,
+            "db_version": p.version if p else None,
+            "decoinks_preview": (d or "")[:160],
+            "db_preview": (cur or "")[:160],
+        })
+    return {"reachable": True, "rows": rows}
+
+
+@app.post("/api/admin/prompts-reimport/apply")
+def admin_reimport_apply(req: ReimportApplyRequest, request: Request):
+    """Overwrite ONLY the ticked keys with the live Decoinks text, each as a new
+    version (history preserved). Keys not ticked are left untouched."""
+    user = _require_admin(request)
+    import datetime as _dt
+    from scripts.prompt_seed import fetch_decoinks, _workflow_for_constant
+    from src.prompt_registry import to_python_template, from_python_template, template_fields, PROMPT_KEYS
+    from db.models import Prompt, PromptVersion
+    from db.session import get_session
+
+    deco, err = fetch_decoinks(save_backup=True)
+    if err is not None:
+        raise HTTPException(status_code=502, detail=f"Decoinks unreachable: {err}")
+    # Reverse map AIS key -> a config constant name (for workflow/label on insert).
+    ais_to_name = {v: k for k, v in PROMPT_KEYS.items()}
+    applied = []
+    s = get_session()
+    try:
+        for key in req.keys:
+            text = deco.get(key)
+            if not text:
+                continue
+            placeholders = sorted(template_fields(to_python_template(text)))
+            p = s.get(Prompt, key)
+            if p is None:
+                name = ais_to_name.get(key, key)
+                p = Prompt(key=key, workflow=_workflow_for_constant(name), label=name,
+                           text=text, placeholders={"fields": placeholders}, active=True,
+                           version=1, seed_source="decoinks", updated_by=user.get("username"))
+                s.add(p)
+                s.add(PromptVersion(key=key, version=1, text=text, created_by=user.get("username")))
+            else:
+                new_version = (p.version or 0) + 1
+                p.text = text
+                p.version = new_version
+                p.placeholders = {"fields": placeholders}
+                p.seed_source = "decoinks"
+                p.updated_by = user.get("username")
+                p.updated_at = _dt.datetime.now(_dt.timezone.utc)
+                s.add(PromptVersion(key=key, version=new_version, text=text,
+                                    created_by=user.get("username")))
+            applied.append(key)
+        s.commit()
+    finally:
+        s.close()
+    prompt_registry.registry.invalidate()
+    return {"ok": True, "applied": applied, "count": len(applied)}
+
+
+@app.get("/prompts")
+def prompts_page(request: Request):
+    """Serve the admin Prompts page. The page's own fetches are admin-gated; we
+    also redirect a non-admin away so the link is not a dead end."""
+    u = _current_user_record(request)
+    if not u:
+        return RedirectResponse(url="/login", status_code=302)
+    if u.get("role") != "admin":
+        return RedirectResponse(url="/", status_code=302)
+    return FileResponse("static/prompts.html", media_type="text/html")
 
 
 @app.get("/api/admin/diagnostics")
@@ -3001,10 +3339,21 @@ def _report_prompt_runs(job: dict) -> None:
                 "output_files": [{"file_name": f, "file_url": f"/api/output/{f}"} for f in files],
             })
         if runs:
-            report_runs(runs)
+            report_runs(runs)   # Decoinks run-log, unchanged
             print(f"[prompts] job {job_id}: reporting {len(runs)} prompt run(s) to Decoinks")
+            # Also mirror each run into OUR prompt_runs table so the data lives
+            # here too (owner's requirement: keep Decoinks AND record locally).
+            try:
+                from db.jobs_repo import record_prompt_run
+                for r in runs:
+                    record_prompt_run(r)
+            except Exception as exc:
+                print(f"[db] mirroring prompt runs failed: {exc}")
     except Exception as exc:
         print(f"[prompts] could not build the run log for job {job_id}: {exc}")
+    # Write the finished job through so its terminal state + steps survive a
+    # restart (this is the single finish hook all terminal paths pass through).
+    _persist(job)
 
 
 def _prompt_sync_loop() -> None:
@@ -3023,6 +3372,79 @@ def _prompt_sync_loop() -> None:
 
 
 threading.Thread(target=_prompt_sync_loop, name="prompt-sync", daemon=True).start()
+
+
+def _recover_jobs_on_startup() -> None:
+    """Load persisted jobs into the in-memory cache and apply restart recovery.
+
+    Running jobs are KEPT running within the grace window so a seconds-long
+    container restart does not abandon a job the designer's agent is still
+    working on; the agent's next progress/result upload continues it normally.
+    Only jobs with no contact beyond the grace window are marked interrupted."""
+    try:
+        from db.jobs_repo import load_jobs_into_cache
+        summary = load_jobs_into_cache(
+            jobs, grace_seconds=JOB_RUNNING_GRACE_SECONDS,
+            finished_window_seconds=float(os.getenv("JOB_CACHE_FINISHED_TTL_SECONDS", str(24 * 3600))),
+        )
+        print(f"[db] restart recovery: loaded={summary['loaded']} "
+              f"running_kept={summary['running_kept']} interrupted={summary['interrupted']}")
+    except Exception as exc:
+        print(f"[db] startup job recovery skipped (starting empty): {exc}")
+
+
+def _grace_sweep_loop() -> None:
+    """Periodically mark still-running jobs interrupted once they pass the grace
+    window with no agent contact (handles the case where the agent never comes
+    back after a restart)."""
+    from db.jobs_repo import sweep_running_grace
+    while True:
+        time.sleep(60)
+        try:
+            n = sweep_running_grace(jobs, grace_seconds=JOB_RUNNING_GRACE_SECONDS)
+            if n:
+                print(f"[db] grace sweep marked {n} stalled job(s) interrupted")
+        except Exception as exc:
+            print(f"[db] grace sweep error: {exc}")
+
+
+# Recover persisted jobs into the cache at import (module load = process start),
+# then run the periodic grace sweep. Guarded so a DB-less local run still boots.
+_recover_jobs_on_startup()
+threading.Thread(target=_grace_sweep_loop, name="job-grace-sweep", daemon=True).start()
+
+# Background DB write-through retry: if a _persist failed while the DB was down,
+# re-write the LATEST job state from the cache once the DB is reachable again.
+try:
+    from db.jobs_repo import set_job_resolver, start_retry_worker
+    set_job_resolver(lambda jid: jobs.get(jid))
+    start_retry_worker()
+except Exception as _retry_exc:
+    print(f"[db] retry worker not started: {_retry_exc}")
+
+
+# Periodic eviction of finished jobs older than 24h from the in-memory cache,
+# so a long-running server does not accumulate every finished job forever. The
+# DB keeps them; /api/jobs history reads the DB directly.
+_CACHE_FINISHED_TTL = float(os.getenv("JOB_CACHE_FINISHED_TTL_SECONDS", str(24 * 3600)))
+_TERMINAL_CACHE_STATUSES = {"done", "done_with_errors", "failed", "cancelled"}
+
+
+def _evict_old_finished_loop() -> None:
+    while True:
+        time.sleep(600)
+        now = time.time()
+        try:
+            for jid, job in list(jobs.items()):
+                if job.get("status") in _TERMINAL_CACHE_STATUSES:
+                    fin = job.get("finished_at") or job.get("created_at") or now
+                    if (now - float(fin)) > _CACHE_FINISHED_TTL:
+                        jobs.pop(jid, None)
+        except Exception as exc:
+            print(f"[db] cache eviction error: {exc}")
+
+
+threading.Thread(target=_evict_old_finished_loop, name="job-cache-evict", daemon=True).start()
 
 
 @app.post("/api/agent/register")
@@ -3094,6 +3516,7 @@ def agent_next_job(request: Request, agent_id: str, logged_in: bool = False, cod
         job["claimed_by_name"] = a.get("name") if a else ""
         job["claimed_at"] = time.time()
         job["last_progress_at"] = time.time()
+    _persist(job)   # record the claim so a restart keeps it running (grace)
     # Return the full job plus file URLs the agent needs to download.
     input_files = []
     for key in ("files", "artwork_files"):
@@ -3159,6 +3582,7 @@ def agent_progress(job_id: str, req: AgentProgressRequest, request: Request):
     a = agents.get(req.agent_id or job.get("claimed_by"))
     if a and req.logged_in is not None:
         a["logged_in"] = req.logged_in
+    _persist(job)   # write-through: progress, merges, pauses, pause answers
     return {"ok": True, "cancelled": False}
 
 
@@ -3182,7 +3606,42 @@ async def agent_result(job_id: str, request: Request):
     _recompute_replace_similarity(job)
     _recompute_colorway_similarity(job)
     _recompute_geometry_after(job, saved_names=saved)
+    # Index each uploaded output file and write the job through to the DB so a
+    # restart still shows the result in Previous Runs.
+    _index_result_files(job, saved)
+    _persist(job)
     return {"ok": True, "saved": saved}
+
+
+def _index_result_files(job: dict, saved: list[str]) -> None:
+    """Record uploaded output files in artwork_files (path/size/dims/sha). Best
+    effort — never breaks the upload response."""
+    if not saved:
+        return
+    try:
+        import hashlib
+        from db.jobs_repo import record_artwork_file
+        for name in saved:
+            p = OUTPUT_DIR / name
+            if not p.exists():
+                continue
+            w = h = dpi = None
+            try:
+                from PIL import Image
+                with Image.open(p) as im:
+                    w, h = im.size
+                    dpi = int((im.info.get("dpi") or (0, 0))[0]) or None
+            except Exception:
+                pass
+            try:
+                sha = hashlib.sha256(p.read_bytes()).hexdigest()
+                size = p.stat().st_size
+            except Exception:
+                sha, size = None, None
+            record_artwork_file(job.get("id"), str(p), role="result",
+                                width=w, height=h, dpi=dpi, size_bytes=size, sha256=sha)
+    except Exception as exc:
+        print(f"[db] _index_result_files failed: {exc}")
 
 
 def _recompute_geometry_after(job: dict, saved_names: list | None = None) -> None:
@@ -3453,7 +3912,7 @@ async def agent_error(job_id: str, request: Request):
         job["error"] = message
         job["finished_at"] = time.time()
         job["awaiting_input"] = False
-        _report_prompt_runs(job)
+        _report_prompt_runs(job)   # finish hook persists the terminal job
 
     if str(fields.get("session_expired", "")).lower() in ("1", "true", "yes"):
         a = agents.get(job.get("claimed_by"))
@@ -3489,8 +3948,12 @@ def agent_paused_input(job_id: str, request: Request):
     # Still awaiting the operator's answer?
     if status.startswith("awaiting_"):
         return {"ready": False, "cancelled": False, "status": status}
-    # Operator has answered (status moved to running). Hand back every field the
-    # workflows read after a pause.
+    # Operator has answered (status moved to running). The pause-answer endpoint
+    # already persisted the answer at answer time via _persist_pause; this is a
+    # harmless one-shot safety net on the agent's first read after the answer
+    # (it does not re-poll once resumed). Hand back every field the workflows
+    # read after a pause.
+    _persist(job)
     return {
         "ready": True, "cancelled": False, "status": status,
         "confirmed_text": job.get("confirmed_text", ""),
