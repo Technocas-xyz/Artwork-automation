@@ -3149,10 +3149,16 @@ def agent_progress(job_id: str, req: AgentProgressRequest, request: Request):
         return {"ok": True, "cancelled": True}
     job["last_progress_at"] = time.time()
     if req.job is not None:
-        _merge_agent_job(job, req.job)
         # The final aspect step usually reaches the server in this sync, AFTER
-        # its image was uploaded — so check the similarity here as well.
+        # its image was uploaded — so the similarity is computed here. Apply
+        # the agent's status LAST: the browser stops polling the moment it sees
+        # "done", so the score must already be on the job by then.
+        posted = dict(req.job)
+        posted_status = posted.pop("status", None)
+        _merge_agent_job(job, posted)
         _recompute_aspect_similarity(job)
+        if posted_status is not None:
+            _merge_agent_job(job, {"status": posted_status})
     # Console output + non-fatal warnings from the agent, so the UI can show
     # what happened (and what nearly failed) without the agent terminal.
     if req.log_lines:
