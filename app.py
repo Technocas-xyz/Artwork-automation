@@ -30,6 +30,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from config.agent_version import AGENT_CODE_VERSION
@@ -812,7 +813,15 @@ def auth_login(req: LoginRequest, request: Request):
     ip = request.client.host if request.client else "unknown"
     if not check_rate_limit(ip):
         raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in 5 minutes.")
-    user = _authenticate(req.username, req.password)
+    try:
+        user = _authenticate(req.username, req.password)
+    except SQLAlchemyError as exc:
+        # The users store is in Postgres; if the DB is unreachable, return a
+        # clean JSON 503 (not an unhandled 500 whose plain-text body made the
+        # login page show "Unexpected token 'I' ... not valid JSON").
+        print(f"[auth] login failed: database unavailable: {exc}")
+        raise HTTPException(status_code=503,
+                            detail="Database unavailable, try again shortly.")
     if not user:
         record_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid username or password.")
@@ -2466,6 +2475,10 @@ def admin_set_disabled(username: str, req: DisableRequest, request: Request):
     u = users.set_disabled(username, req.disabled)
     if not u:
         raise HTTPException(status_code=404, detail="User not found.")
+    if req.disabled:
+        # Drop any cached identity so a disabled user's agent cannot keep
+        # authenticating via the DB-outage fallback.
+        _invalidate_agent_identity(username=u["username"])
     return {"ok": True, "username": u["username"], "disabled": u["disabled"]}
 
 
@@ -2506,6 +2519,9 @@ def admin_regenerate_token(username: str, request: Request):
     token = users.regenerate_token(username)
     if not token:
         raise HTTPException(status_code=404, detail="User not found.")
+    # The old token is dead — drop every cached identity for this user so the
+    # previous token cannot keep authenticating via the DB-outage fallback.
+    _invalidate_agent_identity(username=username.strip().lower())
     return {"ok": True, "username": username.strip().lower(),
             "agent_token": token, "token_shown_once": True}
 
@@ -2610,7 +2626,7 @@ def admin_save_prompt(key: str, req: PromptSaveRequest, request: Request):
         s.commit()
     finally:
         s.close()
-    prompt_registry.registry.invalidate()
+    prompt_registry.invalidate()   # `prompt_registry` IS the registry instance
     return {"ok": True, "key": key, "version": new_version, "placeholders": placeholders}
 
 
@@ -2646,7 +2662,7 @@ def admin_restore_prompt(key: str, version: int, request: Request):
         s.commit()
     finally:
         s.close()
-    prompt_registry.registry.invalidate()
+    prompt_registry.invalidate()
     return {"ok": True, "key": key, "restored_from": version, "version": new_version}
 
 
@@ -2740,7 +2756,7 @@ def admin_reimport_apply(req: ReimportApplyRequest, request: Request):
         s.commit()
     finally:
         s.close()
-    prompt_registry.registry.invalidate()
+    prompt_registry.invalidate()
     return {"ok": True, "applied": applied, "count": len(applied)}
 
 
@@ -3117,6 +3133,31 @@ def _bearer_token(request: Request) -> str:
     return auth[7:].strip() if auth.lower().startswith("bearer ") else ""
 
 
+# Token -> identity cache used ONLY as a fallback when the DB lookup FAILS, so
+# an in-flight job's agent keeps authenticating (progress/result uploads) across
+# a brief DB outage. It is NEVER consulted while the DB is reachable — the DB is
+# always the first and authoritative check (see _require_agent_identity). An
+# entry is ~30 min TTL, and is actively cleared when a user's token is
+# regenerated or the user is disabled, so a revoked/disabled credential cannot
+# ride the cache even during an outage.
+_agent_identity_cache: dict[str, tuple[dict, float]] = {}
+_AGENT_IDENTITY_TTL = float(os.getenv("AGENT_IDENTITY_CACHE_TTL_SECONDS", str(30 * 60)))
+
+
+def _invalidate_agent_identity(token: str | None = None, username: str | None = None) -> None:
+    """Drop cached agent identities so a regenerated/disabled credential stops
+    working immediately, even if the DB is momentarily unavailable. Pass a
+    token to drop that one, and/or a username to drop every token cached for
+    that user (a user may have several agents)."""
+    if token:
+        _agent_identity_cache.pop(token, None)
+    if username:
+        uname = (username or "").strip().lower()
+        for tok in [t for t, (ident, _) in _agent_identity_cache.items()
+                    if (ident.get("username") or "").strip().lower() == uname]:
+            _agent_identity_cache.pop(tok, None)
+
+
 def _require_agent_identity(request: Request) -> dict:
     """Validate the agent bearer token and return WHO it belongs to.
 
@@ -3135,21 +3176,40 @@ def _require_agent_identity(request: Request) -> dict:
     if not token:
         raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
 
-    u = users.user_for_token(token)   # None if unknown OR disabled
-    if u is not None:
-        # Best-effort last-seen for the legacy admin panel is not needed here;
-        # the users store carries its own bookkeeping and per-agent presence is
-        # tracked by agent_id below.
-        return {"token": token,
-                "username": u.get("username", ""),
-                "name": u.get("display_name") or u.get("username") or "designer"}
-
-    # Legacy machine-name token fallback.
-    name = token_name(token)
-    if not name:
+    # Resolve against the DB, but tolerate a DB outage via the short-lived cache
+    # so a running job's agent keeps authenticating (and the job completes) even
+    # while Postgres is briefly unavailable.
+    try:
+        u = users.user_for_token(token)   # None if unknown OR disabled
+        if u is not None:
+            ident = {"token": token,
+                     "username": u.get("username", ""),
+                     "name": u.get("display_name") or u.get("username") or "designer"}
+            _agent_identity_cache[token] = (ident, time.time())
+            return ident
+        # Legacy machine-name token fallback (also DB-backed now).
+        name = token_name(token)
+        if name:
+            touch_token(token)
+            ident = {"token": token, "username": "", "name": name}
+            _agent_identity_cache[token] = (ident, time.time())
+            return ident
+        # DB reachable and token genuinely unknown/disabled -> reject, and drop
+        # any stale cache entry so a revoked token can't ride the cache.
+        _agent_identity_cache.pop(token, None)
         raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
-    touch_token(token)
-    return {"token": token, "username": "", "name": name}
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        # DB unavailable: serve a recently-validated identity from the cache so
+        # the agent (and its in-flight job) keeps working. If we have never
+        # validated this token, return 503 (retryable) — NOT a 500.
+        cached = _agent_identity_cache.get(token)
+        if cached and (time.time() - cached[1]) < _AGENT_IDENTITY_TTL:
+            print(f"[auth] agent token served from cache (DB down): {exc.__class__.__name__}")
+            return cached[0]
+        print(f"[auth] agent auth failed, DB unavailable and no cached identity: {exc}")
+        raise HTTPException(status_code=503, detail="Database unavailable, try again shortly.")
 
 
 # Job fields that must never be overwritten by the agent's posted copy — the
