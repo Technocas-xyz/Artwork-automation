@@ -286,7 +286,9 @@ Requirements:
 - Remove the background entirely - transparent PNG
 - Do not change the aspect ratio or recompose the design
 - Clean sharp edges, no gradients, no thin fragile strokes
-- The design only, centred with even margins"""
+- The design only, centred with even margins
+
+Create the new image with image generation and show it directly in this chat. Do not use Python or any code tool, do not pad or resize the old image, and do not return a file attachment or download link - I need the generated image itself."""
 
 CUSTOM_ASPECT_REGENERATE = """Working from the cleaned, background-free version you just produced, regenerate that same artwork at an aspect ratio of {ratio}, which is {inches_w} x {inches_h} inches at {dpi} DPI.
 
@@ -296,7 +298,9 @@ Requirements:
 - Recompose to fit the new proportions without stretching or distorting anything
 - Transparent background, PNG
 - The design only, centred with even margins
-- Clean sharp edges suitable for DTF garment printing"""
+- Clean sharp edges suitable for DTF garment printing
+
+Create the new image with image generation and show it directly in this chat. Do not use Python or any code tool, do not pad or resize the old image, and do not return a file attachment or download link - I need the generated image itself."""
 
 # Artwork Identification: turn 1 lists every distinct object; the operator gives
 # an instruction per object; turn 2 regenerates with those changes applied.

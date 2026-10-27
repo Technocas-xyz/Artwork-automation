@@ -49,7 +49,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .text-confirm-area{margin-top:10px}.text-confirm-area textarea{width:100%;padding:10px;font-size:1rem;border:1px solid var(--border);border-radius:8px;min-height:56px;font-family:inherit;margin-bottom:8px}.text-confirm-btn{padding:9px 18px;font-size:.88rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer}
 .vault-info{padding:10px 14px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:var(--radius);font-size:.8rem;margin-bottom:10px}.vault-info code{font-size:.76rem;word-break:break-all}.vault-btn{margin-top:5px;padding:6px 11px;font-size:.76rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer}
 .prompt-toggle{font-size:.72rem;color:var(--muted);cursor:pointer;margin-top:4px;user-select:none}.prompt-toggle:hover{color:var(--accent)}.prompt-content{display:none;margin-top:4px;padding:7px 9px;background:#f9fafb;border:1px solid var(--border);border-radius:6px;font-family:Consolas,Monaco,monospace;font-size:.7rem;white-space:pre-wrap;max-height:110px;overflow-y:auto;color:var(--muted)}.prompt-content.open{display:block}
-.history-section{border-top:1px solid var(--border);padding-top:12px;margin-top:12px}.history-section h3{font-size:.8rem;color:var(--muted);margin-bottom:6px}.history-item{padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:.76rem;cursor:pointer}.history-item:hover{border-color:var(--accent)}.history-item .hi-label{font-weight:600}.history-detail{display:none;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)}.history-detail.open{display:block}.history-detail img{max-width:100%;max-height:90px;border-radius:6px;margin-right:4px;margin-bottom:3px;border:1px solid var(--border)}
+.history-section{border-top:1px solid var(--border);padding-top:12px;margin-top:12px}.history-section h3{font-size:.8rem;color:var(--muted);margin-bottom:6px;cursor:pointer;user-select:none}.history-section h3:hover{color:var(--accent)}#historyList{max-height:30vh;overflow-y:auto}#historyList.collapsed{display:none}.history-item{padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:.76rem;cursor:pointer}.history-item:hover{border-color:var(--accent)}.history-item .hi-label{font-weight:600}.history-detail{display:none;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)}.history-detail.open{display:block}.history-detail img{max-width:100%;max-height:90px;border-radius:6px;margin-right:4px;margin-bottom:3px;border:1px solid var(--border)}
 .coming-soon{text-align:center;color:var(--muted);padding:40px 0;font-size:.88rem}
 /* Client slot: a read-only chip (from the vault) OR one optional input (manual upload). */
 .client-slot{margin-bottom:14px}
@@ -255,7 +255,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 <div class="columns">
 <div class="col" id="col1"></div>
 <div class="col" id="col2"></div>
-<div class="col" id="col3"><div class="col-title">Results</div><div id="workerStatus"></div><div id="statusArea"></div><div id="resultArea"></div><div class="history-section" id="historySection" style="display:none"><h3>Previous Runs</h3><div id="historyList"></div></div></div>
+<div class="col" id="col3"><div class="col-title">Results</div><div id="workerStatus"></div><div id="statusArea"></div><div id="resultArea"></div><div class="history-section" id="historySection" style="display:none"><h3 id="histToggle" onclick="toggleHist()" title="Show / hide previous runs"><span id="histArrow">▸</span> Previous Runs <span id="histCount"></span></h3><div id="historyList" class="collapsed"></div></div></div>
 </div>
 <div id="agentSetupOverlay" class="vm-overlay" style="display:none">
   <div class="vm-modal" style="max-width:560px;width:100%;max-height:88vh;display:flex;flex-direction:column;background:var(--surface);border-radius:12px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)">
@@ -3725,8 +3725,23 @@ function createdByLine(job){
   return '<div class="job-header" style="margin-bottom:8px">Created by '+esc(n)+'</div>';
 }
 function addHist(job){historyItems.unshift(job);historySection.style.display="block";renderHist()}
+// Previous Runs open/closed. Closed by default so results get the full height;
+// the choice is remembered in this browser.
+var histOpen=false;
+try{histOpen=localStorage.getItem("histOpen")==="1"}catch(e){}
+function applyHistOpen(){
+  historyList.classList.toggle("collapsed",!histOpen);
+  var a=$("histArrow");if(a)a.textContent=histOpen?"\u25be":"\u25b8";
+}
+window.toggleHist=function(){
+  histOpen=!histOpen;
+  try{localStorage.setItem("histOpen",histOpen?"1":"0")}catch(e){}
+  applyHistOpen();
+};
 function renderHist(){
   historyList.innerHTML="";
+  var hc=$("histCount");if(hc)hc.textContent="("+historyItems.length+")";
+  applyHistOpen();
   historyItems.forEach(function(job,i){
     var el=job.active_time?Math.round(job.active_time):0;
     var st=job.status==="done"?"\u2705 Done ("+fmt(el)+")":job.status==="cancelled"?"\u26d4 Cancelled":"\u274c Failed";
