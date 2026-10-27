@@ -2873,6 +2873,15 @@ def _merge_agent_fields(job: dict, posted: dict) -> None:
                       f"(server is {server_status!r}) — an agent sync cannot move a "
                       f"job back to a non-terminal status.")
             continue
+        if k == "custom_steps_done":
+            # The SERVER computes the aspect-ratio similarity (the packaged agent
+            # has no cv2). The agent keeps re-sending its own copy of the steps
+            # with similarity=None, which would wipe the server's result.
+            job[k] = _merge_custom_steps(job.get(k) or [], v or [])
+            continue
+        if k in ("aspect_similarity", "aspect_similarity_error") and job.get("aspect_sim_by_server"):
+            # Server already decided this value — ignore the agent's echo.
+            continue
         if k == "colorway_adapted":
             # The server computes each adaptation's similarity on result upload
             # (the agent can't — cv2 is server-only). The agent's later syncs
@@ -2882,6 +2891,29 @@ def _merge_agent_fields(job: dict, posted: dict) -> None:
             job[k] = _merge_colorway_adapted(job.get(k) or [], v or [])
             continue
         job[k] = v
+
+
+def _merge_custom_steps(current: list, incoming: list) -> list:
+    """Take the agent's custom_steps_done, but keep the similarity the server
+    already computed for the same step file (marked sim_checked_by_server)."""
+    by_file = {}
+    for st in current:
+        if isinstance(st, dict) and st.get("file") and st.get("sim_checked_by_server"):
+            by_file[st["file"]] = st
+    merged = []
+    for st in incoming:
+        if isinstance(st, dict):
+            prev = by_file.get(st.get("file"))
+            if prev:
+                st = dict(st)
+                st["similarity"] = prev.get("similarity")
+                st["sim_checked_by_server"] = True
+                if prev.get("similarity_error"):
+                    st["similarity_error"] = prev["similarity_error"]
+                else:
+                    st.pop("similarity_error", None)
+        merged.append(st)
+    return merged
 
 
 def _merge_colorway_adapted(current: list, incoming: list) -> list:
@@ -3118,6 +3150,9 @@ def agent_progress(job_id: str, req: AgentProgressRequest, request: Request):
     job["last_progress_at"] = time.time()
     if req.job is not None:
         _merge_agent_job(job, req.job)
+        # The final aspect step usually reaches the server in this sync, AFTER
+        # its image was uploaded — so check the similarity here as well.
+        _recompute_aspect_similarity(job)
     # Console output + non-fatal warnings from the agent, so the UI can show
     # what happened (and what nearly failed) without the agent terminal.
     if req.log_lines:
@@ -3262,12 +3297,18 @@ def _recompute_aspect_similarity(job: dict) -> None:
             final_step = step
     if not final_step or not final_step.get("file"):
         return
-    if final_step.get("similarity"):  # already computed (e.g. by an older agent)
+    if final_step.get("sim_checked_by_server"):  # server already ran it once
+        return
+    if final_step.get("similarity"):  # computed by an agent that has cv2 (source mode)
         return
     b_path = OUTPUT_DIR / baseline
     f_path = OUTPUT_DIR / final_step["file"]
     if not (b_path.exists() and f_path.exists()):
+        missing = [p.name for p in (b_path, f_path) if not p.exists()]
+        print(f"[server] aspect similarity job {job['id']}: waiting for file(s) {missing}")
         return
+    final_step["sim_checked_by_server"] = True
+    job["aspect_sim_by_server"] = True
     try:
         from src.compare import similarity as _similarity
         from src.aspect import fit_to_ratio
