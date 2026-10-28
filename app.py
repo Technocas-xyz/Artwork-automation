@@ -4150,13 +4150,29 @@ def _compare_two_images(orig_bytes: bytes, gen_bytes: bytes) -> dict:
     }
 
 
+def _qa_measure_bytes(image_bytes: bytes) -> dict:
+    """Run the SAME Print Ready QA measurement used by the Print Ready QA
+    workflow on one image's bytes. Returns the measure_print_ready() report dict
+    ({checks, score, band, summary, measurements}) on success, or
+    {"error": "<reason>"} on any failure. NEVER raises — a QA problem on one
+    image must not break the cv2 or ChatGPT results."""
+    try:
+        from src.printready import measure_print_ready
+        return measure_print_ready(image_bytes, file_size_bytes=len(image_bytes))
+    except Exception as exc:
+        print(f"[similarity-check] QA measurement failed: {exc}")
+        return {"error": f"QA measurement failed: {exc}"}
+
+
 @app.post("/api/similarity-check")
 async def similarity_check(original: UploadFile = File(...),
                            generated: UploadFile = File(...)):
     """Instant cv2 comparison of two uploaded images (no agent, no ChatGPT).
 
-    Returns src.compare.similarity()'s dict plus the padding note and dims.
-    Every failure returns a clean JSON error — never a raw 500."""
+    Returns src.compare.similarity()'s dict plus the padding note and dims, AND
+    a QA block (qa_original / qa_generated) holding the same Print Ready QA
+    measurements run on each image. Every failure returns a clean JSON error —
+    never a raw 500."""
     def _read_valid(f: UploadFile, label: str) -> bytes:
         ext = Path(f.filename).suffix.lower() if f.filename else ""
         if ext not in ALLOWED_EXTENSIONS:
@@ -4172,8 +4188,16 @@ async def similarity_check(original: UploadFile = File(...),
 
     orig_bytes = _read_valid(original, "Original")
     gen_bytes = _read_valid(generated, "Generated")
+    # QA measurements are independent of the cv2 compare: run them first so they
+    # can be attached whether or not the compare succeeds. Each is a report dict
+    # or {"error": ...}; neither can break the other result.
+    qa_original = _qa_measure_bytes(orig_bytes)
+    qa_generated = _qa_measure_bytes(gen_bytes)
     try:
-        return _compare_two_images(orig_bytes, gen_bytes)
+        result = _compare_two_images(orig_bytes, gen_bytes)
+        result["qa_original"] = qa_original
+        result["qa_generated"] = qa_generated
+        return result
     except ValueError as exc:
         msg = str(exc)
         # Decode problems are the operator's input (400); a cv2/compare failure
