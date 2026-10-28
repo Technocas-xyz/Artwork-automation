@@ -408,6 +408,29 @@ Shapes and layout: same / changed - say what changed
 Summary: one sentence"""
 
 
+# Object Similarity: BOTH images have the SAME labelled 10x10 grid drawn on
+# them. Image 1 is the ORIGINAL, image 2 is the GENERATED version. ChatGPT must
+# return the SAME object names in both images so the server can pair them, crop
+# each object from both, and compare object by object. The reply is parsed as
+# JSON; the server does all cropping / cv2 / QA. No {placeholders}.
+OBJECT_SIMILARITY_DETECT = """You are given TWO images. A labelled 10x10 grid has been drawn over BOTH of them to help you describe where things are. Columns are lettered A to J from left to right; rows are numbered 1 to 10 from top to bottom, so the top-left cell is A1 and the bottom-right cell is J10. The grid is only a reference overlay — ignore it as part of the artwork.
+
+Image 1 is the ORIGINAL artwork. Image 2 is a GENERATED version of it. They are meant to be the same artwork.
+
+List the main objects and elements across the two images — the things a person would actually want to compare: text blocks, people, characters, logos, main shapes, and distinct background elements. List whole, meaningful elements (a lion is one item called "Lion", never its mane or paws separately). Aim for roughly 5 to 15 items.
+
+Use the SAME name for an object in both images, so each object can be paired. For every object give the grid cells it mainly sits in, SEPARATELY for each image. If an object is not present in one of the images, use the string "missing" for that image's cells instead of a cell list.
+
+Reply with ONLY a JSON array and nothing else — no prose, no explanation, no markdown code fences. Each element is an object with: "id" (1-based integer), "name" (short label), "type" (one of: text, person, character, logo, shape, background, other), "cells_image1" (array of cell strings, or "missing"), and "cells_image2" (array of cell strings, or "missing"). Exactly this shape:
+
+[
+  {{"id": 1, "name": "Team name text", "type": "text", "cells_image1": ["C8", "D8", "E8"], "cells_image2": ["C8", "D8", "E8"]}},
+  {{"id": 2, "name": "Lion", "type": "character", "cells_image1": ["D4", "E5"], "cells_image2": "missing"}}
+]
+
+Output the JSON array only."""
+
+
 # Colorways (UC-6): the artwork's dominant colours are extracted LOCALLY and
 # handed to ChatGPT as data ({colours}); ChatGPT judges which garment colours
 # suit it. Then one mockup turn per chosen garment colour, and (optionally) an
@@ -586,6 +609,9 @@ WORKFLOW_REQUIRED_FIELDS: dict[str, list[tuple[str, str]]] = {
     ],
     "similarity": [
         ("artwork_files", "Upload both images to compare."),
+    ],
+    "objectsim": [
+        ("artwork_files", "Upload both images to compare object by object."),
     ],
     "custom": [
         ("artwork_files", "Upload an artwork file."),

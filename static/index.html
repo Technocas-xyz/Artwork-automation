@@ -251,7 +251,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 <link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
-<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="textimage">Text + Image</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button><button class="wf-tab" data-wf="identify">Artwork Identification</button><button class="wf-tab" data-wf="printready">Print Ready QA</button><button class="wf-tab" data-wf="colorway">Colorways</button><button class="wf-tab" data-wf="geometry">Pixel Geometry</button><button class="wf-tab" data-wf="similarity">Similarity Check</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><button id="adminUsersBtn" onclick="openAdminUsers()" style="display:none;font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:8px">Users</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
+<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="textimage">Text + Image</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button><button class="wf-tab" data-wf="identify">Artwork Identification</button><button class="wf-tab" data-wf="printready">Print Ready QA</button><button class="wf-tab" data-wf="colorway">Colorways</button><button class="wf-tab" data-wf="geometry">Pixel Geometry</button><button class="wf-tab" data-wf="similarity">Similarity Check</button><button class="wf-tab" data-wf="objectsim">Object Similarity</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><button id="adminUsersBtn" onclick="openAdminUsers()" style="display:none;font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:8px">Users</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
 <div class="columns">
 <div class="col" id="col1"></div>
 <div class="col" id="col2"></div>
@@ -541,7 +541,7 @@ function renderCols(){
   if(resultArea&&currentWorkflow!=="geometry"&&activeJobId===null){resultArea.innerHTML="";statusArea.innerHTML=""}
   if(currentWorkflow==="nextcloud"){renderNextcloudCol1();renderNextcloudCol2();ncStartPolling();return}
   ncStopPolling();
-  if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else if(currentWorkflow==="custom"){textImageFile="";mockupImageFile="";renderCustomCol1();renderCustomCol2()}else if(currentWorkflow==="identify"){textImageFile="";mockupImageFile="";artworkFiles=[];renderIdentifyCol1();renderIdentifyCol2()}else if(currentWorkflow==="printready"){textImageFile="";mockupImageFile="";artworkFiles=[];renderPrintReadyCol1();renderPrintReadyCol2()}else if(currentWorkflow==="colorway"){textImageFile="";mockupImageFile="";artworkFiles=[];renderColorwayCol1();renderColorwayCol2()}else if(currentWorkflow==="geometry"){textImageFile="";mockupImageFile="";artworkFiles=[];renderGeometryPage()}else if(currentWorkflow==="similarity"){textImageFile="";mockupImageFile="";artworkFiles=[];renderSimilarityCol1();renderSimilarityCol2()}else{
+  if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else if(currentWorkflow==="custom"){textImageFile="";mockupImageFile="";renderCustomCol1();renderCustomCol2()}else if(currentWorkflow==="identify"){textImageFile="";mockupImageFile="";artworkFiles=[];renderIdentifyCol1();renderIdentifyCol2()}else if(currentWorkflow==="printready"){textImageFile="";mockupImageFile="";artworkFiles=[];renderPrintReadyCol1();renderPrintReadyCol2()}else if(currentWorkflow==="colorway"){textImageFile="";mockupImageFile="";artworkFiles=[];renderColorwayCol1();renderColorwayCol2()}else if(currentWorkflow==="geometry"){textImageFile="";mockupImageFile="";artworkFiles=[];renderGeometryPage()}else if(currentWorkflow==="similarity"){textImageFile="";mockupImageFile="";artworkFiles=[];renderSimilarityCol1();renderSimilarityCol2()}else if(currentWorkflow==="objectsim"){textImageFile="";mockupImageFile="";artworkFiles=[];renderObjectSimCol1();renderObjectSimCol2()}else{
     // "text" and "textimage" share the same renderers; they differ only in which
     // modes they expose. Keep text_mode valid for the active tab — EXCEPT the
     // deliberate unset state ("") used when a Text + Image file arrives from the
@@ -681,7 +681,7 @@ function renderCol2(){
   checkStatus();
 }
 function updBtn(){
-  var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();updIdentifyBtn();updPrintReadyBtn();updColorwayBtn();updSimilarityAgentNote();return}
+  var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();updIdentifyBtn();updPrintReadyBtn();updColorwayBtn();updSimilarityAgentNote();updObjectSimAgentNote();updObjectSimBtn();return}
   var dt=$("designText");
   var hasInput;
   if(textMode===""){hasInput=false}  // Text + Image mode not yet chosen — nothing to submit
@@ -844,6 +844,7 @@ function render(job){
       // the review arrives). Re-rendering from the cache means the 2s poll never
       // wipes the measured result.
       else if(job.workflow==="similarity")renderSimilarityCombined(job);
+      else if(job.workflow==="objectsim")renderObjectSimCombined(job);
       else resultArea.innerHTML=renderStages(job)+cancelHtml(job);
       // Ensure exactly one elapsed timer runs, counting from the fixed stepStart.
       if(elapsedTimer)clearInterval(elapsedTimer);
@@ -881,6 +882,7 @@ function render(job){
     else if(job.workflow==="identify")resultArea.innerHTML=renderIdentifyResults(job);
     else if(job.workflow==="printready")resultArea.innerHTML=renderPrintReadyResults(job);
     else if(job.workflow==="similarity")renderSimilarityCombined(job);
+    else if(job.workflow==="objectsim")renderObjectSimCombined(job);
     else if(job.workflow==="colorway")resultArea.innerHTML=renderColorwayResults(job);
     else if(job.workflow==="geometry")resultArea.innerHTML=renderGeometryResults(job);
     else if(job.workflow==="text"&&job.text_mode==="replace")resultArea.innerHTML=renderReplaceResults(job);
@@ -3558,6 +3560,198 @@ function renderSimilarityCombined(reviewJob){
   html+='</div>';          // close flex row
   // QA check section (same Print Ready QA measurements, per image + Difference).
   html+=_renderSimilarityQA(d.qa_original,d.qa_generated);
+  resultArea.innerHTML=html;
+}
+
+// ===========================================================================
+// Object Similarity — same two uploads as Similarity Check, but the agent lists
+// the objects (ChatGPT) and the SERVER compares them object by object. Reuses
+// the Similarity Check image box, _renderSimilarity and _renderSimilarityQA.
+// ===========================================================================
+var osOrigFile=null,osGenFile=null;
+var osOrigUrl="",osGenUrl="",osOrigDims=null,osGenDims=null;
+var osBusy=false;
+function _osSetFile(which,file){
+  if(!file)return;
+  if(!_simAllowedExt(file.name)){var e=$(which==="orig"?"osErrO":"osErrG");if(e)e.textContent="Only .png .jpg .jpeg .webp accepted.";return}
+  if(file.size>25*1024*1024){var e2=$(which==="orig"?"osErrO":"osErrG");if(e2)e2.textContent="Image is larger than 25 MB.";return}
+  var url=URL.createObjectURL(file);var img=new Image();
+  img.onload=function(){
+    var dims={w:img.naturalWidth,h:img.naturalHeight};
+    if(which==="orig"){if(osOrigUrl)URL.revokeObjectURL(osOrigUrl);osOrigFile=file;osOrigUrl=url;osOrigDims=dims}
+    else{if(osGenUrl)URL.revokeObjectURL(osGenUrl);osGenFile=file;osGenUrl=url;osGenDims=dims}
+    renderObjectSimCol1();updObjectSimBtn();
+  };
+  img.onerror=function(){var e3=$(which==="orig"?"osErrO":"osErrG");if(e3)e3.textContent="Could not read this image.";URL.revokeObjectURL(url)};
+  img.src=url;
+}
+function _osBox(which){
+  var label=which==="orig"?"Original":"Generated";
+  var dz=which==="orig"?"osDzO":"osDzG",fi=which==="orig"?"osFileO":"osFileG";
+  var prev=which==="orig"?"osPrevO":"osPrevG",err=which==="orig"?"osErrO":"osErrG";
+  var url=which==="orig"?osOrigUrl:osGenUrl,dims=which==="orig"?osOrigDims:osGenDims;
+  var h='<div style="flex:1;min-width:0">';
+  h+='<div class="col-title" style="font-size:.85rem">'+label+'</div>';
+  h+='<div class="drop-zone" id="'+dz+'"><p>Drag image here or</p><button class="browse-btn" id="'+fi+'Btn">Choose file</button>'
+    +'<input type="file" id="'+fi+'" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div>';
+  h+='<div class="upload-error" id="'+err+'"></div>';
+  h+='<div class="uploaded-preview" id="'+prev+'">';
+  if(url){h+='<img src="'+url+'" style="max-height:140px;max-width:100%;object-fit:contain">';if(dims)h+='<div style="font-size:.72rem;color:var(--muted);margin-top:4px">'+dims.w+' \u00d7 '+dims.h+' px</div>'}
+  h+='</div></div>';
+  return h;
+}
+function renderObjectSimCol1(){
+  if(!col1)return;
+  var html='<div class="col-title">Images to compare</div>';
+  html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Upload two images to compare them object by object. ChatGPT lists the objects (both images need the agent online); the server crops and scores each object.</p>';
+  html+='<div style="display:flex;gap:12px;flex-wrap:wrap">'+_osBox("orig")+_osBox("gen")+'</div>';
+  col1.innerHTML=html;
+  ["orig","gen"].forEach(function(which){
+    var dzId=which==="orig"?"osDzO":"osDzG",fiId=which==="orig"?"osFileO":"osFileG";
+    var dz=$(dzId),fi=$(fiId),btn=$(fiId+"Btn");
+    if(btn)btn.onclick=function(e){e.stopPropagation();fi.click()};
+    if(dz){
+      dz.onclick=function(){fi.click()};
+      dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};
+      dz.ondragleave=function(){dz.classList.remove("dragover")};
+      dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)_osSetFile(which,e.dataTransfer.files[0])};
+    }
+    if(fi)fi.onchange=function(){if(fi.files.length)_osSetFile(which,fi.files[0]);fi.value=""};
+  });
+}
+function renderObjectSimCol2(){
+  if(!col2)return;
+  var html='<div class="col-title">Compare</div>';
+  html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">When both images are uploaded, press Compare. The whole-image score is measured on the server; ChatGPT (through the agent) lists the objects so each one can be cropped and scored.</p>';
+  html+='<div id="osAgentNote"></div>';
+  html+='<button class="gen-btn" id="osGenBtn" disabled>Compare</button>';
+  html+='<div class="blocker-msg" id="osBlkMsg"></div>';
+  col2.innerHTML=html;
+  updObjectSimAgentNote();
+  $("osGenBtn").onclick=submitObjectSim;
+  updObjectSimBtn();
+}
+// The agent is REQUIRED for Object Similarity (the objects come from ChatGPT),
+// so the note follows live agent status and refreshes on the status poll
+// without re-rendering the uploads.
+function updObjectSimAgentNote(){
+  var box=$("osAgentNote");if(!box)return;
+  if(workerAlive&&isLoggedIn){
+    box.innerHTML='<div style="font-size:.78rem;color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:12px">\u2713 Agent online \u2014 ChatGPT will list the objects in both images.</div>';
+  }else{
+    box.innerHTML='<div style="font-size:.78rem;color:#b45309;border:1px dashed var(--border);border-radius:8px;padding:8px 10px;margin-bottom:12px">Start the agent to run Object Similarity. It needs ChatGPT to list the objects before the server can compare them.</div>';
+  }
+}
+function updObjectSimBtn(){
+  var btn=$("osGenBtn"),blk=$("osBlkMsg");if(!btn)return;
+  var agentReady=workerAlive&&isLoggedIn;
+  btn.disabled=osBusy||!(osOrigFile&&osGenFile)||!agentReady;
+  if(blk)blk.textContent=osBusy?"Starting\u2026":(!(osOrigFile&&osGenFile)?"Upload both images to compare.":(!agentReady?"Start the agent first.":""));
+}
+function submitObjectSim(){
+  if(!(osOrigFile&&osGenFile)||osBusy)return;
+  if(!(workerAlive&&isLoggedIn)){updObjectSimBtn();return}
+  osBusy=true;updObjectSimBtn();
+  resultArea.innerHTML='<div class="status-box">Starting the object comparison\u2026</div>';
+  statusArea.innerHTML="";
+  var fd=new FormData();
+  fd.append("files",osOrigFile);
+  fd.append("files",osGenFile);
+  fetch("/api/upload",{method:"POST",body:fd})
+    .then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error((d&&d.detail)||"Upload failed.")});return r.json()})
+    .then(function(d){
+      var saved=(d&&d.saved)||[];
+      if(saved.length<2)throw new Error("Both images must upload to compare.");
+      var body={workflow:"objectsim",artwork_files:[saved[0].name,saved[1].name],
+        client:"Object Similarity",text:"",text_image:"",mockup_image:"",files:[],options:[],
+        params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",
+        custom_operations:[],custom_prompts:{},extract_mode:"auto",grid_cols:4,grid_rows:2};
+      return fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    })
+    .then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()})
+    .then(function(d){osBusy=false;updObjectSimBtn();onJobCreated(d)})
+    .catch(function(e){osBusy=false;updObjectSimBtn();resultArea.innerHTML='<div class="status-box failed">'+esc(e.message||"Could not start the comparison.")+'</div>'});
+}
+// Status colour for a per-object status chip.
+function _osStatusChip(status){
+  var map={paired:["#16a34a","PAIRED"],missing:["#dc2626","MISSING IN GENERATED"],
+    added:["#d97706","ADDED"],absent:["#6b7280","NOT LOCATED"],unlocatable:["#6b7280","NOT LOCATABLE"]};
+  var m=map[status]||["#6b7280",(status||"").toUpperCase()];
+  return '<span style="display:inline-block;font-size:.66rem;font-weight:700;color:#fff;background:'+m[0]+';border-radius:10px;padding:2px 8px">'+m[1]+'</span>';
+}
+// Render the Object Similarity result: whole-image cv2 + ChatGPT object summary,
+// then one row per object. Driven entirely by the server job (objectsim_cv2 +
+// objectsim_objects); re-rendering from the job on every 2s poll never wipes it.
+function renderObjectSimCombined(job){
+  var html='<div class="job-header">Object Similarity</div>';
+  // --- Whole-image measured score (reuse the Similarity Check card) ---
+  var cv2=job.objectsim_cv2;
+  html+='<div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-bottom:4px">Whole image (measured)</div>';
+  if(cv2&&cv2.similarity){
+    html+=_renderSimilarity(cv2.similarity,"Pixel/shape comparison of the whole images");
+    if(cv2.padding_note)html+='<div style="font-size:.74rem;color:var(--muted);margin:4px 0 8px">\u2139 '+esc(cv2.padding_note)+'</div>';
+  }else{
+    html+='<div style="border:1px solid var(--border);border-radius:8px;padding:12px;font-size:.82rem;color:var(--muted);margin-bottom:8px">Whole-image result unavailable'+(job.objectsim_cv2_error?': '+esc(job.objectsim_cv2_error):'.')+'</div>';
+  }
+  // --- ChatGPT object detection status / summary ---
+  var objs=job.objectsim_objects;
+  var detect=job.objectsim_detect||"";
+  var objErr=job.objectsim_objects_error||"";
+  html+='<div class="col-title" style="margin-top:16px">Objects</div>';
+  if(!detect&&job.status!=="done"&&job.status!=="done_with_errors"&&job.status!=="failed"){
+    html+='<div style="font-size:.82rem;color:var(--muted)">Waiting for ChatGPT to list the objects\u2026</div>';
+    resultArea.innerHTML=html;return;
+  }
+  if(objErr&&!objs){
+    // Parsing failed or images missing — show the error + the raw reply.
+    html+='<div style="font-size:.82rem;color:#b45309;margin-bottom:6px">'+esc(objErr)+'</div>';
+    if(detect)html+='<div style="font-size:.78rem;color:var(--muted);margin-bottom:4px">ChatGPT reply as returned:</div><div style="font-size:.8rem;white-space:pre-wrap;border:1px solid var(--border);border-radius:8px;padding:10px">'+esc(detect)+'</div>';
+    resultArea.innerHTML=html;return;
+  }
+  if(!objs||!objs.length){
+    html+='<div style="font-size:.82rem;color:var(--muted)">No objects to compare yet.</div>';
+    resultArea.innerHTML=html;return;
+  }
+  // Summary counts.
+  var nPaired=0,nMissing=0,nAdded=0;
+  objs.forEach(function(o){if(o.status==="paired")nPaired++;else if(o.status==="missing")nMissing++;else if(o.status==="added")nAdded++});
+  html+='<div style="font-size:.78rem;color:var(--muted);margin-bottom:10px">'+objs.length+' object(s): '+nPaired+' compared'
+    +(nMissing?', <span style="color:#dc2626;font-weight:600">'+nMissing+' missing</span>':'')
+    +(nAdded?', <span style="color:#d97706;font-weight:600">'+nAdded+' added</span>':'')+'. Object areas are approximate (from ChatGPT grid cells).</div>';
+  // --- One row per object ---
+  objs.forEach(function(o){
+    var border=o.status==="missing"?"#dc2626":(o.status==="added"?"#d97706":"var(--border)");
+    var bg=o.status==="missing"?"rgba(220,38,38,.05)":(o.status==="added"?"rgba(217,119,6,.05)":"");
+    html+='<div style="border:1px solid '+border+';background:'+bg+';border-radius:10px;padding:12px;margin-bottom:12px">';
+    html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span style="font-weight:700">'+esc(o.name||("Object "+o.id))+'</span>'
+      +(o.type?'<span style="font-size:.7rem;color:var(--muted)">'+esc(o.type)+'</span>':'')+_osStatusChip(o.status)+'</div>';
+    if(o.status==="missing"){
+      html+='<div style="font-size:.82rem;color:#dc2626">Present in the original, missing in the generated image.</div></div>';return;
+    }
+    if(o.status==="added"){
+      html+='<div style="font-size:.82rem;color:#b45309">Present in the generated image, not in the original.</div></div>';return;
+    }
+    if(o.status!=="paired"){
+      html+='<div style="font-size:.82rem;color:var(--muted)">ChatGPT could not place this object precisely enough to crop and compare it.</div></div>';return;
+    }
+    // Paired: two crops side by side.
+    html+='<div style="display:flex;gap:10px;margin-bottom:8px">';
+    html+='<div style="flex:1;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Original</div>'
+      +(o.crop_original_file?'<img src="/api/output/'+encodeURIComponent(o.crop_original_file)+'" class="transparent-bg" style="max-width:100%;max-height:150px;object-fit:contain;border-radius:6px;border:1px solid var(--border)">':'<span style="font-size:.74rem;color:var(--muted)">no crop</span>')+'</div>';
+    html+='<div style="flex:1;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Generated</div>'
+      +(o.crop_generated_file?'<img src="/api/output/'+encodeURIComponent(o.crop_generated_file)+'" class="transparent-bg" style="max-width:100%;max-height:150px;object-fit:contain;border-radius:6px;border:1px solid var(--border)">':'<span style="font-size:.74rem;color:var(--muted)">no crop</span>')+'</div>';
+    html+='</div>';
+    html+='<div style="font-size:.7rem;color:var(--muted);margin-bottom:6px">\u2139 '+esc(o.crop_note||"approximate object area")+'</div>';
+    // Per-object similarity card (overall + 4 bars).
+    if(o.similarity&&o.similarity.similarity){
+      html+=_renderSimilarity(o.similarity.similarity,"This object, original vs generated");
+    }else if(o.similarity_error){
+      html+='<div style="font-size:.8rem;color:#b45309">Could not compare this object: '+esc(o.similarity_error)+'</div>';
+    }
+    // Per-object QA table (same renderer as Similarity Check QA).
+    html+=_renderSimilarityQA(o.qa_original,o.qa_generated);
+    html+='</div>';
+  });
   resultArea.innerHTML=html;
 }
 

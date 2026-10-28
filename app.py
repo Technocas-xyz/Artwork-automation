@@ -1022,6 +1022,10 @@ def _validate_workflow_request(req: "GenerateRequest", created_by: str) -> dict:
         if len([f for f in (req.artwork_files or []) if f]) < 2:
             raise HTTPException(status_code=400,
                 detail="Upload both images (Original and Generated) to compare.")
+    elif workflow == "objectsim":
+        if len([f for f in (req.artwork_files or []) if f]) < 2:
+            raise HTTPException(status_code=400,
+                detail="Upload both images (Original and Generated) to compare object by object.")
 
     return derived
 
@@ -1127,6 +1131,247 @@ def _precompute_similarity(job: dict) -> None:
     except Exception as exc:
         print(f"[similarity] precompute failed: {exc}")
         job["similarity_cv2_error"] = "The measured comparison could not be completed."
+
+
+# ---------------------------------------------------------------------------
+# Object Similarity (objectsim): whole-image compare + per-object compare/QA.
+# ---------------------------------------------------------------------------
+
+# Each object's grid cells are an approximate hint from ChatGPT, so the crop is
+# padded a little around the cell box to avoid clipping the object. Expressed as
+# a fraction of the image's width/height.
+_OBJECTSIM_PAD = 0.03
+
+
+def _precompute_objectsim(job: dict) -> None:
+    """Object Similarity: run the whole-image cv2 comparison on the SERVER (same
+    as Similarity Check) and store it as `objectsim_cv2`, so the overall card
+    shows the moment the job opens. A failure is NON-fatal — recorded in
+    `objectsim_cv2_error`, never raised. The per-object compare runs later."""
+    orig = job.get("objectsim_original_file") or ""
+    gen = job.get("objectsim_generated_file") or ""
+    if not orig or not gen:
+        job["objectsim_cv2_error"] = "Two images are required for a comparison."
+        return
+    try:
+        op = INPUT_DIR / Path(orig).name
+        gp = INPUT_DIR / Path(gen).name
+        if not op.exists() or not gp.exists():
+            job["objectsim_cv2_error"] = "One or both images were not found on the server."
+            return
+        job["objectsim_cv2"] = _compare_two_images(op.read_bytes(), gp.read_bytes())
+    except Exception as exc:
+        print(f"[objectsim] whole-image precompute failed: {exc}")
+        job["objectsim_cv2_error"] = "The measured comparison could not be completed."
+
+
+def _parse_objectsim_json(reply: str) -> list[dict] | None:
+    """Parse ChatGPT's Object Similarity reply into
+    [{id, name, type, cells_image1, cells_image2}], tolerating the usual ways it
+    returns imperfect JSON (code fences, surrounding prose, truncation). `cells_*`
+    is either a list[str] of grid cells or the string "missing". Returns None if
+    nothing usable parses (caller then shows the raw reply and stops cleanly)."""
+    import json as _json
+    import re as _re
+    if not reply or not reply.strip():
+        return None
+    text = reply.strip()
+    if text.startswith("```"):
+        text = _re.sub(r"^```[a-zA-Z0-9]*\s*", "", text)
+        text = _re.sub(r"\s*```$", "", text).strip()
+    if not text.startswith("["):
+        start, end = text.find("["), text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+
+    def _cells(v):
+        """Normalise a cells field to list[str] or the literal 'missing'."""
+        if isinstance(v, str):
+            return "missing" if v.strip().lower() == "missing" else []
+        if isinstance(v, list):
+            return [str(c).strip() for c in v if str(c).strip()]
+        return []
+
+    def _coerce(item, i):
+        if not isinstance(item, dict):
+            return None
+        name = str(item.get("name", "")).strip()
+        if not name:
+            return None
+        try:
+            oid = int(item.get("id", i))
+        except (TypeError, ValueError):
+            oid = i
+        return {
+            "id": oid,
+            "name": name,
+            "type": str(item.get("type", "") or "").strip().lower(),
+            "cells_image1": _cells(item.get("cells_image1", [])),
+            "cells_image2": _cells(item.get("cells_image2", [])),
+        }
+
+    data = None
+    try:
+        data = _json.loads(text)
+    except Exception:
+        data = None
+    if isinstance(data, list):
+        out = [c for i, item in enumerate(data, 1) if (c := _coerce(item, i))]
+        if out:
+            return out
+    # SALVAGE: recover complete {...} blocks from a truncated reply. Object
+    # bodies here contain nested arrays (cells_*), so match a block up to the
+    # first closing brace that is not inside a bracket — simplest robust approach
+    # is to find each "{ ... }" span greedily per line-ish chunk. Fall back to a
+    # balanced scan.
+    salvaged: list[dict] = []
+    depth = 0
+    buf = ""
+    for ch in text:
+        if ch == "{":
+            if depth == 0:
+                buf = ""
+            depth += 1
+        if depth > 0:
+            buf += ch
+        if ch == "}":
+            depth -= 1
+            if depth == 0 and buf:
+                try:
+                    obj = _json.loads(buf)
+                    salvaged.append(obj)
+                except Exception:
+                    pass
+                buf = ""
+    if salvaged:
+        out = [c for i, item in enumerate(salvaged, 1) if (c := _coerce(item, i))]
+        if out:
+            return out
+    return None
+
+
+def _crop_norm_bbox(image_bytes: bytes, bbox: dict, pad: float = _OBJECTSIM_PAD) -> bytes | None:
+    """Crop a NORMALISED (0..1) bbox {x,y,w,h} out of image bytes, with a small
+    padding around it (the grid cells are approximate). Returns PNG bytes, or
+    None if the bbox is unusable. Never raises."""
+    try:
+        from PIL import Image
+        import io as _io
+        im = Image.open(_io.BytesIO(image_bytes)).convert("RGBA")
+        w, h = im.size
+        x0 = max(0.0, bbox["x"] - pad)
+        y0 = max(0.0, bbox["y"] - pad)
+        x1 = min(1.0, bbox["x"] + bbox["w"] + pad)
+        y1 = min(1.0, bbox["y"] + bbox["h"] + pad)
+        px0, py0 = int(round(x0 * w)), int(round(y0 * h))
+        px1, py1 = int(round(x1 * w)), int(round(y1 * h))
+        if px1 <= px0 or py1 <= py0:
+            return None
+        crop = im.crop((px0, py0, px1, py1))
+        buf = _io.BytesIO()
+        crop.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as exc:
+        print(f"[objectsim] crop failed: {exc}")
+        return None
+
+
+def _compute_objectsim_objects(job: dict) -> None:
+    """Parse the agent's object JSON (objectsim_detect) and, for each paired
+    object, crop it from BOTH images (grid cells -> padded bbox), run the same
+    cv2 compare and Print Ready QA used elsewhere, and store the per-object
+    results in `objectsim_objects`. SERVER-owned (cv2/Pillow live here only).
+
+    An object present in only one image is marked missing/added and gets no
+    compare. Never raises — a problem is recorded in objectsim_objects_error."""
+    from src.annotate import cells_to_bbox
+    detect = job.get("objectsim_detect") or ""
+    if not detect.strip():
+        return   # nothing to compute yet
+    # Idempotent: if we already computed objects for this exact detect text,
+    # don't redo the work on every 2s agent sync.
+    if job.get("objectsim_objects") is not None and job.get("_objectsim_detect_done") == detect:
+        return
+    orig = job.get("objectsim_original_file") or ""
+    gen = job.get("objectsim_generated_file") or ""
+    try:
+        op = INPUT_DIR / Path(orig).name
+        gp = INPUT_DIR / Path(gen).name
+        if not op.exists() or not gp.exists():
+            job["objectsim_objects_error"] = "One or both images were not found on the server."
+            return
+        orig_bytes = op.read_bytes()
+        gen_bytes = gp.read_bytes()
+    except Exception as exc:
+        job["objectsim_objects_error"] = f"Could not read the images: {exc}"
+        return
+
+    parsed = _parse_objectsim_json(detect)
+    if not parsed:
+        # Parsing failed: leave objects None + record it so the UI shows the raw
+        # reply and stops cleanly. Mark done so we don't retry every sync.
+        job["objectsim_objects_error"] = "Could not parse the object list from ChatGPT."
+        job["_objectsim_detect_done"] = detect
+        return
+
+    results = []
+    for obj in parsed:
+        c1 = obj.get("cells_image1")
+        c2 = obj.get("cells_image2")
+        in1 = c1 != "missing" and bool(c1)
+        in2 = c2 != "missing" and bool(c2)
+        row = {"id": obj.get("id"), "name": obj.get("name"),
+               "type": obj.get("type", ""), "status": "", "similarity": None,
+               "qa_original": None, "qa_generated": None,
+               "crop_note": "approximate object area"}
+        if in1 and not in2:
+            row["status"] = "missing"      # in original, not in generated
+            results.append(row); continue
+        if in2 and not in1:
+            row["status"] = "added"        # in generated, not in original
+            results.append(row); continue
+        if not in1 and not in2:
+            row["status"] = "absent"       # ChatGPT listed it but located it in neither
+            results.append(row); continue
+
+        bb1 = cells_to_bbox(c1)
+        bb2 = cells_to_bbox(c2)
+        if not bb1 or not bb2:
+            row["status"] = "unlocatable"  # cells too scattered / everywhere
+            results.append(row); continue
+
+        crop1 = _crop_norm_bbox(orig_bytes, bb1)
+        crop2 = _crop_norm_bbox(gen_bytes, bb2)
+        if not crop1 or not crop2:
+            row["status"] = "unlocatable"
+            results.append(row); continue
+
+        row["status"] = "paired"
+        # Save the two crops so the UI can show them side by side. Served via
+        # /api/output/<name>. Non-fatal — a save failure just omits the preview.
+        try:
+            oid = obj.get("id") or len(results) + 1
+            orig_name = f"{job['id']}_obj{oid}_orig.png"
+            gen_name = f"{job['id']}_obj{oid}_gen.png"
+            (OUTPUT_DIR / orig_name).write_bytes(crop1)
+            (OUTPUT_DIR / gen_name).write_bytes(crop2)
+            row["crop_original_file"] = orig_name
+            row["crop_generated_file"] = gen_name
+        except Exception as exc:
+            print(f"[objectsim] could not save crops for object {obj.get('id')}: {exc}")
+        try:
+            row["similarity"] = _compare_two_images(crop1, crop2)
+        except Exception as exc:
+            row["similarity_error"] = str(exc)
+        # Per-object Print Ready QA on each crop (same as the Similarity QA).
+        row["qa_original"] = _qa_measure_bytes(crop1)
+        row["qa_generated"] = _qa_measure_bytes(crop2)
+        results.append(row)
+
+    job["objectsim_objects"] = results
+    job["objectsim_objects_error"] = ""
+    job["_objectsim_detect_done"] = detect
+    print(f"[objectsim] computed {len(results)} object(s) from detect JSON.")
 
 
 def _precompute_printready(job: dict, artwork_file: str) -> None:
@@ -1512,6 +1757,17 @@ def create_job(req: GenerateRequest, request: Request):
         "similarity_generated_file": (req.artwork_files[1] if len(req.artwork_files) > 1 else ""),
         "similarity_cv2": None, "similarity_cv2_error": "",
         "similarity_review": "", "similarity_review_error": "",
+        # Object Similarity: same two images as Similarity Check, but compared
+        # object by object. objectsim_cv2 is the SERVER whole-image compare
+        # (precomputed, like similarity_cv2). objectsim_detect is the agent's
+        # raw ChatGPT JSON (objects + grid cells per image); objectsim_objects is
+        # the SERVER's per-object crop+cv2+QA result, computed when the detect
+        # JSON arrives. Both server fields are SERVER-owned (never agent-echoed).
+        "objectsim_original_file": (req.artwork_files[0] if len(req.artwork_files) > 0 else ""),
+        "objectsim_generated_file": (req.artwork_files[1] if len(req.artwork_files) > 1 else ""),
+        "objectsim_cv2": None, "objectsim_cv2_error": "",
+        "objectsim_detect": "", "objectsim_detect_error": "",
+        "objectsim_objects": None, "objectsim_objects_error": "",
         "aspect_dpi": req.aspect_dpi, "aspect_info": None, "aspect_recommendations": "",
         "aspect_target": None, "aspect_method": "pad", "aspect_similarity": None,
         "aspect_original_file": "", "aspect_original_features": None,
@@ -1562,6 +1818,12 @@ def create_job(req: GenerateRequest, request: Request):
     # the ChatGPT review can still run — so it is recorded, not raised.
     if req.workflow == "similarity":
         _precompute_similarity(jobs[job_id])
+    # Object Similarity: compute the whole-image cv2 compare NOW (same as
+    # Similarity Check) so the overall card shows the moment the job opens. The
+    # per-object crops/compare/QA run later, when the agent's object JSON
+    # arrives. A whole-image cv2 failure is NON-fatal (recorded, not raised).
+    if req.workflow == "objectsim":
+        _precompute_objectsim(jobs[job_id])
 
     # All server-side precompute finished successfully. ONLY NOW make the job
     # claimable: flip "preparing" -> "queued" so the agent's next-job poll can
@@ -2872,6 +3134,12 @@ _SERVER_OWNED_FIELDS = {
     "awaiting_input", "paused_at",
     # Prompt Management bookkeeping is decided by the server.
     "managed_prompts", "prompt_meta", "prompt_edited",
+    # Object Similarity: the whole-image cv2 compare and the per-object
+    # crop+cv2+QA results are computed by the SERVER (cv2/Pillow live here only).
+    # The agent only produces objectsim_detect (the object JSON), so these must
+    # never be overwritten by an agent echo.
+    "objectsim_cv2", "objectsim_cv2_error",
+    "objectsim_objects", "objectsim_objects_error",
 }
 
 # Terminal statuses the agent IS allowed to set.
@@ -3198,6 +3466,11 @@ def agent_progress(job_id: str, req: AgentProgressRequest, request: Request):
         posted_status = posted.pop("status", None)
         _merge_agent_job(job, posted)
         _recompute_aspect_similarity(job)
+        # Object Similarity: when the agent's object JSON (objectsim_detect)
+        # arrives, compute the per-object crops/compare/QA on the SERVER (cv2 is
+        # server-only). Idempotent — it only does the work once per detect text.
+        if job.get("workflow") == "objectsim":
+            _compute_objectsim_objects(job)
         if posted_status is not None:
             _merge_agent_job(job, {"status": posted_status})
     # Console output + non-fatal warnings from the agent, so the UI can show

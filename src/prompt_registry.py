@@ -80,6 +80,10 @@ PROMPT_KEYS: dict[str, str] = {
     # Similarity Check: cv2 gives the instant measured score; this is the one
     # ChatGPT second-opinion turn (both images in, text review out).
     "SIMILARITY_REVIEW": "AIS.SIMILARITY.REVIEW",
+    # Object Similarity: one ChatGPT turn over BOTH grid-overlaid images that
+    # lists the objects (same names) + grid cells per image, so the server can
+    # pair, crop and compare object by object.
+    "OBJECT_SIMILARITY_DETECT": "AIS.OBJECT_SIMILARITY.DETECT",
     # Colorways (UC-6): recommend garment colours, mockup per colour, adapt per colour.
     "COLORWAY_SUGGEST": "AIS.COLORWAY.SUGGEST",
     "COLORWAY_MOCKUP": "AIS.COLORWAY.MOCKUP",
@@ -148,6 +152,7 @@ WORKFLOW_PROMPTS: dict[str, list[str]] = {
     "colorway": ["COLORWAY_SUGGEST", "COLORWAY_MOCKUP", "COLORWAY_ADAPT"],
     "geometry": ["GEOMETRY_GENERATE"],
     "similarity": ["SIMILARITY_REVIEW"],
+    "objectsim": ["OBJECT_SIMILARITY_DETECT"],
 }
 
 # The prompts each Text input mode actually runs.
