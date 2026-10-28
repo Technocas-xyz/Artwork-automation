@@ -12,7 +12,7 @@ PROJECT_URLS = {
     "colorway": "https://chatgpt.com/g/g-p-6abbbc63c7d48191b3e184c30e7d45c9/project",  # DFT - Colorway
     "geometry": "https://chatgpt.com/g/g-p-6abfec6fc3108191887d91cb9e658a32/project",  # DTF - Pixel Geometry
     "similarity": "https://chatgpt.com/g/g-p-6ae1050711948191beaca8e90ad0acde/project",  # DTF - Similarity Check
-    "objectsim": ""   # Object Similarity — empty falls back to a plain chat (PROJECT_URL_DEFAULT); paste the project URL later
+    "objectsim": "https://chatgpt.com/g/g-p-6ae2482ffa208191bb1690e036dd996f/project"   # DTF - Object Similarity
 }
 PROJECT_URL_DEFAULT = "https://chatgpt.com"
 
