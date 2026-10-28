@@ -77,6 +77,9 @@ PROMPT_KEYS: dict[str, str] = {
     "IDENTIFY_REGENERATE": "AIS.IDENTIFY.REGENERATE",
     # Print Ready QA (UC-8): measurements are local; this is the one ChatGPT turn.
     "PRINTREADY_REVIEW": "AIS.PRINTREADY.REVIEW",
+    # Similarity Check: cv2 gives the instant measured score; this is the one
+    # ChatGPT second-opinion turn (both images in, text review out).
+    "SIMILARITY_REVIEW": "AIS.SIMILARITY.REVIEW",
     # Colorways (UC-6): recommend garment colours, mockup per colour, adapt per colour.
     "COLORWAY_SUGGEST": "AIS.COLORWAY.SUGGEST",
     "COLORWAY_MOCKUP": "AIS.COLORWAY.MOCKUP",
@@ -144,6 +147,7 @@ WORKFLOW_PROMPTS: dict[str, list[str]] = {
     "printready": ["PRINTREADY_REVIEW"],
     "colorway": ["COLORWAY_SUGGEST", "COLORWAY_MOCKUP", "COLORWAY_ADAPT"],
     "geometry": ["GEOMETRY_GENERATE"],
+    "similarity": ["SIMILARITY_REVIEW"],
 }
 
 # The prompts each Text input mode actually runs.

@@ -42,6 +42,7 @@ from config.workflows import (
     CUSTOM_ASPECT_ADVICE, CUSTOM_ASPECT_BASELINE, CUSTOM_ASPECT_REGENERATE,
     IDENTIFY_OBJECTS, IDENTIFY_COLOR_GROUPS, IDENTIFY_REGENERATE,
     PRINTREADY_REVIEW,
+    SIMILARITY_REVIEW,
     COLORWAY_SUGGEST, COLORWAY_MOCKUP, COLORWAY_ADAPT,
     GEOMETRY_GENERATE,
     normalise_ratio, CUSTOM_OPERATIONS_ORDER, CUSTOM_OPERATIONS_LABELS,
@@ -374,6 +375,11 @@ _AGENT_OWNED_FIELDS = (
     # on. printready_report/_measurements are set by the SERVER at job creation,
     # so they are NOT agent-owned and must not be echoed back here.
     "printready_assessment", "printready_original_file",
+    # Similarity Check: the agent produces the ChatGPT second-opinion text; the
+    # two image filenames are set by the server but echoed harmlessly. The cv2
+    # result (similarity_cv2) is SERVER-owned and must NOT be echoed back.
+    "similarity_review", "similarity_review_error",
+    "similarity_original_file", "similarity_generated_file",
     # Colorways (UC-6): recommendations (raw + parsed + avoid list), the per-colour
     # mockups (+ local previews) and the per-colour adaptations. colorway_colours
     # is set by the SERVER at job creation, so it is NOT echoed back here.
@@ -2262,6 +2268,55 @@ def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
     job["finished_at"] = time.time()
 
 
+def _run_similarity_workflow(page: Any, job: dict[str, Any]) -> None:
+    """Similarity Check — ChatGPT second opinion. The instant cv2 score was
+    computed on the SERVER (similarity_cv2). Here the agent runs the ONE text
+    turn: send BOTH images in a single turn — image 1 the ORIGINAL, image 2 the
+    GENERATED — with the SIMILARITY_REVIEW prompt, and store the raw reply text
+    in similarity_review. The reply is parsed in the UI; no image is generated."""
+    job_id = job["id"]
+    files = [f for f in (job.get("artwork_files") or []) if f]
+    original_file = job.get("similarity_original_file") or (files[0] if len(files) > 0 else "")
+    generated_file = job.get("similarity_generated_file") or (files[1] if len(files) > 1 else "")
+    original_path = str(INPUT_DIR / Path(original_file).name) if original_file else ""
+    generated_path = str(INPUT_DIR / Path(generated_file).name) if generated_file else ""
+    if not (original_file and generated_file) or not Path(original_path).exists() or not Path(generated_path).exists():
+        job["status"] = "failed"
+        job["error"] = "Both images are required for the ChatGPT review and must be present on the agent."
+        job["finished_at"] = time.time()
+        return
+
+    # Open the chat in this workflow's project (falls back to a plain chat).
+    _track_start(job)
+    _open_chat_for(page, job)
+    _track_end(job)
+
+    job["stage"] = 1
+    job["stage_label"] = "Asking ChatGPT to compare the two images"
+
+    review_prompt = _tpl(job, "SIMILARITY_REVIEW", SIMILARITY_REVIEW)
+    job.setdefault("prompts", []).append(review_prompt)
+    print(f"[similarity] review prompt SENT ({len(review_prompt)} chars).")
+
+    # ONE text turn, BOTH images: original first, generated second.
+    _track_start(job)
+    reply = send_text_turn(page, prompt=review_prompt,
+                           image_paths=[original_path, generated_path],
+                           run_id=f"{job_id}_similarity")
+    _track_end(job)
+    _rename_chat_once(page, job)
+
+    reply = (reply or "").strip()
+    if not reply:
+        job["similarity_review_error"] = "ChatGPT returned an empty reply."
+    job["similarity_review"] = reply
+    print(f"[similarity] review stored ({len(reply)} chars).")
+
+    job["status"] = "done"
+    job["awaiting_input"] = False
+    job["finished_at"] = time.time()
+
+
 # ---------------------------------------------------------------------------
 # Pixel Geometry (Before -> Generate -> After)
 # ---------------------------------------------------------------------------
@@ -2643,6 +2698,8 @@ def _run_job(page: Any, job: dict) -> None:
         _run_identify_workflow(page, job)
     elif wf == "printready":
         _run_printready_workflow(page, job)
+    elif wf == "similarity":
+        _run_similarity_workflow(page, job)
     elif wf == "colorway":
         _run_colorway_workflow(page, job)
     elif wf == "geometry":

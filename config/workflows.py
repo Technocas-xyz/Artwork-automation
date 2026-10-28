@@ -382,6 +382,32 @@ have them. If the artwork is print ready, say so plainly.
 Plain text, no markdown, no preamble."""
 
 
+# Similarity Check — ChatGPT second opinion. The operator uploads two images;
+# cv2 gives an instant measured score, and (optionally) ChatGPT gives an
+# independent read. BOTH images are sent in one turn: image 1 is the ORIGINAL,
+# image 2 is the GENERATED version. The reply is parsed line-by-line in the UI,
+# so the exact field labels below must not change. No {placeholders}.
+SIMILARITY_REVIEW = """Image 1 is the ORIGINAL artwork. Image 2 is a GENERATED version of it. Compare them as a print designer checking a client's artwork.
+
+Reply in exactly this format, plain text, no markdown:
+
+Verdict: SAME / MINOR DIFFERENCES / MAJOR DIFFERENCES
+
+Score: a number 0-100 for how faithfully image 2 reproduces image 1
+
+Text: identical / changed - list any wording, spelling, letter or number differences
+
+Missing: anything in image 1 that is missing in image 2, or none
+
+Added: anything in image 2 that is not in image 1, or none
+
+Colours: same / changed - say what changed
+
+Shapes and layout: same / changed - say what changed
+
+Summary: one sentence"""
+
+
 # Colorways (UC-6): the artwork's dominant colours are extracted LOCALLY and
 # handed to ChatGPT as data ({colours}); ChatGPT judges which garment colours
 # suit it. Then one mockup turn per chosen garment colour, and (optionally) an
@@ -557,6 +583,9 @@ WORKFLOW_REQUIRED_FIELDS: dict[str, list[tuple[str, str]]] = {
     ],
     "colorway": [
         ("artwork_files", "Upload an artwork file."),
+    ],
+    "similarity": [
+        ("artwork_files", "Upload both images to compare."),
     ],
     "custom": [
         ("artwork_files", "Upload an artwork file."),

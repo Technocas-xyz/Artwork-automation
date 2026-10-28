@@ -1018,6 +1018,10 @@ def _validate_workflow_request(req: "GenerateRequest", created_by: str) -> dict:
             raise HTTPException(status_code=400, detail="Choose how to break the artwork down: by object or by colour group.")
     elif workflow == "custom":
         derived["custom_op_labels"] = _validate_custom_workflow(req, created_by)
+    elif workflow == "similarity":
+        if len([f for f in (req.artwork_files or []) if f]) < 2:
+            raise HTTPException(status_code=400,
+                detail="Upload both images (Original and Generated) to compare.")
 
     return derived
 
@@ -1100,6 +1104,29 @@ def _precompute_identify_colour(job: dict, artwork_file: str) -> None:
     except Exception as exc:
         print(f"[identify] colour precompute failed: {exc}")
         job["identify_colour_groups"] = []
+
+
+def _precompute_similarity(job: dict) -> None:
+    """Similarity Check: run the instant cv2 comparison on the SERVER and store
+    it on the job as `similarity_cv2`, so the Measured card shows the moment the
+    job opens. The two images are the job's first two artwork_files, already in
+    INPUT_DIR. A failure is NON-fatal (the ChatGPT second opinion can still run)
+    — it is recorded in `similarity_cv2_error`, never raised."""
+    orig = job.get("similarity_original_file") or ""
+    gen = job.get("similarity_generated_file") or ""
+    if not orig or not gen:
+        job["similarity_cv2_error"] = "Two images are required for a comparison."
+        return
+    try:
+        op = INPUT_DIR / Path(orig).name
+        gp = INPUT_DIR / Path(gen).name
+        if not op.exists() or not gp.exists():
+            job["similarity_cv2_error"] = "One or both images were not found on the server."
+            return
+        job["similarity_cv2"] = _compare_two_images(op.read_bytes(), gp.read_bytes())
+    except Exception as exc:
+        print(f"[similarity] precompute failed: {exc}")
+        job["similarity_cv2_error"] = "The measured comparison could not be completed."
 
 
 def _precompute_printready(job: dict, artwork_file: str) -> None:
@@ -1477,6 +1504,14 @@ def create_job(req: GenerateRequest, request: Request):
         "geometry_black_elements_policy": req.black_elements_policy.strip(),
         "geometry_semi_transparency_allowed": req.semi_transparency_allowed.strip(),
         "geometry_distress_policy": req.distress_policy.strip(),
+        # Similarity Check: the two images to compare and the two independent
+        # results. similarity_cv2 is filled by the SERVER precompute (instant,
+        # cv2); similarity_review is the agent's ChatGPT second-opinion text
+        # (empty until the agent runs, or stays empty if no ChatGPT was asked).
+        "similarity_original_file": (req.artwork_files[0] if len(req.artwork_files) > 0 else ""),
+        "similarity_generated_file": (req.artwork_files[1] if len(req.artwork_files) > 1 else ""),
+        "similarity_cv2": None, "similarity_cv2_error": "",
+        "similarity_review": "", "similarity_review_error": "",
         "aspect_dpi": req.aspect_dpi, "aspect_info": None, "aspect_recommendations": "",
         "aspect_target": None, "aspect_method": "pad", "aspect_similarity": None,
         "aspect_original_file": "", "aspect_original_features": None,
@@ -1521,6 +1556,12 @@ def create_job(req: GenerateRequest, request: Request):
         if _geo_err and jobs[job_id].get("geometry_before") is None:
             del jobs[job_id]
             raise HTTPException(status_code=400, detail=_geo_err)
+    # Similarity Check: run the instant cv2 comparison on the SERVER now so the
+    # Measured card is on the job the moment it opens; the ChatGPT second opinion
+    # (if requested) is the agent's one text turn. A cv2 failure is NON-fatal —
+    # the ChatGPT review can still run — so it is recorded, not raised.
+    if req.workflow == "similarity":
+        _precompute_similarity(jobs[job_id])
 
     # All server-side precompute finished successfully. ONLY NOW make the job
     # claimable: flip "preparing" -> "queued" so the agent's next-job poll can
@@ -4053,6 +4094,94 @@ def printshop_save_wrk(req: PrintshopSaveRequest):
 # file that lands while the operator is mid-job is already in the feed when
 # they switch to it.
 nc_watcher.start()
+
+
+# ---------------------------------------------------------------------------
+# Similarity Check — a standalone operator tool: upload two images and get the
+# same similarity breakdown the Aspect Ratio workflow shows. Runs ENTIRELY on
+# the server (cv2 is server-only); no ChatGPT, no agent, no job queue — so it
+# works even when no agent is connected. Declared BEFORE app.mount() so the
+# static mount cannot shadow it. Login is enforced by AuthMiddleware (any other
+# /api/* path already requires a valid cookie).
+# ---------------------------------------------------------------------------
+_SIM_MAX_BYTES = 25 * 1024 * 1024   # 25 MB per image
+
+
+def _compare_two_images(orig_bytes: bytes, gen_bytes: bytes) -> dict:
+    """Core cv2 comparison shared by the instant endpoint and the job precompute.
+
+    Pads the ORIGINAL to the GENERATED image's ratio (like-for-like) when the
+    ratios differ, then runs src.compare.similarity. Returns the result dict:
+    {similarity, padded, padding_note, original_dims, generated_dims}. Raises
+    ValueError with a clean message on any decode/compare failure so callers can
+    turn it into a 400/503 or a stored error — never a raw 500."""
+    from src.compare import similarity
+    from src.aspect import fit_to_ratio
+
+    ow, oh = _png_size(orig_bytes)
+    gw, gh = _png_size(gen_bytes)
+    if not (ow and oh):
+        raise ValueError("Original: could not read this image.")
+    if not (gw and gh):
+        raise ValueError("Generated: could not read this image.")
+
+    padded = False
+    compare_orig = orig_bytes
+    if abs((ow / oh) - (gw / gh)) > 1e-3:
+        try:
+            compare_orig = fit_to_ratio(orig_bytes, gw, gh)
+            padded = True
+        except Exception as exc:
+            print(f"[similarity] padding failed, comparing as-is: {exc}")
+            compare_orig, padded = orig_bytes, False
+
+    try:
+        sim = similarity(compare_orig, gen_bytes)
+    except Exception as exc:
+        raise ValueError(f"comparison failed: {exc}")
+
+    return {
+        "similarity": sim,
+        "padded": padded,
+        "padding_note": ("Original padded to the generated image's ratio for comparison."
+                         if padded else ""),
+        "original_dims": {"w": ow, "h": oh},
+        "generated_dims": {"w": gw, "h": gh},
+    }
+
+
+@app.post("/api/similarity-check")
+async def similarity_check(original: UploadFile = File(...),
+                           generated: UploadFile = File(...)):
+    """Instant cv2 comparison of two uploaded images (no agent, no ChatGPT).
+
+    Returns src.compare.similarity()'s dict plus the padding note and dims.
+    Every failure returns a clean JSON error — never a raw 500."""
+    def _read_valid(f: UploadFile, label: str) -> bytes:
+        ext = Path(f.filename).suffix.lower() if f.filename else ""
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(status_code=400,
+                detail=f"{label}: only .png .jpg .jpeg .webp images are accepted.")
+        data = f.file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail=f"{label}: the file is empty.")
+        if len(data) > _SIM_MAX_BYTES:
+            raise HTTPException(status_code=400,
+                detail=f"{label}: image is larger than 25 MB.")
+        return data
+
+    orig_bytes = _read_valid(original, "Original")
+    gen_bytes = _read_valid(generated, "Generated")
+    try:
+        return _compare_two_images(orig_bytes, gen_bytes)
+    except ValueError as exc:
+        msg = str(exc)
+        # Decode problems are the operator's input (400); a cv2/compare failure
+        # is a transient server issue (503). Never a raw 500.
+        code = 400 if "could not read" in msg else 503
+        detail = msg if code == 400 else "The comparison could not be completed. Please try again."
+        print(f"[similarity-check] {msg}")
+        raise HTTPException(status_code=code, detail=detail)
 
 
 app.mount("/input", StaticFiles(directory="input"), name="input")

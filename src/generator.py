@@ -248,6 +248,63 @@ def rename_chat(page: Page, title: str) -> bool:
         return False
 
 
+def _attach_files(page: Page, paths: list[str], run_id: str = "attach") -> None:
+    """Attach one or more files to the composer, robust to ChatGPT having
+    several file inputs in the DOM.
+
+    ChatGPT now renders multiple ``input[type=file]`` elements, and the first in
+    DOM order is the single-file CAMERA input (``capture`` attribute). Using the
+    bare FILE_INPUT selector picks that one, which rejects a multi-file attach
+    with "Non-multiple file input can only accept single file." So:
+
+      * Prefer the real multi-file input ``input[type='file'][multiple]`` (first
+        match) and set every path at once.
+      * If there is no multiple input, attach the files ONE AT A TIME on a
+        single-file, non-camera input, waiting for each thumbnail to appear
+        before the next so files are not dropped.
+      * NEVER use the ``capture`` (camera) input.
+
+    Logs which input was used and how many files were attached.
+    """
+    paths = [p for p in (paths or []) if p]
+    if not paths:
+        return
+
+    # A multi-file input accepts every path in one call — the normal happy path.
+    multi = page.query_selector("input[type='file'][multiple]:not([capture])") \
+        or page.query_selector("input[type='file'][multiple]")
+    if multi is not None:
+        multi.set_input_files(paths)
+        logger.info("[%s] attached %d file(s) via multiple file input: %s",
+                    run_id, len(paths), ", ".join(Path(p).name for p in paths))
+        return
+
+    # No multiple input: attach one file at a time on a single, non-camera input,
+    # waiting for each thumbnail before the next so none are dropped.
+    single = page.query_selector("input[type='file']:not([capture])") \
+        or page.query_selector("input[type='file']")
+    if single is None:
+        raise GenerationTimeoutError("No file input found in the composer to attach images.")
+
+    for idx, p in enumerate(paths, start=1):
+        single.set_input_files(p)
+        logger.info("[%s] attached file %d/%d via single file input: %s",
+                    run_id, idx, len(paths), Path(p).name)
+        # Wait for the thumbnail count to reach this file before attaching the
+        # next, so a slow render does not cause the following attach to replace
+        # it. Tolerant: if the thumbnail never shows we still proceed (the final
+        # _wait_for_upload_thumbnails confirmation handles a genuine failure).
+        try:
+            _wait_until(lambda n=idx: len(page.query_selector_all(COMPOSER_THUMBNAIL)) >= n,
+                        timeout_ms=30_000)
+        except Exception:
+            pass
+        # Re-resolve the input between files: the element can detach as the
+        # composer re-renders after each attachment.
+        single = page.query_selector("input[type='file']:not([capture])") \
+            or page.query_selector("input[type='file']") or single
+
+
 def send_text_turn(
     page: Page,
     prompt: str,
@@ -278,7 +335,7 @@ def send_text_turn(
         # Upload files if given
         if image_paths:
             _clear_composer_attachments(page, run_id=run_id)
-            page.set_input_files(FILE_INPUT, image_paths)
+            _attach_files(page, image_paths, run_id=run_id)
             _wait_for_upload_thumbnails(page, image_paths, run_id=run_id)
             _ts("upload attached")
 
@@ -374,7 +431,7 @@ def send_turn(
             # Clear any leftover attachment from a prior turn first, so the new
             # upload does not end up with a stale extra file in the composer.
             _clear_composer_attachments(page, run_id=run_id)
-            page.set_input_files(FILE_INPUT, image_paths)
+            _attach_files(page, image_paths, run_id=run_id)
             _wait_for_upload_thumbnails(page, image_paths, run_id=run_id)
 
         # --- Snapshot AFTER upload so uploaded file ids are already in the DOM ---
@@ -1292,7 +1349,7 @@ def extract_artwork_images(
 
     try:
         # Upload first, THEN snapshot so uploaded file ids are excluded
-        page.set_input_files(FILE_INPUT, [image_path])
+        _attach_files(page, [image_path], run_id=run_id)
         _wait_for_upload_thumbnails(page, [image_path], run_id=run_id)
 
         pre_existing_ids = _collect_image_ids(page)
@@ -1992,7 +2049,7 @@ def _wait_for_upload_thumbnails(page: Page, image_paths, run_id: str = "upload")
     _diag_event("upload_issue", "Upload not confirmed after 60s; re-attaching once",
                 step=run_id, detail=_names)
     try:
-        page.set_input_files(FILE_INPUT, list(image_paths))
+        _attach_files(page, list(image_paths), run_id=run_id)
     except Exception as exc:
         logger.info("re-attach set_input_files failed: %s", exc)
         _diag_event("retry", "Re-attach set_input_files failed",

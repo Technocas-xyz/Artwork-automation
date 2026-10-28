@@ -10,7 +10,8 @@ PROJECT_URLS = {
     "identify": "https://chatgpt.com/g/g-p-6ab665a41ddc8191bbc7e4801d468079/project",
     "printready": "https://chatgpt.com/g/g-p-6abba3f58d948191ad2dfc2556602934/project",   # DTF - Print Ready QA
     "colorway": "https://chatgpt.com/g/g-p-6abbbc63c7d48191b3e184c30e7d45c9/project",  # DFT - Colorway
-    "geometry": "https://chatgpt.com/g/g-p-6abfec6fc3108191887d91cb9e658a32/project"   # DTF - Pixel Geometry — paste the project URL; empty falls back to a plain chat
+    "geometry": "https://chatgpt.com/g/g-p-6abfec6fc3108191887d91cb9e658a32/project",  # DTF - Pixel Geometry
+    "similarity": "https://chatgpt.com/g/g-p-6ae1050711948191beaca8e90ad0acde/project"   # DTF - Similarity Check — paste the project URL; empty falls back to a plain chat
 }
 PROJECT_URL_DEFAULT = "https://chatgpt.com"
 
