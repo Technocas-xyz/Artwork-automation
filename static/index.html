@@ -681,7 +681,7 @@ function renderCol2(){
   checkStatus();
 }
 function updBtn(){
-  var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();updIdentifyBtn();updPrintReadyBtn();updColorwayBtn();return}
+  var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();updIdentifyBtn();updPrintReadyBtn();updColorwayBtn();updSimilarityAgentNote();return}
   var dt=$("designText");
   var hasInput;
   if(textMode===""){hasInput=false}  // Text + Image mode not yet chosen — nothing to submit
@@ -3356,20 +3356,31 @@ function renderSimilarityCol2(){
   var html='<div class="col-title">Compare</div>';
   html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">When both images are uploaded, press Compare. The measured (cv2) check runs on the server instantly. If their aspect ratios differ, the Original is padded to the Generated image\u2019s ratio first.</p>';
   // "Also ask ChatGPT" — a SECOND, independent opinion. Offered only when an
-  // agent is online + signed in; otherwise a note (the measured check still runs).
-  if(agentReady){
-    html+='<label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.84rem">'
-      +'<input type="checkbox" id="simAskGpt"'+(simReviewWanted?' checked':'')+' style="margin-top:3px">'
-      +'<span>Also ask ChatGPT for a second opinion<div style="font-size:.72rem;color:var(--muted)">Sends both images to ChatGPT in one turn and shows its independent read alongside the measured score.</div></span></label>';
-  }else{
-    html+='<div style="font-size:.78rem;color:var(--muted);border:1px dashed var(--border);border-radius:8px;padding:8px 10px;margin-bottom:12px">Start the agent to get the ChatGPT review. The measured (cv2) check still works without it.</div>';
-  }
+  // agent is online + signed in; otherwise a note (the measured check still
+  // runs). Kept in its OWN container so the status poll can refresh just the
+  // note as the agent connects/drops, WITHOUT re-rendering the uploads.
+  html+='<div id="simAgentNote"></div>';
   html+='<button class="gen-btn" id="simGenBtn" disabled>Compare</button>';
   html+='<div class="blocker-msg" id="simBlkMsg"></div>';
   col2.innerHTML=html;
-  var cb=$("simAskGpt");if(cb)cb.onchange=function(){simReviewWanted=cb.checked};
+  updSimilarityAgentNote();
   $("simGenBtn").onclick=submitSimilarity;
   updSimilarityBtn();
+}
+// Rewrite ONLY the #simAgentNote container to match the live agent status. Safe
+// to call on every status poll: it never touches the upload inputs/previews and
+// preserves the current checkbox choice (simReviewWanted).
+function updSimilarityAgentNote(){
+  var box=$("simAgentNote");if(!box)return;
+  var agentReady=workerAlive&&isLoggedIn;
+  if(agentReady){
+    box.innerHTML='<label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.84rem">'
+      +'<input type="checkbox" id="simAskGpt"'+(simReviewWanted?' checked':'')+' style="margin-top:3px">'
+      +'<span>Also ask ChatGPT for a second opinion<div style="font-size:.72rem;color:var(--muted)">Sends both images to ChatGPT in one turn and shows its independent read alongside the measured score.</div></span></label>';
+    var cb=$("simAskGpt");if(cb)cb.onchange=function(){simReviewWanted=cb.checked};
+  }else{
+    box.innerHTML='<div style="font-size:.78rem;color:var(--muted);border:1px dashed var(--border);border-radius:8px;padding:8px 10px;margin-bottom:12px">Start the agent to get the ChatGPT review. The measured (cv2) check still works without it.</div>';
+  }
 }
 function updSimilarityBtn(){
   var btn=$("simGenBtn"),blk=$("simBlkMsg");if(!btn)return;
@@ -3601,12 +3612,15 @@ function _renderSimilarityQA(qaOrig,qaGen){
   for(var i=0;i<order.length;i++){
     var id=order[i],oc=oMap[id],gc=gMap[id],label=byId[id].label;
     var diff=_simQaDiff(id,oc,gc,mo,mg);
-    var rowbg=diff&&diff.flag?'background:rgba(217,119,6,.08)':'';
+    // Red when the status got worse; amber for a notable change that is not a
+    // regression; otherwise no highlight.
+    var rowbg=diff&&diff.worse?'background:rgba(220,38,38,.09)':(diff&&diff.flag?'background:rgba(217,119,6,.08)':'');
+    var diffCol=diff&&diff.worse?'color:#dc2626;font-weight:700':(diff&&diff.flag?'color:#b45309;font-weight:600':'color:var(--muted)');
     h+='<tr style="border-top:1px solid var(--border);'+rowbg+'">';
     h+='<td style="padding:6px 8px;font-weight:600">'+esc(label)+'</td>';
     h+='<td style="padding:6px 8px">'+(oc?(esc(oc.value_str)+' '+_prChip(oc.status)):'<span style="color:var(--muted)">\u2014</span>')+'</td>';
     h+='<td style="padding:6px 8px">'+(gc?(esc(gc.value_str)+' '+_prChip(gc.status)):'<span style="color:var(--muted)">\u2014</span>')+'</td>';
-    h+='<td style="padding:6px 8px;font-size:.76rem;'+(diff&&diff.flag?'color:#b45309;font-weight:600':'color:var(--muted)')+'">'+(diff?esc(diff.text):'')+'</td>';
+    h+='<td style="padding:6px 8px;font-size:.76rem;'+diffCol+'">'+(diff?esc(diff.text):'')+'</td>';
     h+='</tr>';
   }
   h+='</tbody></table>';
@@ -3626,35 +3640,47 @@ function _simQaScoreCard(title,qa){
   s+='</div>';
   return s;
 }
-// Difference text + amber flag for a check. Numeric fields compare naturally via
-// the measurements block; others just note a status change. Returns null when
-// there is nothing meaningful to compare.
+// Difference for a check. Returns {text, flag, worse} (or null when there is
+// nothing to compare). `worse` = the status degraded Original->Generated
+// (pass->warn/fail or warn->fail) => the row is highlighted RED. `flag` = a
+// notable numeric change with no status regression => amber. Every field that
+// carries a numeric value shows the numeric difference with its unit, taken
+// from the check's own value + unit (so stroke mm, gradient %, etc. all show a
+// number, not "changed").
 function _simQaDiff(id,oc,gc,mo,mg){
-  // Field -> {key in measurements, unit, abs/pct threshold for flagging}.
-  var NUM={
-    dpi:{k:"dpi",u:" DPI",thr:1},
-    transparency:{k:"fully_transparent_pct",u:"%",thr:5},
-    semi_alpha:{k:"semi_transparent_pct",u:"%",thr:1},
-    halo:{k:"halo_pct",u:"%",thr:2},
-    soft_edges:{k:"soft_edge_pct",u:"%",thr:5},
-    colours:{k:"colour_count",u:"",thr:8},
-    margins:{k:"margin_pct",u:"%",thr:3},
-    print_size:{k:"max_print_in",u:" in",thr:1}
-  };
-  var def=NUM[id];
-  if(def&&mo[def.k]!=null&&mg[def.k]!=null){
-    var a=mo[def.k],b=mg[def.k],d=Math.round((b-a)*100)/100;
-    if(d===0)return{text:"no change",flag:false};
+  // Per-field "notable change" thresholds (absolute, in the field's own unit).
+  // A field not listed still shows its numeric diff; it just won't amber-flag
+  // on size alone (a status regression still turns it red).
+  var THR={dpi:1,transparency:5,semi_alpha:1,halo:2,soft_edges:5,colours:8,
+           margins:3,print_size:1,min_stroke:0.1,min_feature:0.1,gradients:5,black:10};
+  var rank={pass:0,warn:1,fail:2};
+  var worse=false;
+  if(oc&&gc&&rank[oc.status]!==undefined&&rank[gc.status]!==undefined){
+    worse=rank[gc.status]>rank[oc.status];
+  }
+  // Numeric diff straight from the checks' value + unit (both present).
+  if(oc&&gc&&typeof oc.value==="number"&&typeof gc.value==="number"
+     && (oc.unit||"")!=="ratio"){
+    var d=Math.round((gc.value-oc.value)*100)/100;
+    // "%" has no leading space; "count" is shown as a bare number; every other
+    // unit gets a leading space (e.g. " mm", " in", " DPI", " luminance").
+    var u=oc.unit||"";
+    var unit=u==="%"?"%":(u===""||u==="count"?"":(" "+u));
+    if(d===0){
+      return{text:"no change",flag:false,worse:worse};
+    }
     var sign=d>0?"+":"";
-    return{text:sign+d+def.u,flag:Math.abs(d)>=def.thr};
+    var thr=THR[id];
+    var big=(thr!==undefined)&&Math.abs(d)>=thr;
+    return{text:sign+d+unit,flag:big,worse:worse};
   }
-  // Non-numeric (aspect, has-transparency presence, etc.): flag a status change.
+  // Non-numeric (aspect ratio, etc.): compare the value string / status.
   if(oc&&gc){
-    if(oc.value_str===gc.value_str)return{text:"same",flag:false};
-    if(oc.status!==gc.status)return{text:oc.status.toUpperCase()+" \u2192 "+gc.status.toUpperCase(),flag:true};
-    return{text:"changed",flag:false};
+    if(oc.value_str===gc.value_str)return{text:"same",flag:false,worse:worse};
+    if(oc.status!==gc.status)return{text:oc.status.toUpperCase()+" \u2192 "+gc.status.toUpperCase(),flag:!worse,worse:worse};
+    return{text:"changed",flag:false,worse:worse};
   }
-  return oc||gc?{text:"one image only",flag:true}:null;
+  return oc||gc?{text:"one image only",flag:true,worse:false}:null;
 }
 
 function _renderSimilarity(sim,heading){
