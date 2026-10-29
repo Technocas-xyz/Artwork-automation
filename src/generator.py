@@ -34,6 +34,9 @@ from config.selectors import (
     SEND_BUTTON_LABELS,
     STOP_BUTTON,
     STOP_BUTTON_LABELS,
+    THINKING_INDICATOR,
+    MODEL_PICKER_BUTTON,
+    UPLOAD_PENDING_BUTTON,
     TURN_ACTION_CONTROLS,
 )
 from src.browser import GenerationTimeoutError, RateLimitError
@@ -248,6 +251,63 @@ def rename_chat(page: Page, title: str) -> bool:
         return False
 
 
+def _attach_files(page: Page, paths: list[str], run_id: str = "attach") -> None:
+    """Attach one or more files to the composer, robust to ChatGPT having
+    several file inputs in the DOM.
+
+    ChatGPT now renders multiple ``input[type=file]`` elements, and the first in
+    DOM order is the single-file CAMERA input (``capture`` attribute). Using the
+    bare FILE_INPUT selector picks that one, which rejects a multi-file attach
+    with "Non-multiple file input can only accept single file." So:
+
+      * Prefer the real multi-file input ``input[type='file'][multiple]`` (first
+        match) and set every path at once.
+      * If there is no multiple input, attach the files ONE AT A TIME on a
+        single-file, non-camera input, waiting for each thumbnail to appear
+        before the next so files are not dropped.
+      * NEVER use the ``capture`` (camera) input.
+
+    Logs which input was used and how many files were attached.
+    """
+    paths = [p for p in (paths or []) if p]
+    if not paths:
+        return
+
+    # A multi-file input accepts every path in one call — the normal happy path.
+    multi = page.query_selector("input[type='file'][multiple]:not([capture])") \
+        or page.query_selector("input[type='file'][multiple]")
+    if multi is not None:
+        multi.set_input_files(paths)
+        logger.info("[%s] attached %d file(s) via multiple file input: %s",
+                    run_id, len(paths), ", ".join(Path(p).name for p in paths))
+        return
+
+    # No multiple input: attach one file at a time on a single, non-camera input,
+    # waiting for each thumbnail before the next so none are dropped.
+    single = page.query_selector("input[type='file']:not([capture])") \
+        or page.query_selector("input[type='file']")
+    if single is None:
+        raise GenerationTimeoutError("No file input found in the composer to attach images.")
+
+    for idx, p in enumerate(paths, start=1):
+        single.set_input_files(p)
+        logger.info("[%s] attached file %d/%d via single file input: %s",
+                    run_id, idx, len(paths), Path(p).name)
+        # Wait for the thumbnail count to reach this file before attaching the
+        # next, so a slow render does not cause the following attach to replace
+        # it. Tolerant: if the thumbnail never shows we still proceed (the final
+        # _wait_for_upload_thumbnails confirmation handles a genuine failure).
+        try:
+            _wait_until(lambda n=idx: len(page.query_selector_all(COMPOSER_THUMBNAIL)) >= n,
+                        timeout_ms=30_000)
+        except Exception:
+            pass
+        # Re-resolve the input between files: the element can detach as the
+        # composer re-renders after each attachment.
+        single = page.query_selector("input[type='file']:not([capture])") \
+            or page.query_selector("input[type='file']") or single
+
+
 def send_text_turn(
     page: Page,
     prompt: str,
@@ -278,7 +338,7 @@ def send_text_turn(
         # Upload files if given
         if image_paths:
             _clear_composer_attachments(page, run_id=run_id)
-            page.set_input_files(FILE_INPUT, image_paths)
+            _attach_files(page, image_paths, run_id=run_id)
             _wait_for_upload_thumbnails(page, image_paths, run_id=run_id)
             _ts("upload attached")
 
@@ -299,12 +359,24 @@ def send_text_turn(
         # and fall through to the completion wait, which will read the reply.
         # (If _submit_prompt already confirmed via the composer clearing, the
         # stop button may have come and gone; that is fine.)
-        try:
-            page.wait_for_selector(STOP_BUTTON, state="attached", timeout=15_000)
-            _ts("stop button appeared")
-        except PlaywrightTimeout:
+        # A Thinking/Reasoning model shows NO stop button during its reasoning
+        # phase, so accept EITHER the stop button appearing OR the thinking
+        # indicator as "the turn started". Only if neither shows in 15s do we
+        # treat it as suspicious and dump controls.
+        turn_started = False
+        _st_deadline = time.monotonic() + 15.0
+        while time.monotonic() < _st_deadline:
+            try:
+                if page.query_selector(STOP_BUTTON) is not None:
+                    _ts("stop button appeared"); turn_started = True; break
+            except Exception:
+                pass
+            if _is_thinking(page):
+                _ts("thinking/reasoning indicator appeared (Thinking model)"); turn_started = True; break
+            page.wait_for_timeout(300)
+        if not turn_started:
             _ts("stop button never appeared (reply may already be finishing)")
-            _diag_event("timeout", "Text turn: stop button never appeared within 15s",
+            _diag_event("timeout", "Text turn: no stop button / thinking indicator within 15s",
                         step=run_id, detail="continuing to completion wait")
             # A missing stop button often means the markup moved — dump controls
             # so the new attribute values are readable from the log.
@@ -313,13 +385,31 @@ def send_text_turn(
         # Wait for the turn to settle. Short quiet period: a text answer streams
         # in a couple of seconds and then the stop button detaches. 1.5s of
         # continuous absence is enough to be sure the stream ended.
-        _wait_for_turn_complete(page, quiet_ms=1500, timeout=120_000, label=f"text-turn {run_id}", on_phase=_ts, text_only=True)
+        # 300s ceiling: a Thinking/Reasoning model can spend a minute+ reasoning
+        # before the answer streams, and _is_thinking keeps the turn "active"
+        # throughout, so the old 120s could trip during a long reasoning phase.
+        _wait_for_turn_complete(page, quiet_ms=1500, timeout=300_000, label=f"text-turn {run_id}", on_phase=_ts, text_only=True)
 
         # Return the text reply. Pass the sent prompt so the reader can reject a
         # read that came back equal to it (i.e. the user turn, not the reply), and
         # the prior DilRenderer count so it only accepts a NEW reply container.
-        reply = get_last_text_reply(page, sent_prompt=prompt, prior_dil_count=prior_dil)
+        reply = (get_last_text_reply(page, sent_prompt=prompt, prior_dil_count=prior_dil) or "").strip()
         _ts(f"reply read ({len(reply)} chars)")
+        # EMPTY REPLY = ERROR. An empty read means the page layout changed or the
+        # turn was not actually finished — storing "" silently gave the UI empty
+        # results with no error. Retry the read ONCE (give the reply a moment to
+        # render / the thinking phase to finish), then FAIL with a clear message.
+        if not reply:
+            _ts("reply empty — waiting 3s and retrying the read once")
+            page.wait_for_timeout(3000)
+            reply = (get_last_text_reply(page, sent_prompt=prompt, prior_dil_count=prior_dil) or "").strip()
+            _ts(f"reply re-read ({len(reply)} chars)")
+        if not reply:
+            _diag_event("fallback", "Text turn reply empty after retry",
+                        step=run_id, detail="failing the step; page layout may have changed")
+            raise GenerationTimeoutError(
+                "ChatGPT reply could not be read — the page layout may have changed. "
+                "No reply text was returned for this turn.")
         # Raw reply logged so an empty/garbled result is visible at the agent
         # (truncated to keep the log readable).
         preview = reply.replace("\n", " ")[:300]
@@ -374,7 +464,7 @@ def send_turn(
             # Clear any leftover attachment from a prior turn first, so the new
             # upload does not end up with a stale extra file in the composer.
             _clear_composer_attachments(page, run_id=run_id)
-            page.set_input_files(FILE_INPUT, image_paths)
+            _attach_files(page, image_paths, run_id=run_id)
             _wait_for_upload_thumbnails(page, image_paths, run_id=run_id)
 
         # --- Snapshot AFTER upload so uploaded file ids are already in the DOM ---
@@ -664,7 +754,9 @@ def _diagnose_reply_read(page: Page) -> None:
         "COPY_BUTTON": COPY_BUTTON,
         "ASSISTANT_MESSAGE": ASSISTANT_MESSAGE,
         "CONVERSATION_TURN": CONVERSATION_TURN,
+        "THINKING_INDICATOR": THINKING_INDICATOR,
         "[role=any]": "[data-message-author-role]",
+        "main article": "main article",
         "article": "article",
         "testid conv-turn": "[data-testid^='conversation-turn']",
     }
@@ -770,6 +862,56 @@ def _diagnose_reply_read(page: Page) -> None:
     except Exception as exc:
         _diag_print("[reply-diag] outerHTML dump FAILED (%s)", exc)
 
+    # ------------------------------------------------------------------ #
+    # 4b. SELECTOR-AGNOSTIC fallback: when every turn selector matches 0  #
+    #     (the 2026 layout change), dump the outerHTML of the last ~2     #
+    #     substantive direct children of <main> and the composer, so the  #
+    #     real stable selectors can be read straight from the log.        #
+    # ------------------------------------------------------------------ #
+    try:
+        dump = page.evaluate(
+            r"""() => {
+                const out = {url: location.href, blocks: [], composer: null};
+                const main = document.querySelector('main');
+                if (main) {
+                    // Collect candidate message containers: elements with a fair
+                    // amount of text that are not the composer form.
+                    const cand = [];
+                    main.querySelectorAll('div,article,section').forEach(el => {
+                        if (el.querySelector('[contenteditable], textarea, form')) return;
+                        const t = (el.innerText || '').trim();
+                        if (t.length >= 30) cand.push(el);
+                    });
+                    // Keep the deepest-but-substantive: drop an element if a child
+                    // is also a candidate with nearly the same text (prefer child).
+                    const leaves = cand.filter(el => !cand.some(o => o !== el && el.contains(o)
+                        && ((o.innerText||'').trim().length >= (el.innerText||'').trim().length * 0.9)));
+                    const last = leaves.slice(-2);
+                    last.forEach(el => out.blocks.push({
+                        tag: el.tagName,
+                        cls: (el.className||'').toString().slice(0,160),
+                        role: el.getAttribute('data-message-author-role'),
+                        text: (el.innerText||'').trim().slice(0,160),
+                        html: el.outerHTML.slice(0, 2200)
+                    }));
+                }
+                const comp = document.querySelector("div[contenteditable='true'][role='textbox'], #prompt-textarea, form");
+                if (comp) out.composer = comp.outerHTML.slice(0, 1500);
+                return out;
+            }"""
+        ) or {}
+        _diag_print("[reply-diag] page URL: %s", dump.get("url"))
+        blocks = dump.get("blocks") or []
+        _diag_print("[reply-diag] last %d substantive <main> container(s) (selector-agnostic):", len(blocks))
+        for i, b in enumerate(blocks):
+            _diag_print("[reply-diag]   block[%d] <%s class=%r role=%r> text=%r",
+                        i, b.get("tag"), b.get("cls"), b.get("role"), b.get("text"))
+            _diag_print("[reply-diag]   block[%d] outerHTML (trunc 2200):\n%s", i, b.get("html"))
+        if dump.get("composer"):
+            _diag_print("[reply-diag] composer outerHTML (trunc 1500):\n%s", dump.get("composer"))
+    except Exception as exc:
+        _diag_print("[reply-diag] selector-agnostic dump FAILED (%s)", exc)
+
     _diag_print("[reply-diag] === DIAGNOSTIC COMPLETE ===")
 
 
@@ -790,6 +932,102 @@ def _count_dil_renderers(page: Page) -> int:
         return len(page.query_selector_all(DIL_RENDERER))
     except Exception:
         return 0
+
+
+def _thread_signature(page: Page) -> str:
+    """A cheap fingerprint of the conversation thread's current content, used to
+    tell whether anything NEW has appeared. Changes when a reply container is
+    added or its text grows. Never raises."""
+    try:
+        return str(page.evaluate(
+            r"""() => {
+                const main = document.querySelector('main');
+                if (!main) return '0';
+                const dil = main.querySelectorAll("[class*='DilRenderer']");
+                let lastLen = 0;
+                if (dil.length) lastLen = (dil[dil.length-1].innerText || '').length;
+                return dil.length + ':' + lastLen;
+            }"""
+        ))
+    except Exception:
+        return ""
+
+
+_THINKING_MATCH_LOGGED = False
+
+
+def _is_thinking(page: Page) -> bool:
+    """True if a 'Thinking'/'Reasoning' model is still working in the CONVERSATION
+    THREAD — a reasoning phase shows no Stop button, so without this the
+    turn-complete wait would end early and read 0 chars.
+
+    STRICTLY SCOPED to the latest assistant turn / main thread. It NEVER counts:
+      * anything inside the composer form or the contenteditable,
+      * the model picker button (aria-label 'Select ChatGPT model', whose text
+        is the permanent 'Thinking effort\\nMedium' — the earlier false positive),
+      * any element whose text looks like the model-picker label.
+    The first time it matches, logs the element's tag / aria-label / text[:80] so
+    a future false positive is diagnosable. Never raises."""
+    global _THINKING_MATCH_LOGGED
+    try:
+        info = page.evaluate(
+            r"""(sel) => {
+                const main = document.querySelector('main');
+                if (!main) return null;
+                const form = main.querySelector('form');
+                const editable = main.querySelector("div[contenteditable='true'][role='textbox']");
+                const inComposer = (el) => (form && form.contains(el)) ||
+                                            (editable && editable.contains(el));
+                // Reject the model picker and any element carrying its label.
+                const isModelPicker = (el) => {
+                    let n = el;
+                    for (let d = 0; n && d < 4; d++, n = n.parentElement) {
+                        const al = (n.getAttribute && n.getAttribute('aria-label')) || '';
+                        if (/select chatgpt model/i.test(al) || /\bmodel\b/i.test(al)) return true;
+                    }
+                    return false;
+                };
+                const seen = (el) => {
+                    if (!el || inComposer(el) || isModelPicker(el)) return null;
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return null;
+                    return {tag: el.tagName,
+                            al: (el.getAttribute && el.getAttribute('aria-label')) || '',
+                            text: (el.innerText || '').trim().slice(0, 80)};
+                };
+                // 1) The scoped structural indicator selector.
+                for (const el of main.querySelectorAll(sel)) {
+                    const m = seen(el);
+                    if (m) return m;
+                }
+                // 2) A live reasoning STATUS line in the thread: a short standalone
+                //    label starting with thinking/reasoning/thought for. The
+                //    model-picker text 'Thinking effort Medium' is excluded both
+                //    by isModelPicker and by requiring the word boundary not be
+                //    followed by 'effort'.
+                const re = /^(thinking|reasoning|thought for|reasoned)\b/i;
+                for (const el of main.querySelectorAll('span,div,p')) {
+                    if (inComposer(el) || isModelPicker(el)) continue;
+                    const t = (el.innerText || '').trim();
+                    if (!t || t.length >= 40) continue;
+                    if (/thinking effort/i.test(t)) continue;   // the model picker
+                    if (!re.test(t)) continue;
+                    const m = seen(el);
+                    if (m) return m;
+                }
+                return null;
+            }""",
+            THINKING_INDICATOR,
+        )
+    except Exception:
+        return False
+    if not info:
+        return False
+    if not _THINKING_MATCH_LOGGED:
+        _THINKING_MATCH_LOGGED = True
+        logger.info("[thinking] indicator matched: <%s> aria-label=%r text=%r (selector=%r)",
+                    info.get("tag"), info.get("al"), info.get("text"), THINKING_INDICATOR)
+    return True
 
 
 def _read_reply_via_dil(page: Page, sent_prompt: str | None,
@@ -1098,8 +1336,9 @@ def get_last_text_reply(page: Page, sent_prompt: str | None = None,
         return "", "none"
 
     def _streaming() -> bool:
-        """True if a stop / generation indicator is currently visible — ChatGPT
-        is still rendering, so any text read now may be partial. Never raises."""
+        """True if a stop / generation / thinking indicator is currently visible —
+        ChatGPT is still working, so any text read now may be partial or empty
+        (a Thinking model hasn't started its answer yet). Never raises."""
         for sel in (STOP_BUTTON, IMAGE_LOADER):
             try:
                 el = page.query_selector(sel)
@@ -1107,7 +1346,7 @@ def get_last_text_reply(page: Page, sent_prompt: str | None = None,
                     return True
             except Exception:
                 pass
-        return False
+        return _is_thinking(page)
 
     # Phase 1: get non-empty text (retry until the reply renders at all).
     while True:
@@ -1292,7 +1531,7 @@ def extract_artwork_images(
 
     try:
         # Upload first, THEN snapshot so uploaded file ids are excluded
-        page.set_input_files(FILE_INPUT, [image_path])
+        _attach_files(page, [image_path], run_id=run_id)
         _wait_for_upload_thumbnails(page, [image_path], run_id=run_id)
 
         pre_existing_ids = _collect_image_ids(page)
@@ -1700,10 +1939,33 @@ def _wait_for_turn_complete(page: Page, quiet_ms: int = 5000, timeout: int = 900
     streamed = False       # has the button been sustained-present (turn ran)?
     turn_over = False       # text_only: latched once it detaches after streaming
     poll = 0
+    # Stale-thinking guard: a Thinking model keeps _is_thinking() true during its
+    # reasoning phase, but if the thread stops changing AND there is no stop
+    # button for THINKING_STALE_S, the reasoning is done (or the indicator is a
+    # false positive) — stop treating it as active so the reply can be read.
+    THINKING_STALE_S = 60.0
+    thread_sig = _thread_signature(page)
+    thread_changed_at = time.monotonic()
     while time.monotonic() < deadline:
-        raw_present = page.query_selector(STOP_BUTTON) is not None
-        poll += 1
         now = time.monotonic()
+        # Track thread progress: reset the stale timer whenever new content lands.
+        cur_sig = _thread_signature(page)
+        if cur_sig != thread_sig:
+            thread_sig = cur_sig
+            thread_changed_at = now
+        stop_present = page.query_selector(STOP_BUTTON) is not None
+        thinking = _is_thinking(page)
+        # The turn is "active" if the Stop button is up, OR a Thinking/Reasoning
+        # model is still reasoning — BUT thinking is only honoured while the
+        # thread is still progressing: once nothing new for THINKING_STALE_S and
+        # no stop button, a lingering/false 'thinking' no longer holds the turn.
+        thinking_active = thinking and (now - thread_changed_at) < THINKING_STALE_S
+        if thinking and not thinking_active and not stop_present:
+            logger.info("[turn-wait %s] thinking indicator still on but thread idle "
+                        "for %.0fs and no stop button — treating turn as finished.",
+                        label, now - thread_changed_at)
+        raw_present = stop_present or thinking_active
+        poll += 1
 
         if raw_present:
             present_streak += 1
@@ -1805,11 +2067,35 @@ def _enter_prompt(page: Page, prompt: str) -> None:
                            "verifying the paste — the composer selector may need "
                            "updating.", PROMPT_BOX)
         actual = len(content.strip())
-        if actual >= expected * 0.8:
+        # DOUBLE-PASTE GUARD: if the composer holds far MORE than the prompt
+        # (e.g. a stale paste plus this one, seen as "3452 of ~1726 chars"), the
+        # prompt was duplicated. Clear the composer and paste ONCE more; accept
+        # only if the re-paste lands near the expected length.
+        if actual > expected * 1.2:
+            logger.info("_enter_prompt: composer holds %d chars for a ~%d-char prompt "
+                        "(>1.2x) — likely a double paste. Clearing and re-pasting once.",
+                        actual, expected)
+            _diag_event("retry", "Composer over-full after paste; cleared and re-pasted",
+                        detail=f"had {actual} chars for ~{expected}")
+            page.click(PROMPT_BOX)
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(150)
+            page.keyboard.press("Control+V")
+            page.wait_for_timeout(300)
+            composer2 = page.query_selector(PROMPT_BOX)
+            content2 = ""
+            if composer2 is not None:
+                try:
+                    content2 = composer2.inner_text() or ""
+                except Exception:
+                    content2 = composer2.text_content() or ""
+            actual = len(content2.strip())
+        if expected * 0.8 <= actual <= expected * 1.2:
             logger.info("_enter_prompt: PASTED ok (%d of ~%d chars via %s)",
                         actual, expected, PROMPT_BOX)
             return
-        logger.info("_enter_prompt: paste verify short — read %d chars, expected ~%d "
+        logger.info("_enter_prompt: paste verify off — read %d chars, expected ~%d "
                     "(via %s). Falling back to TYPING.", actual, expected, PROMPT_BOX)
         _diag_event("fallback", "Prompt paste incomplete; fell back to typing",
                     detail=f"pasted {actual} of ~{expected} chars")
@@ -1898,6 +2184,32 @@ def _submission_confirmed(page: Page, before_len: int) -> bool:
     return False
 
 
+def _wait_no_upload_pending(page: Page, run_id: str = "submit", timeout_s: float = 90.0) -> None:
+    """Block until no 'File upload pending' button exists (or timeout). Sending
+    while this is present starts no turn. Logs while it waits. Never raises."""
+    t0 = time.monotonic()
+    last_log = 0.0
+    while time.monotonic() - t0 < timeout_s:
+        try:
+            pending = page.query_selector(UPLOAD_PENDING_BUTTON)
+        except Exception:
+            pending = None
+        if pending is None:
+            if last_log:   # only note clearance if we actually waited
+                logger.info("[submit %s] upload pending cleared after %.0fs.", run_id, time.monotonic() - t0)
+            return
+        now = time.monotonic()
+        if now - last_log >= 5.0:
+            logger.info("[submit %s] waiting to send — 'File upload pending' still present (%.0fs).",
+                        run_id, now - t0)
+            last_log = now
+        page.wait_for_timeout(500)
+    logger.warning("[submit %s] 'File upload pending' still present after %.0fs — sending anyway.",
+                   run_id, timeout_s)
+    _diag_event("upload_issue", "Upload still pending at send time",
+                step=run_id, detail=f"waited {timeout_s:.0f}s")
+
+
 def _submit_prompt(page: Page, run_id: str = "submit") -> bool:
     """Submit the prompt already typed into the composer, resiliently.
 
@@ -1916,6 +2228,11 @@ def _submit_prompt(page: Page, run_id: str = "submit") -> bool:
     Logs which path was taken and whether submission was confirmed. Returns True
     iff submission was confirmed.
     """
+    # GATE: never submit while a file upload is still pending — Send is a no-op
+    # then and the turn never starts (confirmed live). Wait up to 90s for the
+    # 'File upload pending' button to disappear.
+    _wait_no_upload_pending(page, run_id=run_id, timeout_s=90.0)
+
     before_len = len(_composer_text(page))
 
     # --- Path 1: Enter (ProseMirror native submit) ---
@@ -1981,10 +2298,22 @@ def _wait_for_upload_thumbnails(page: Page, image_paths, run_id: str = "upload")
         # Send button enabled is independent evidence the composer has content.
         return _send_button_ready(page)
 
-    # Attempt 1: give a busy machine / large file up to 60s.
-    if _wait_until(_attached, timeout_ms=60_000):
-        _log_upload_state(page, expected_count, "attached")
-        return
+    # Attempt 1: give a busy machine / large file up to 60s, logging the composer
+    # status (e.g. "File upload pending") every few seconds so a stuck upload is
+    # visible in the log instead of a silent 60s gap.
+    _t0 = time.time()
+    _last_status_log = 0.0
+    while time.time() - _t0 < 60.0:
+        if _attached():
+            _log_upload_state(page, expected_count, "attached")
+            return
+        now = time.time()
+        if now - _last_status_log >= 5.0:
+            status = _composer_status_text(page)
+            logger.info("[%s] waiting for upload (%.0fs)%s", run_id, now - _t0,
+                        (" — composer: %r" % status) if status else "")
+            _last_status_log = now
+        time.sleep(0.5)
 
     # Retry the attach once — ChatGPT occasionally drops the first set_input_files.
     _names = ", ".join(Path(p).name for p in image_paths) or "(no files)"
@@ -1992,7 +2321,7 @@ def _wait_for_upload_thumbnails(page: Page, image_paths, run_id: str = "upload")
     _diag_event("upload_issue", "Upload not confirmed after 60s; re-attaching once",
                 step=run_id, detail=_names)
     try:
-        page.set_input_files(FILE_INPUT, list(image_paths))
+        _attach_files(page, list(image_paths), run_id=run_id)
     except Exception as exc:
         logger.info("re-attach set_input_files failed: %s", exc)
         _diag_event("retry", "Re-attach set_input_files failed",
@@ -2152,6 +2481,31 @@ def _wait_until(predicate, timeout_ms: int, poll_ms: int = 500) -> bool:
         return False
 
 
+def _composer_status_text(page: Page) -> str:
+    """Any visible composer status label while an upload is in flight, e.g.
+    'File upload pending'. Returns '' if none. Used to log WHY the upload wait is
+    still waiting, so a stuck 'File upload pending' is visible in the log rather
+    than a silent 60s gap. Never raises."""
+    try:
+        return (page.evaluate(
+            r"""() => {
+                const main = document.querySelector('main') || document.body;
+                const re = /(upload|uploading|pending|processing|attach)/i;
+                const els = main.querySelectorAll('span,div,p');
+                for (const el of els) {
+                    const t = (el.innerText || '').trim();
+                    if (t && t.length < 60 && re.test(t)) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) return t;
+                    }
+                }
+                return "";
+            }"""
+        ) or "").strip()
+    except Exception:
+        return ""
+
+
 def _log_upload_state(page: Page, expected_count: int, phase: str) -> None:
     """Log what the upload check saw: blob count, send-button presence/enabled."""
     try:
@@ -2165,9 +2519,11 @@ def _log_upload_state(page: Page, expected_count: int, phase: str) -> None:
         enabled = _send_button_ready(page)
     except Exception:
         pass
+    status = _composer_status_text(page)
     logger.info(
-        "upload check [%s]: blob_thumbnails=%d (expected %d) send_button_present=%s send_button_enabled=%s",
+        "upload check [%s]: blob_thumbnails=%d (expected %d) send_button_present=%s send_button_enabled=%s%s",
         phase, n_blobs, expected_count, present, enabled,
+        (" composer_status=%r" % status) if status else "",
     )
 
 

@@ -33,12 +33,14 @@
     printready: "rosette-discount-check",
     colorway: "palette",
     geometry: "ruler-measure",
+    similarity: "git-compare",
+    objectsim: "binary-tree",
     nextcloud: "cloud"
   };
   // Workflows that belong in the "CREATE ARTWORK" group (everything that
   // generates/analyses art). nextcloud is shown separately below.
   var CREATE_WORKFLOWS = ["text", "textimage", "mockup", "artwork", "custom",
-                          "identify", "printready", "colorway", "geometry"];
+                          "identify", "printready", "colorway", "geometry", "similarity", "objectsim"];
 
   var PAGE_DESC = {
     text: "Generate finished artwork from wording the client supplies.",
@@ -50,6 +52,8 @@
     printready: "Check whether an artwork is ready for DTF printing, with a score and a printer\u2019s assessment.",
     colorway: "Find the garment colours an artwork suits, preview it on them, and adapt it where needed.",
     geometry: "Measure an artwork's geometry, regenerate it at the target DTF size, and measure the result.",
+    similarity: "Upload two images and get their similarity \u2014 shape, edges, colour and detail \u2014 with an overall score.",
+    objectsim: "Upload two images and compare them object by object \u2014 each object cropped, scored and QA-checked, with anything missing or added flagged.",
     nextcloud: "Browse the Leads 2.0 vault and send artwork to any workflow."
   };
   var PAGE_TITLE = {
@@ -62,6 +66,8 @@
     printready: "Print Ready QA",
     colorway: "Colorways",
     geometry: "Pixel Geometry",
+    similarity: "Similarity Check",
+    objectsim: "Object Similarity",
     nextcloud: "Nextcloud Vault"
   };
 

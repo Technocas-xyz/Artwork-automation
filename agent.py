@@ -42,6 +42,8 @@ from config.workflows import (
     CUSTOM_ASPECT_ADVICE, CUSTOM_ASPECT_BASELINE, CUSTOM_ASPECT_REGENERATE,
     IDENTIFY_OBJECTS, IDENTIFY_COLOR_GROUPS, IDENTIFY_REGENERATE,
     PRINTREADY_REVIEW,
+    SIMILARITY_REVIEW,
+    OBJECT_SIMILARITY_DETECT,
     COLORWAY_SUGGEST, COLORWAY_MOCKUP, COLORWAY_ADAPT,
     GEOMETRY_GENERATE,
     normalise_ratio, CUSTOM_OPERATIONS_ORDER, CUSTOM_OPERATIONS_LABELS,
@@ -374,6 +376,18 @@ _AGENT_OWNED_FIELDS = (
     # on. printready_report/_measurements are set by the SERVER at job creation,
     # so they are NOT agent-owned and must not be echoed back here.
     "printready_assessment", "printready_original_file",
+    # Similarity Check: the agent produces the ChatGPT second-opinion text; the
+    # two image filenames are set by the server but echoed harmlessly. The cv2
+    # result (similarity_cv2) is SERVER-owned and must NOT be echoed back.
+    "similarity_review", "similarity_review_error",
+    "similarity_original_file", "similarity_generated_file",
+    # Object Similarity: the agent produces the object-detection JSON and the two
+    # grid-overlay previews. The whole-image compare (objectsim_cv2) and the
+    # per-object crop/compare/QA (objectsim_objects) are SERVER-computed and must
+    # NOT be echoed back here.
+    "objectsim_detect", "objectsim_detect_error",
+    "objectsim_original_file", "objectsim_generated_file",
+    "objectsim_grid_original_file", "objectsim_grid_generated_file",
     # Colorways (UC-6): recommendations (raw + parsed + avoid list), the per-colour
     # mockups (+ local previews) and the per-colour adaptations. colorway_colours
     # is set by the SERVER at job creation, so it is NOT echoed back here.
@@ -2262,6 +2276,134 @@ def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
     job["finished_at"] = time.time()
 
 
+def _run_similarity_workflow(page: Any, job: dict[str, Any]) -> None:
+    """Similarity Check — ChatGPT second opinion. The instant cv2 score was
+    computed on the SERVER (similarity_cv2). Here the agent runs the ONE text
+    turn: send BOTH images in a single turn — image 1 the ORIGINAL, image 2 the
+    GENERATED — with the SIMILARITY_REVIEW prompt, and store the raw reply text
+    in similarity_review. The reply is parsed in the UI; no image is generated."""
+    job_id = job["id"]
+    files = [f for f in (job.get("artwork_files") or []) if f]
+    original_file = job.get("similarity_original_file") or (files[0] if len(files) > 0 else "")
+    generated_file = job.get("similarity_generated_file") or (files[1] if len(files) > 1 else "")
+    original_path = str(INPUT_DIR / Path(original_file).name) if original_file else ""
+    generated_path = str(INPUT_DIR / Path(generated_file).name) if generated_file else ""
+    if not (original_file and generated_file) or not Path(original_path).exists() or not Path(generated_path).exists():
+        job["status"] = "failed"
+        job["error"] = "Both images are required for the ChatGPT review and must be present on the agent."
+        job["finished_at"] = time.time()
+        return
+
+    # Open the chat in this workflow's project (falls back to a plain chat).
+    _track_start(job)
+    _open_chat_for(page, job)
+    _track_end(job)
+
+    job["stage"] = 1
+    job["stage_label"] = "Asking ChatGPT to compare the two images"
+
+    review_prompt = _tpl(job, "SIMILARITY_REVIEW", SIMILARITY_REVIEW)
+    job.setdefault("prompts", []).append(review_prompt)
+    print(f"[similarity] review prompt SENT ({len(review_prompt)} chars).")
+
+    # ONE text turn, BOTH images: original first, generated second.
+    _track_start(job)
+    reply = send_text_turn(page, prompt=review_prompt,
+                           image_paths=[original_path, generated_path],
+                           run_id=f"{job_id}_similarity")
+    _track_end(job)
+    _rename_chat_once(page, job)
+
+    reply = (reply or "").strip()
+    if not reply:
+        job["similarity_review_error"] = "ChatGPT returned an empty reply."
+    job["similarity_review"] = reply
+    print(f"[similarity] review stored ({len(reply)} chars).")
+
+    job["status"] = "done"
+    job["awaiting_input"] = False
+    job["finished_at"] = time.time()
+
+
+def _run_objectsim_workflow(page: Any, job: dict[str, Any]) -> None:
+    """Object Similarity — ChatGPT lists the objects across BOTH images so the
+    SERVER can pair, crop and compare them object by object. The agent draws the
+    SAME labelled 10x10 grid over BOTH images (image 1 = ORIGINAL, image 2 =
+    GENERATED), sends them in ONE turn with the OBJECT_SIMILARITY_DETECT prompt,
+    and stores the RAW JSON reply in objectsim_detect. The server does all the
+    cropping / cv2 / QA (cv2 is server-only); no image is generated here."""
+    job_id = job["id"]
+    files = [f for f in (job.get("artwork_files") or []) if f]
+    original_file = job.get("objectsim_original_file") or (files[0] if len(files) > 0 else "")
+    generated_file = job.get("objectsim_generated_file") or (files[1] if len(files) > 1 else "")
+    original_path = str(INPUT_DIR / Path(original_file).name) if original_file else ""
+    generated_path = str(INPUT_DIR / Path(generated_file).name) if generated_file else ""
+    if not (original_file and generated_file) or not Path(original_path).exists() or not Path(generated_path).exists():
+        job["status"] = "failed"
+        job["error"] = "Both images are required for the object comparison and must be present on the agent."
+        job["finished_at"] = time.time()
+        return
+
+    # Open the chat in this workflow's project (falls back to a plain chat).
+    _track_start(job)
+    _open_chat_for(page, job)
+    _track_end(job)
+
+    job["stage"] = 1
+    job["stage_label"] = "Asking ChatGPT to list the objects in both images"
+
+    # Draw the SAME labelled grid over BOTH images and send those copies (never
+    # the originals), exactly like Artwork Identification. Publish them so the
+    # operator can see what ChatGPT saw. Fall back to the plain image on failure.
+    try:
+        grid1 = grid_overlay(Path(original_path).read_bytes())
+        grid1_name = f"{job_id}_grid_original.png"
+        _record_stage_image(job, "grid_original", grid1, grid1_name)
+        job["objectsim_grid_original_file"] = grid1_name
+        send_path_1 = str(OUTPUT_DIR / grid1_name)
+    except Exception as exc:
+        print(f"[objectsim] grid overlay (original) failed, sending plain image: {exc}")
+        send_path_1 = original_path
+    try:
+        grid2 = grid_overlay(Path(generated_path).read_bytes())
+        grid2_name = f"{job_id}_grid_generated.png"
+        _record_stage_image(job, "grid_generated", grid2, grid2_name)
+        job["objectsim_grid_generated_file"] = grid2_name
+        send_path_2 = str(OUTPUT_DIR / grid2_name)
+    except Exception as exc:
+        print(f"[objectsim] grid overlay (generated) failed, sending plain image: {exc}")
+        send_path_2 = generated_path
+
+    # Resolve the detect prompt (operator edit -> managed DB -> built-in). The
+    # built-in has DOUBLED braces (the JSON example is a literal in a format
+    # template), so .format() collapses {{->{ to valid single-brace JSON.
+    detect_prompt = _tpl(job, "OBJECT_SIMILARITY_DETECT", OBJECT_SIMILARITY_DETECT)
+    try:
+        detect_prompt = detect_prompt.format()
+    except (KeyError, IndexError, ValueError):
+        pass
+    job.setdefault("prompts", []).append(detect_prompt)
+    print(f"[objectsim] detect prompt SENT ({len(detect_prompt)} chars).")
+
+    # ONE text turn, BOTH grid images: original first, generated second.
+    _track_start(job)
+    reply = send_text_turn(page, prompt=detect_prompt,
+                           image_paths=[send_path_1, send_path_2],
+                           run_id=f"{job_id}_objectsim")
+    _track_end(job)
+    _rename_chat_once(page, job)
+
+    reply = (reply or "").strip()
+    if not reply:
+        job["objectsim_detect_error"] = "ChatGPT returned an empty reply."
+    job["objectsim_detect"] = reply
+    print(f"[objectsim] detect JSON stored ({len(reply)} chars). Server computes the per-object compare.")
+
+    job["status"] = "done"
+    job["awaiting_input"] = False
+    job["finished_at"] = time.time()
+
+
 # ---------------------------------------------------------------------------
 # Pixel Geometry (Before -> Generate -> After)
 # ---------------------------------------------------------------------------
@@ -2643,6 +2785,10 @@ def _run_job(page: Any, job: dict) -> None:
         _run_identify_workflow(page, job)
     elif wf == "printready":
         _run_printready_workflow(page, job)
+    elif wf == "similarity":
+        _run_similarity_workflow(page, job)
+    elif wf == "objectsim":
+        _run_objectsim_workflow(page, job)
     elif wf == "colorway":
         _run_colorway_workflow(page, job)
     elif wf == "geometry":

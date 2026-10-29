@@ -10,7 +10,9 @@ PROJECT_URLS = {
     "identify": "https://chatgpt.com/g/g-p-6ab665a41ddc8191bbc7e4801d468079/project",
     "printready": "https://chatgpt.com/g/g-p-6abba3f58d948191ad2dfc2556602934/project",   # DTF - Print Ready QA
     "colorway": "https://chatgpt.com/g/g-p-6abbbc63c7d48191b3e184c30e7d45c9/project",  # DFT - Colorway
-    "geometry": "https://chatgpt.com/g/g-p-6abfec6fc3108191887d91cb9e658a32/project"   # DTF - Pixel Geometry — paste the project URL; empty falls back to a plain chat
+    "geometry": "https://chatgpt.com/g/g-p-6abfec6fc3108191887d91cb9e658a32/project",  # DTF - Pixel Geometry
+    "similarity": "https://chatgpt.com/g/g-p-6ae1050711948191beaca8e90ad0acde/project",  # DTF - Similarity Check
+    "objectsim": "https://chatgpt.com/g/g-p-6ae2482ffa208191bb1690e036dd996f/project"   # DTF - Object Similarity
 }
 PROJECT_URL_DEFAULT = "https://chatgpt.com"
 
@@ -55,6 +57,39 @@ STOP_BUTTON   = ("button[aria-label='Stop'], "
                  "button[aria-label='Stop streaming'], "
                  "button[aria-label='Stop generating'], "
                  "[data-testid='stop-button']")
+
+# "Thinking" / "Reasoning" models stream their answer only AFTER a reasoning
+# phase during which NO stop button is shown — so the turn-complete wait used to
+# end early and read 0 chars. These selectors mark that the model is still
+# working (reasoning in progress). While ANY of them is visible the turn is NOT
+# done. Matched broadly (visible text + common aria/class fragments) since the
+# exact markup is not pinned; a miss is harmless (we fall back to reading).
+# IMPORTANT: scope to the CONVERSATION THREAD only, never the composer. The
+# composer has a PERMANENT model-picker button (aria-label='Select ChatGPT
+# model', text 'Thinking effort\nMedium') and a bare [class*='thinking'] /
+# [aria-label*='Thinking'] match hit it, so the turn-complete wait thought the
+# model was reasoning forever. These selectors therefore target reasoning-stream
+# markers inside <main> only; _is_thinking() further excludes the composer form
+# and the model picker, and ignores the model-picker's text.
+THINKING_INDICATOR = ("main [data-testid*='thinking'], "
+                      "main [data-testid*='reasoning'], "
+                      "main [class*='result-thinking' i], "
+                      "main [class*='reasoning-chunk' i]")
+# Buttons that are PERMANENT composer chrome and must never be read as a
+# "thinking" signal (the model picker carries the word "Thinking").
+MODEL_PICKER_BUTTON = "button[aria-label='Select ChatGPT model'], button[aria-label*='model' i]"
+# The composer form/root — used to exclude composer chrome from thread scans.
+COMPOSER_ROOT = "form, div[contenteditable='true'][role='textbox']"
+# While a file is still uploading, the composer shows a button with this
+# aria-label and Send is a no-op — submitting then starts no turn. Wait until
+# this is gone before sending.
+UPLOAD_PENDING_BUTTON = ("button[aria-label='File upload pending'], "
+                         "button[aria-label*='upload pending' i], "
+                         "button[aria-label*='uploading' i]")
+# Chat URL shapes seen live. The 2026 local build uses /c/local-chatgpt%3A<uuid>
+# (the %3A is an encoded ':'), alongside the classic /c/<uuid> and project
+# /g/g-p-.../project. Kept here for reference; open_chat matches on /c/ broadly.
+CHAT_URL_FRAGMENTS = ("/c/", "local-chatgpt")
 
 IMAGE_LOADER  = "[data-testid='image-gen-loading-state']"   # not queried in code (docstring ref only)
 IMAGE_OVERLAY = "[data-testid='image-gen-overlay-actions']"   # defined but currently unused
@@ -132,7 +167,15 @@ UPLOAD_LABELS = ("Add files and more", "Add photos & files", "Attach files", "Up
 # read back as 0 chars. The remaining selectors target the real turn container.
 CONVERSATION_TURN = ("[data-testid^='conversation-turn-'], "
                      "main [class*='conversation-turn'], "
-                     "main article[class*='turn']")
+                     "main article[class*='turn'], "
+                     # 2026 layout (chat URL /c/local-chatgpt%3A<uuid>): the old
+                     # turn classes/testids all vanished. Broaden to any <article>
+                     # in <main> (ChatGPT wraps each turn in an <article>), and to
+                     # a data-turn attribute if it returns. Scoped to main so
+                     # composer/sidebar chrome is excluded.
+                     "main article, "
+                     "main [data-turn], "
+                     "main [data-message-author-role]")
 
 # The per-reply action bar (Copy / read-aloud / like / dislike). ChatGPT renders
 # it once per assistant turn with a class fragment "turn-action-controls". It is
@@ -148,6 +191,8 @@ TURN_ACTION_CONTROLS = ("[class*='turn-action-controls'], "
 # ```json blocks intact), which is exactly what the identify/box JSON parsers
 # want — far more robust than scraping rendered innerText.
 COPY_BUTTON = ("button[aria-label='Copy'], "
+               "button[aria-label='Copy message'], "
+               "button[aria-label*='Copy'], "
                "button[data-testid='copy-turn-action-button']")
 
 # The ASSISTANT message body specifically (not the whole user+assistant turn).
@@ -158,8 +203,14 @@ COPY_BUTTON = ("button[aria-label='Copy'], "
 # for the diagnostics dump and the last-ditch innerText path. Match, in order:
 #   1. the rendered-markdown container inside main (the assistant answer body,
 #      including <pre>/<code> blocks), scoped to main so composer/sidebar excluded.
-ASSISTANT_MESSAGE = ("main [class*='markdown'], "
-                     "main [class*='prose']")
+ASSISTANT_MESSAGE = ("main [data-message-author-role='assistant'] [class*='markdown'], "
+                     "main [data-message-author-role='assistant'], "
+                     "main [class*='markdown'], "
+                     "main [class*='prose'], "
+                     # 2026 layout fallback: the assistant body is the rendered
+                     # markdown; if the class churns, an <article>'s last
+                     # substantive block is picked up by the DOM reader instead.
+                     "main article [class*='markdown']")
 
 # The rendered reply container. Live inspection showed the assistant reply text
 # sits in  P.TextBase-<hash> < DIV.DilRenderer-<hash>.  The class names are

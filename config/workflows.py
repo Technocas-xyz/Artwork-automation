@@ -382,6 +382,73 @@ have them. If the artwork is print ready, say so plainly.
 Plain text, no markdown, no preamble."""
 
 
+# Similarity Check — ChatGPT second opinion. The operator uploads two images;
+# cv2 gives an instant measured score, and (optionally) ChatGPT gives an
+# independent read. BOTH images are sent in one turn: image 1 is the ORIGINAL,
+# image 2 is the GENERATED version. The reply is parsed line-by-line in the UI,
+# so the exact field labels below must not change. No {placeholders}.
+SIMILARITY_REVIEW = """Image 1 is the ORIGINAL artwork. Image 2 is a GENERATED version of it. Compare them as a print designer checking a client's artwork.
+
+Reply in exactly this format, plain text, no markdown:
+
+Verdict: SAME / MINOR DIFFERENCES / MAJOR DIFFERENCES
+
+Score: a number 0-100 for how faithfully image 2 reproduces image 1
+
+Text: identical / changed - list any wording, spelling, letter or number differences
+
+Missing: anything in image 1 that is missing in image 2, or none
+
+Added: anything in image 2 that is not in image 1, or none
+
+Colours: same / changed - say what changed
+
+Shapes and layout: same / changed - say what changed
+
+Summary: one sentence
+
+Then a print-readiness (QA) opinion for EACH of the checks below, judged by eye from the images only. Do NOT give any numbers or measurements (those are measured separately) - give only a status and a short visual reason. Status is one of PASS, WARN, FAIL, or N/A if you cannot judge it from the image. Give a line for BOTH images, in exactly this format (keep the check id spelled exactly as shown):
+
+QA dpi: image1 PASS|WARN|FAIL|N/A - short reason; image2 PASS|WARN|FAIL|N/A - short reason
+QA transparency: image1 ... ; image2 ...
+QA semi_alpha: image1 ... ; image2 ...
+QA halo: image1 ... ; image2 ...
+QA soft_edges: image1 ... ; image2 ...
+QA colours: image1 ... ; image2 ...
+QA black: image1 ... ; image2 ...
+QA min_stroke: image1 ... ; image2 ...
+QA min_feature: image1 ... ; image2 ...
+QA gradients: image1 ... ; image2 ...
+QA margins: image1 ... ; image2 ...
+QA aspect: image1 ... ; image2 ...
+QA print_size: image1 ... ; image2 ...
+
+Check meanings: dpi = looks high enough resolution / sharp; transparency = has a clean transparent background (not a solid colour); semi_alpha = free of faint semi-transparent pixels; halo = no pale fringe ringing the edges; soft_edges = edges are crisp, not blurry; colours = a sensible, limited number of distinct colours; black = blacks look solid, not washed out; min_stroke = thinnest lines look thick enough to print; min_feature = smallest text/detail looks large enough to print; gradients = no large smooth gradients that could band; margins = artwork is not jammed against the edge; aspect = the overall proportions look right; print_size = the artwork would suit a normal DTF transfer size. Answer N/A for anything you genuinely cannot tell from the image."""
+
+
+# Object Similarity: BOTH images have the SAME labelled 10x10 grid drawn on
+# them. Image 1 is the ORIGINAL, image 2 is the GENERATED version. ChatGPT must
+# return the SAME object names in both images so the server can pair them, crop
+# each object from both, and compare object by object. The reply is parsed as
+# JSON; the server does all cropping / cv2 / QA. No {placeholders}.
+OBJECT_SIMILARITY_DETECT = """You are given TWO images. A labelled 10x10 grid has been drawn over BOTH of them to help you describe where things are. Columns are lettered A to J from left to right; rows are numbered 1 to 10 from top to bottom, so the top-left cell is A1 and the bottom-right cell is J10. The grid is only a reference overlay — ignore it as part of the artwork.
+
+Image 1 is the ORIGINAL artwork. Image 2 is a GENERATED version of it. They are meant to be the same artwork.
+
+List the main objects and elements across the two images — the things a person would actually want to compare: text blocks, people, characters, logos, main shapes, and distinct background elements. List whole, meaningful elements (a lion is one item called "Lion", never its mane or paws separately). Aim for roughly 5 to 15 items.
+
+Use the SAME name for an object in both images, so each object can be paired. For every object give the grid cells it mainly sits in, SEPARATELY for each image. If an object is not present in one of the images, use the string "missing" for that image's cells instead of a cell list.
+
+Reply with ONLY a JSON array and nothing else — no prose, no explanation, no markdown code fences. Each element is an object with: "id" (1-based integer), "name" (short label), "type" (one of: text, person, character, logo, shape, background, other), "cells_image1" (array of cell strings, or "missing"), and "cells_image2" (array of cell strings, or "missing"). Exactly this shape:
+
+[
+  {{"id": 1, "name": "Team name text", "type": "text", "cells_image1": ["C8", "D8", "E8"], "cells_image2": ["C8", "D8", "E8"]}},
+  {{"id": 2, "name": "Lion", "type": "character", "cells_image1": ["D4", "E5"], "cells_image2": "missing"}}
+]
+
+Output the JSON array only."""
+
+
 # Colorways (UC-6): the artwork's dominant colours are extracted LOCALLY and
 # handed to ChatGPT as data ({colours}); ChatGPT judges which garment colours
 # suit it. Then one mockup turn per chosen garment colour, and (optionally) an
@@ -557,6 +624,12 @@ WORKFLOW_REQUIRED_FIELDS: dict[str, list[tuple[str, str]]] = {
     ],
     "colorway": [
         ("artwork_files", "Upload an artwork file."),
+    ],
+    "similarity": [
+        ("artwork_files", "Upload both images to compare."),
+    ],
+    "objectsim": [
+        ("artwork_files", "Upload both images to compare object by object."),
     ],
     "custom": [
         ("artwork_files", "Upload an artwork file."),

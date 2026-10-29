@@ -1018,6 +1018,14 @@ def _validate_workflow_request(req: "GenerateRequest", created_by: str) -> dict:
             raise HTTPException(status_code=400, detail="Choose how to break the artwork down: by object or by colour group.")
     elif workflow == "custom":
         derived["custom_op_labels"] = _validate_custom_workflow(req, created_by)
+    elif workflow == "similarity":
+        if len([f for f in (req.artwork_files or []) if f]) < 2:
+            raise HTTPException(status_code=400,
+                detail="Upload both images (Original and Generated) to compare.")
+    elif workflow == "objectsim":
+        if len([f for f in (req.artwork_files or []) if f]) < 2:
+            raise HTTPException(status_code=400,
+                detail="Upload both images (Original and Generated) to compare object by object.")
 
     return derived
 
@@ -1100,6 +1108,458 @@ def _precompute_identify_colour(job: dict, artwork_file: str) -> None:
     except Exception as exc:
         print(f"[identify] colour precompute failed: {exc}")
         job["identify_colour_groups"] = []
+
+
+def _precompute_similarity(job: dict) -> None:
+    """Similarity Check: run the instant cv2 comparison on the SERVER and store
+    it on the job as `similarity_cv2`, so the Measured card shows the moment the
+    job opens. The two images are the job's first two artwork_files, already in
+    INPUT_DIR. A failure is NON-fatal (the ChatGPT second opinion can still run)
+    — it is recorded in `similarity_cv2_error`, never raised."""
+    orig = job.get("similarity_original_file") or ""
+    gen = job.get("similarity_generated_file") or ""
+    if not orig or not gen:
+        job["similarity_cv2_error"] = "Two images are required for a comparison."
+        return
+    try:
+        op = INPUT_DIR / Path(orig).name
+        gp = INPUT_DIR / Path(gen).name
+        if not op.exists() or not gp.exists():
+            job["similarity_cv2_error"] = "One or both images were not found on the server."
+            return
+        job["similarity_cv2"] = _compare_two_images(op.read_bytes(), gp.read_bytes())
+    except Exception as exc:
+        print(f"[similarity] precompute failed: {exc}")
+        job["similarity_cv2_error"] = "The measured comparison could not be completed."
+
+
+# ---------------------------------------------------------------------------
+# Object Similarity (objectsim): whole-image compare + per-object compare/QA.
+# ---------------------------------------------------------------------------
+
+# Each object's grid cells are an approximate hint from ChatGPT, so the crop is
+# padded a little around the cell box to avoid clipping the object. Expressed as
+# a fraction of the image's width/height.
+_OBJECTSIM_PAD = 0.03
+# Colour distance (0-441 over RGB) within which a pixel counts as "the flat
+# background" when removing it for a background-insensitive comparison.
+_OBJECTSIM_BG_TOLERANCE = 48
+
+
+def _sample_border_colour(image_bytes: bytes) -> tuple[int, int, int] | None:
+    """Detect the dominant FLAT background colour by sampling the full image's
+    outer edge (a 1px ring plus the four corners). Returns an (r,g,b) tuple or
+    None if the border is not reasonably uniform (so we don't wrongly strip a
+    busy edge). Never raises."""
+    try:
+        from PIL import Image
+        import io as _io
+        import numpy as _np
+        im = Image.open(_io.BytesIO(image_bytes)).convert("RGB")
+        arr = _np.asarray(im)
+        h, w = arr.shape[:2]
+        if h < 3 or w < 3:
+            return None
+        edge = _np.concatenate([
+            arr[0, :, :], arr[h - 1, :, :], arr[:, 0, :], arr[:, w - 1, :],
+        ], axis=0).astype(_np.float32)
+        med = _np.median(edge, axis=0)
+        # Only treat it as a flat background if most edge pixels are near the
+        # median (uniform border). If the edge is busy, bail — nothing removed.
+        dist = _np.sqrt(((edge - med) ** 2).sum(axis=1))
+        near = float((dist <= _OBJECTSIM_BG_TOLERANCE).mean())
+        if near < 0.7:
+            return None
+        return (int(round(med[0])), int(round(med[1])), int(round(med[2])))
+    except Exception as exc:
+        print(f"[objectsim] border-colour sample failed: {exc}")
+        return None
+
+
+def _remove_flat_background(image_bytes: bytes, bg_rgb, tolerance: int = _OBJECTSIM_BG_TOLERANCE) -> bytes:
+    """Make pixels close to `bg_rgb` AND connected to the image edge transparent
+    (a flood-fill from the border, like remove_white_background but for any flat
+    colour). Interior pixels that happen to match the background colour are kept.
+    Returns PNG bytes; on any failure returns the input unchanged (never raises)."""
+    try:
+        from PIL import Image
+        import io as _io
+        import numpy as _np
+        from collections import deque
+        im = Image.open(_io.BytesIO(image_bytes)).convert("RGBA")
+        arr = _np.asarray(im).astype(_np.int16)
+        h, w = arr.shape[:2]
+        # Float math for the distance so 255**2 sums don't overflow int16 -> NaN.
+        rgb = arr[:, :, :3].astype(_np.float32)
+        bg = _np.array(bg_rgb, dtype=_np.float32)
+        dist = _np.sqrt(((rgb - bg) ** 2).sum(axis=2))
+        is_bg = dist <= tolerance            # colour match (before connectivity)
+        visited = _np.zeros((h, w), dtype=bool)
+        out_alpha = arr[:, :, 3].copy()
+        q = deque()
+        # Seed from every border pixel that matches the background colour.
+        for x in range(w):
+            for y in (0, h - 1):
+                if is_bg[y, x] and not visited[y, x]:
+                    visited[y, x] = True; q.append((x, y))
+        for y in range(h):
+            for x in (0, w - 1):
+                if is_bg[y, x] and not visited[y, x]:
+                    visited[y, x] = True; q.append((x, y))
+        while q:
+            cx, cy = q.popleft()
+            out_alpha[cy, cx] = 0
+            for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
+                if 0 <= nx < w and 0 <= ny < h and not visited[ny, nx] and is_bg[ny, nx]:
+                    visited[ny, nx] = True; q.append((nx, ny))
+        out = arr.copy()
+        out[:, :, 3] = out_alpha
+        res = Image.fromarray(out.astype('uint8'), "RGBA")
+        buf = _io.BytesIO(); res.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as exc:
+        print(f"[objectsim] flat-background removal failed: {exc}")
+        return image_bytes
+
+
+def _clean_for_compare(crop_bytes: bytes, bg_rgb) -> bytes:
+    """Return a background-removed copy of a crop for comparison/QA, or the crop
+    unchanged when no flat background colour was detected."""
+    if not bg_rgb:
+        return crop_bytes
+    return _remove_flat_background(crop_bytes, bg_rgb)
+
+
+def _precompute_objectsim(job: dict) -> None:
+    """Object Similarity: run the whole-image cv2 comparison on the SERVER (same
+    as Similarity Check) and store it as `objectsim_cv2`, so the overall card
+    shows the moment the job opens. A failure is NON-fatal — recorded in
+    `objectsim_cv2_error`, never raised. The per-object compare runs later."""
+    orig = job.get("objectsim_original_file") or ""
+    gen = job.get("objectsim_generated_file") or ""
+    if not orig or not gen:
+        job["objectsim_cv2_error"] = "Two images are required for a comparison."
+        return
+    try:
+        op = INPUT_DIR / Path(orig).name
+        gp = INPUT_DIR / Path(gen).name
+        if not op.exists() or not gp.exists():
+            job["objectsim_cv2_error"] = "One or both images were not found on the server."
+            return
+        ob, gb = op.read_bytes(), gp.read_bytes()
+        job["objectsim_cv2"] = _compare_two_images(ob, gb)
+        # Background-insensitive whole-image compare: strip each image's own flat
+        # border background, then compare only the artwork pixels. Stored
+        # separately so the UI can show both; the overview prefers this when a
+        # background was actually removed (so a black-bg vs white-bg pair scores
+        # on the artwork, not the backdrop).
+        try:
+            bg_o = _sample_border_colour(ob)
+            bg_g = _sample_border_colour(gb)
+            if bg_o or bg_g:
+                cleaned = _compare_two_images(_clean_for_compare(ob, bg_o),
+                                              _clean_for_compare(gb, bg_g))
+                job["objectsim_cv2_nobg"] = cleaned
+                job["objectsim_bg_removed"] = True
+        except Exception as exc:
+            print(f"[objectsim] whole-image no-bg compare failed (non-fatal): {exc}")
+    except Exception as exc:
+        print(f"[objectsim] whole-image precompute failed: {exc}")
+        job["objectsim_cv2_error"] = "The measured comparison could not be completed."
+
+
+def _parse_objectsim_json(reply: str) -> list[dict] | None:
+    """Parse ChatGPT's Object Similarity reply into
+    [{id, name, type, cells_image1, cells_image2}], tolerating the usual ways it
+    returns imperfect JSON (code fences, surrounding prose, truncation). `cells_*`
+    is either a list[str] of grid cells or the string "missing". Returns None if
+    nothing usable parses (caller then shows the raw reply and stops cleanly)."""
+    import json as _json
+    import re as _re
+    if not reply or not reply.strip():
+        return None
+    text = reply.strip()
+    if text.startswith("```"):
+        text = _re.sub(r"^```[a-zA-Z0-9]*\s*", "", text)
+        text = _re.sub(r"\s*```$", "", text).strip()
+    if not text.startswith("["):
+        start, end = text.find("["), text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+
+    def _cells(v):
+        """Normalise a cells field to list[str] or the literal 'missing'."""
+        if isinstance(v, str):
+            return "missing" if v.strip().lower() == "missing" else []
+        if isinstance(v, list):
+            return [str(c).strip() for c in v if str(c).strip()]
+        return []
+
+    def _coerce(item, i):
+        if not isinstance(item, dict):
+            return None
+        name = str(item.get("name", "")).strip()
+        if not name:
+            return None
+        try:
+            oid = int(item.get("id", i))
+        except (TypeError, ValueError):
+            oid = i
+        return {
+            "id": oid,
+            "name": name,
+            "type": str(item.get("type", "") or "").strip().lower(),
+            "cells_image1": _cells(item.get("cells_image1", [])),
+            "cells_image2": _cells(item.get("cells_image2", [])),
+        }
+
+    data = None
+    try:
+        data = _json.loads(text)
+    except Exception:
+        data = None
+    if isinstance(data, list):
+        out = [c for i, item in enumerate(data, 1) if (c := _coerce(item, i))]
+        if out:
+            return out
+    # SALVAGE: recover complete {...} blocks from a truncated reply. Object
+    # bodies here contain nested arrays (cells_*), so match a block up to the
+    # first closing brace that is not inside a bracket — simplest robust approach
+    # is to find each "{ ... }" span greedily per line-ish chunk. Fall back to a
+    # balanced scan.
+    salvaged: list[dict] = []
+    depth = 0
+    buf = ""
+    for ch in text:
+        if ch == "{":
+            if depth == 0:
+                buf = ""
+            depth += 1
+        if depth > 0:
+            buf += ch
+        if ch == "}":
+            depth -= 1
+            if depth == 0 and buf:
+                try:
+                    obj = _json.loads(buf)
+                    salvaged.append(obj)
+                except Exception:
+                    pass
+                buf = ""
+    if salvaged:
+        out = [c for i, item in enumerate(salvaged, 1) if (c := _coerce(item, i))]
+        if out:
+            return out
+    return None
+
+
+def _crop_norm_bbox(image_bytes: bytes, bbox: dict, pad: float = _OBJECTSIM_PAD) -> bytes | None:
+    """Crop a NORMALISED (0..1) bbox {x,y,w,h} out of image bytes, with a small
+    padding around it (the grid cells are approximate). Returns PNG bytes, or
+    None if the bbox is unusable. Never raises."""
+    try:
+        from PIL import Image
+        import io as _io
+        im = Image.open(_io.BytesIO(image_bytes)).convert("RGBA")
+        w, h = im.size
+        x0 = max(0.0, bbox["x"] - pad)
+        y0 = max(0.0, bbox["y"] - pad)
+        x1 = min(1.0, bbox["x"] + bbox["w"] + pad)
+        y1 = min(1.0, bbox["y"] + bbox["h"] + pad)
+        px0, py0 = int(round(x0 * w)), int(round(y0 * h))
+        px1, py1 = int(round(x1 * w)), int(round(y1 * h))
+        if px1 <= px0 or py1 <= py0:
+            return None
+        crop = im.crop((px0, py0, px1, py1))
+        buf = _io.BytesIO()
+        crop.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as exc:
+        print(f"[objectsim] crop failed: {exc}")
+        return None
+
+
+def _objectsim_expand_cells(cells) -> list[str]:
+    """Normalise the cell formats ChatGPT actually returns into a flat list of
+    single 'A1' cells. Accepts: lower-case, spaces, and RANGES like 'A1-C3' or
+    'A1:C3' (expanded to every cell in the rectangle). Unknown tokens are kept
+    as-is so the downstream parser can still try them."""
+    import re as _re
+    out = []
+    cols = "ABCDEFGHIJ"
+    for raw in (cells or []):
+        tok = str(raw).strip().upper().replace(" ", "")
+        if not tok:
+            continue
+        m = _re.match(r"^([A-J])(\d{1,2})[-:]([A-J])(\d{1,2})$", tok)
+        if m:
+            c0, r0, c1, r1 = cols.index(m.group(1)), int(m.group(2)), cols.index(m.group(3)), int(m.group(4))
+            if c0 > c1: c0, c1 = c1, c0
+            if r0 > r1: r0, r1 = r1, r0
+            for ci in range(c0, c1 + 1):
+                for ri in range(r0, r1 + 1):
+                    out.append(cols[ci] + str(ri))
+        else:
+            out.append(tok)
+    return out
+
+
+def _objectsim_locate(cells):
+    """Turn ChatGPT's cells into a bbox for cropping, returning (bbox, reason,
+    large_area). Reason explains a None bbox so the UI/log can say WHY instead of
+    a bare 'not locatable'. `large_area` flags a box covering almost the whole
+    image (still compared, just tagged)."""
+    from src.annotate import cells_to_bbox, GRID_N, _parse_cell
+    expanded = _objectsim_expand_cells(cells)
+    valid = [p for p in (_parse_cell(c) for c in expanded) if p is not None]
+    if not expanded:
+        return None, "ChatGPT returned no grid cells for this object", False
+    if not valid:
+        return None, f"could not parse cells {expanded[:6]}", False
+    # Fraction of the grid the cells cover (after range expansion).
+    cols = [c for c, _ in valid]; rows = [r for _, r in valid]
+    col_span = max(cols) - min(cols) + 1
+    row_span = max(rows) - min(rows) + 1
+    area_frac = (col_span * row_span) / float(GRID_N * GRID_N)
+    large = area_frac >= 0.6
+    # Build the bbox directly from the expanded cells (bypassing cells_to_bbox's
+    # own rejection thresholds — we handle "large area" ourselves so a big object
+    # is still compared rather than dropped).
+    x = min(cols) / GRID_N; y = min(rows) / GRID_N
+    w = col_span / GRID_N; h = row_span / GRID_N
+    bbox = {"x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4)}
+    return bbox, ("large area (~%d%% of image)" % round(area_frac * 100)) if large else "", large
+
+
+def _compute_objectsim_objects(job: dict) -> None:
+    """Parse the agent's object JSON (objectsim_detect) and, for each paired
+    object, crop it from BOTH images (grid cells -> padded bbox), remove each
+    image's flat background so only artwork pixels compare, run the same cv2
+    compare and Print Ready QA on the CLEANED crops, and store the per-object
+    results in `objectsim_objects`. The ORIGINAL (uncleaned) crops are saved for
+    display. SERVER-owned (cv2/Pillow live here only).
+
+    Background objects are skipped (compared separately as the whole image).
+    An object present in only one image is marked missing/added. Never raises —
+    a problem is recorded in objectsim_objects_error."""
+    detect = job.get("objectsim_detect") or ""
+    if not detect.strip():
+        return   # nothing to compute yet
+    # Idempotent: if we already computed objects for this exact detect text,
+    # don't redo the work on every 2s agent sync.
+    if job.get("objectsim_objects") is not None and job.get("_objectsim_detect_done") == detect:
+        return
+    orig = job.get("objectsim_original_file") or ""
+    gen = job.get("objectsim_generated_file") or ""
+    try:
+        op = INPUT_DIR / Path(orig).name
+        gp = INPUT_DIR / Path(gen).name
+        if not op.exists() or not gp.exists():
+            job["objectsim_objects_error"] = "One or both images were not found on the server."
+            return
+        orig_bytes = op.read_bytes()
+        gen_bytes = gp.read_bytes()
+    except Exception as exc:
+        job["objectsim_objects_error"] = f"Could not read the images: {exc}"
+        return
+
+    parsed = _parse_objectsim_json(detect)
+    if not parsed:
+        # Parsing failed: leave objects None + record it so the UI shows the raw
+        # reply and stops cleanly. Mark done so we don't retry every sync.
+        job["objectsim_objects_error"] = "Could not parse the object list from ChatGPT."
+        job["_objectsim_detect_done"] = detect
+        return
+
+    # Sample each FULL image's flat border background once; crops are cleaned
+    # against the colour of the image they came from before comparing.
+    bg_o = _sample_border_colour(orig_bytes)
+    bg_g = _sample_border_colour(gen_bytes)
+    job["objectsim_bg_removed"] = bool(bg_o or bg_g)
+
+    results = []
+    for obj in parsed:
+        c1 = obj.get("cells_image1")
+        c2 = obj.get("cells_image2")
+        in1 = c1 != "missing" and bool(c1)
+        in2 = c2 != "missing" and bool(c2)
+        otype = (obj.get("type", "") or "").lower()
+        row = {"id": obj.get("id"), "name": obj.get("name"),
+               "type": otype, "status": "", "similarity": None,
+               "qa_original": None, "qa_generated": None,
+               "crop_note": "approximate object area", "reason": ""}
+        # Background objects are compared separately as the whole image — skip the
+        # per-object crop (cropping "the background" is meaningless).
+        if otype == "background":
+            row["status"] = "skipped"
+            row["reason"] = "background — compared separately as the whole image"
+            results.append(row); continue
+        if in1 and not in2:
+            row["status"] = "missing"      # in original, not in generated
+            results.append(row); continue
+        if in2 and not in1:
+            row["status"] = "added"        # in generated, not in original
+            results.append(row); continue
+        if not in1 and not in2:
+            row["status"] = "absent"       # ChatGPT listed it but located it in neither
+            row["reason"] = "ChatGPT did not place this object in either image"
+            results.append(row); continue
+
+        bb1, reason1, large1 = _objectsim_locate(c1)
+        bb2, reason2, large2 = _objectsim_locate(c2)
+        if not bb1 or not bb2:
+            why = reason1 or reason2 or "cells could not be turned into a box"
+            row["status"] = "unlocatable"
+            row["reason"] = why
+            print(f"[objectsim] object {obj.get('id')} ({obj.get('name')!r}) not locatable: "
+                  f"{why}; cells1={c1!r} cells2={c2!r}")
+            results.append(row); continue
+        if large1 or large2:
+            row["reason"] = reason1 or reason2  # "large area (~NN% of image)"
+
+        # Crops for DISPLAY keep the original background (what the operator sees).
+        crop1 = _crop_norm_bbox(orig_bytes, bb1)
+        crop2 = _crop_norm_bbox(gen_bytes, bb2)
+        if not crop1 or not crop2:
+            row["status"] = "unlocatable"
+            row["reason"] = "the object box fell outside the image"
+            results.append(row); continue
+
+        row["status"] = "paired"
+        # Save the ORIGINAL crops for display. Served via /api/output/<name>.
+        try:
+            oid = obj.get("id") or len(results) + 1
+            orig_name = f"{job['id']}_obj{oid}_orig.png"
+            gen_name = f"{job['id']}_obj{oid}_gen.png"
+            (OUTPUT_DIR / orig_name).write_bytes(crop1)
+            (OUTPUT_DIR / gen_name).write_bytes(crop2)
+            row["crop_original_file"] = orig_name
+            row["crop_generated_file"] = gen_name
+        except Exception as exc:
+            print(f"[objectsim] could not save crops for object {obj.get('id')}: {exc}")
+
+        # SIMILARITY scoring runs on the CLEANED crops (background removed) so a
+        # black-bg vs white-bg pair scores on the artwork, not the backdrop.
+        ccrop1 = _clean_for_compare(crop1, bg_o)
+        ccrop2 = _clean_for_compare(crop2, bg_g)
+        try:
+            row["similarity"] = _compare_two_images(ccrop1, ccrop2)
+        except Exception as exc:
+            row["similarity_error"] = str(exc)
+        # QA runs on the ORIGINAL crops (the artwork as the client gave it). Our
+        # background removal leaves an anti-aliased edge that the Halo /
+        # semi-transparent checks wrongly flagged as a fringe; QA is about the
+        # supplied artwork, not our comparison copy.
+        row["qa_original"] = _qa_measure_bytes(crop1)
+        row["qa_generated"] = _qa_measure_bytes(crop2)
+        results.append(row)
+
+    job["objectsim_objects"] = results
+    job["objectsim_objects_error"] = ""
+    job["_objectsim_detect_done"] = detect
+    n_paired = sum(1 for r in results if r["status"] == "paired")
+    print(f"[objectsim] computed {len(results)} object(s) from detect JSON "
+          f"({n_paired} paired; background_removed={job['objectsim_bg_removed']}).")
 
 
 def _precompute_printready(job: dict, artwork_file: str) -> None:
@@ -1477,6 +1937,26 @@ def create_job(req: GenerateRequest, request: Request):
         "geometry_black_elements_policy": req.black_elements_policy.strip(),
         "geometry_semi_transparency_allowed": req.semi_transparency_allowed.strip(),
         "geometry_distress_policy": req.distress_policy.strip(),
+        # Similarity Check: the two images to compare and the two independent
+        # results. similarity_cv2 is filled by the SERVER precompute (instant,
+        # cv2); similarity_review is the agent's ChatGPT second-opinion text
+        # (empty until the agent runs, or stays empty if no ChatGPT was asked).
+        "similarity_original_file": (req.artwork_files[0] if len(req.artwork_files) > 0 else ""),
+        "similarity_generated_file": (req.artwork_files[1] if len(req.artwork_files) > 1 else ""),
+        "similarity_cv2": None, "similarity_cv2_error": "",
+        "similarity_review": "", "similarity_review_error": "",
+        # Object Similarity: same two images as Similarity Check, but compared
+        # object by object. objectsim_cv2 is the SERVER whole-image compare
+        # (precomputed, like similarity_cv2). objectsim_detect is the agent's
+        # raw ChatGPT JSON (objects + grid cells per image); objectsim_objects is
+        # the SERVER's per-object crop+cv2+QA result, computed when the detect
+        # JSON arrives. Both server fields are SERVER-owned (never agent-echoed).
+        "objectsim_original_file": (req.artwork_files[0] if len(req.artwork_files) > 0 else ""),
+        "objectsim_generated_file": (req.artwork_files[1] if len(req.artwork_files) > 1 else ""),
+        "objectsim_cv2": None, "objectsim_cv2_error": "",
+        "objectsim_cv2_nobg": None, "objectsim_bg_removed": False,
+        "objectsim_detect": "", "objectsim_detect_error": "",
+        "objectsim_objects": None, "objectsim_objects_error": "",
         "aspect_dpi": req.aspect_dpi, "aspect_info": None, "aspect_recommendations": "",
         "aspect_target": None, "aspect_method": "pad", "aspect_similarity": None,
         "aspect_original_file": "", "aspect_original_features": None,
@@ -1521,6 +2001,18 @@ def create_job(req: GenerateRequest, request: Request):
         if _geo_err and jobs[job_id].get("geometry_before") is None:
             del jobs[job_id]
             raise HTTPException(status_code=400, detail=_geo_err)
+    # Similarity Check: run the instant cv2 comparison on the SERVER now so the
+    # Measured card is on the job the moment it opens; the ChatGPT second opinion
+    # (if requested) is the agent's one text turn. A cv2 failure is NON-fatal —
+    # the ChatGPT review can still run — so it is recorded, not raised.
+    if req.workflow == "similarity":
+        _precompute_similarity(jobs[job_id])
+    # Object Similarity: compute the whole-image cv2 compare NOW (same as
+    # Similarity Check) so the overall card shows the moment the job opens. The
+    # per-object crops/compare/QA run later, when the agent's object JSON
+    # arrives. A whole-image cv2 failure is NON-fatal (recorded, not raised).
+    if req.workflow == "objectsim":
+        _precompute_objectsim(jobs[job_id])
 
     # All server-side precompute finished successfully. ONLY NOW make the job
     # claimable: flip "preparing" -> "queued" so the agent's next-job poll can
@@ -2831,6 +3323,13 @@ _SERVER_OWNED_FIELDS = {
     "awaiting_input", "paused_at",
     # Prompt Management bookkeeping is decided by the server.
     "managed_prompts", "prompt_meta", "prompt_edited",
+    # Object Similarity: the whole-image cv2 compare and the per-object
+    # crop+cv2+QA results are computed by the SERVER (cv2/Pillow live here only).
+    # The agent only produces objectsim_detect (the object JSON), so these must
+    # never be overwritten by an agent echo.
+    "objectsim_cv2", "objectsim_cv2_error",
+    "objectsim_cv2_nobg", "objectsim_bg_removed",
+    "objectsim_objects", "objectsim_objects_error",
 }
 
 # Terminal statuses the agent IS allowed to set.
@@ -3157,6 +3656,11 @@ def agent_progress(job_id: str, req: AgentProgressRequest, request: Request):
         posted_status = posted.pop("status", None)
         _merge_agent_job(job, posted)
         _recompute_aspect_similarity(job)
+        # Object Similarity: when the agent's object JSON (objectsim_detect)
+        # arrives, compute the per-object crops/compare/QA on the SERVER (cv2 is
+        # server-only). Idempotent — it only does the work once per detect text.
+        if job.get("workflow") == "objectsim":
+            _compute_objectsim_objects(job)
         if posted_status is not None:
             _merge_agent_job(job, {"status": posted_status})
     # Console output + non-fatal warnings from the agent, so the UI can show
@@ -4053,6 +4557,118 @@ def printshop_save_wrk(req: PrintshopSaveRequest):
 # file that lands while the operator is mid-job is already in the feed when
 # they switch to it.
 nc_watcher.start()
+
+
+# ---------------------------------------------------------------------------
+# Similarity Check — a standalone operator tool: upload two images and get the
+# same similarity breakdown the Aspect Ratio workflow shows. Runs ENTIRELY on
+# the server (cv2 is server-only); no ChatGPT, no agent, no job queue — so it
+# works even when no agent is connected. Declared BEFORE app.mount() so the
+# static mount cannot shadow it. Login is enforced by AuthMiddleware (any other
+# /api/* path already requires a valid cookie).
+# ---------------------------------------------------------------------------
+_SIM_MAX_BYTES = 25 * 1024 * 1024   # 25 MB per image
+
+
+def _compare_two_images(orig_bytes: bytes, gen_bytes: bytes) -> dict:
+    """Core cv2 comparison shared by the instant endpoint and the job precompute.
+
+    Pads the ORIGINAL to the GENERATED image's ratio (like-for-like) when the
+    ratios differ, then runs src.compare.similarity. Returns the result dict:
+    {similarity, padded, padding_note, original_dims, generated_dims}. Raises
+    ValueError with a clean message on any decode/compare failure so callers can
+    turn it into a 400/503 or a stored error — never a raw 500."""
+    from src.compare import similarity
+    from src.aspect import fit_to_ratio
+
+    ow, oh = _png_size(orig_bytes)
+    gw, gh = _png_size(gen_bytes)
+    if not (ow and oh):
+        raise ValueError("Original: could not read this image.")
+    if not (gw and gh):
+        raise ValueError("Generated: could not read this image.")
+
+    padded = False
+    compare_orig = orig_bytes
+    if abs((ow / oh) - (gw / gh)) > 1e-3:
+        try:
+            compare_orig = fit_to_ratio(orig_bytes, gw, gh)
+            padded = True
+        except Exception as exc:
+            print(f"[similarity] padding failed, comparing as-is: {exc}")
+            compare_orig, padded = orig_bytes, False
+
+    try:
+        sim = similarity(compare_orig, gen_bytes)
+    except Exception as exc:
+        raise ValueError(f"comparison failed: {exc}")
+
+    return {
+        "similarity": sim,
+        "padded": padded,
+        "padding_note": ("Original padded to the generated image's ratio for comparison."
+                         if padded else ""),
+        "original_dims": {"w": ow, "h": oh},
+        "generated_dims": {"w": gw, "h": gh},
+    }
+
+
+def _qa_measure_bytes(image_bytes: bytes) -> dict:
+    """Run the SAME Print Ready QA measurement used by the Print Ready QA
+    workflow on one image's bytes. Returns the measure_print_ready() report dict
+    ({checks, score, band, summary, measurements}) on success, or
+    {"error": "<reason>"} on any failure. NEVER raises — a QA problem on one
+    image must not break the cv2 or ChatGPT results."""
+    try:
+        from src.printready import measure_print_ready
+        return measure_print_ready(image_bytes, file_size_bytes=len(image_bytes))
+    except Exception as exc:
+        print(f"[similarity-check] QA measurement failed: {exc}")
+        return {"error": f"QA measurement failed: {exc}"}
+
+
+@app.post("/api/similarity-check")
+async def similarity_check(original: UploadFile = File(...),
+                           generated: UploadFile = File(...)):
+    """Instant cv2 comparison of two uploaded images (no agent, no ChatGPT).
+
+    Returns src.compare.similarity()'s dict plus the padding note and dims, AND
+    a QA block (qa_original / qa_generated) holding the same Print Ready QA
+    measurements run on each image. Every failure returns a clean JSON error —
+    never a raw 500."""
+    def _read_valid(f: UploadFile, label: str) -> bytes:
+        ext = Path(f.filename).suffix.lower() if f.filename else ""
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(status_code=400,
+                detail=f"{label}: only .png .jpg .jpeg .webp images are accepted.")
+        data = f.file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail=f"{label}: the file is empty.")
+        if len(data) > _SIM_MAX_BYTES:
+            raise HTTPException(status_code=400,
+                detail=f"{label}: image is larger than 25 MB.")
+        return data
+
+    orig_bytes = _read_valid(original, "Original")
+    gen_bytes = _read_valid(generated, "Generated")
+    # QA measurements are independent of the cv2 compare: run them first so they
+    # can be attached whether or not the compare succeeds. Each is a report dict
+    # or {"error": ...}; neither can break the other result.
+    qa_original = _qa_measure_bytes(orig_bytes)
+    qa_generated = _qa_measure_bytes(gen_bytes)
+    try:
+        result = _compare_two_images(orig_bytes, gen_bytes)
+        result["qa_original"] = qa_original
+        result["qa_generated"] = qa_generated
+        return result
+    except ValueError as exc:
+        msg = str(exc)
+        # Decode problems are the operator's input (400); a cv2/compare failure
+        # is a transient server issue (503). Never a raw 500.
+        code = 400 if "could not read" in msg else 503
+        detail = msg if code == 400 else "The comparison could not be completed. Please try again."
+        print(f"[similarity-check] {msg}")
+        raise HTTPException(status_code=code, detail=detail)
 
 
 app.mount("/input", StaticFiles(directory="input"), name="input")
