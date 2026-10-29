@@ -1538,16 +1538,20 @@ def _compute_objectsim_objects(job: dict) -> None:
         except Exception as exc:
             print(f"[objectsim] could not save crops for object {obj.get('id')}: {exc}")
 
-        # Compare + QA run on the CLEANED crops (background removed) so a black-bg
-        # vs white-bg pair scores on the artwork, not the backdrop.
+        # SIMILARITY scoring runs on the CLEANED crops (background removed) so a
+        # black-bg vs white-bg pair scores on the artwork, not the backdrop.
         ccrop1 = _clean_for_compare(crop1, bg_o)
         ccrop2 = _clean_for_compare(crop2, bg_g)
         try:
             row["similarity"] = _compare_two_images(ccrop1, ccrop2)
         except Exception as exc:
             row["similarity_error"] = str(exc)
-        row["qa_original"] = _qa_measure_bytes(ccrop1)
-        row["qa_generated"] = _qa_measure_bytes(ccrop2)
+        # QA runs on the ORIGINAL crops (the artwork as the client gave it). Our
+        # background removal leaves an anti-aliased edge that the Halo /
+        # semi-transparent checks wrongly flagged as a fringe; QA is about the
+        # supplied artwork, not our comparison copy.
+        row["qa_original"] = _qa_measure_bytes(crop1)
+        row["qa_generated"] = _qa_measure_bytes(crop2)
         results.append(row)
 
     job["objectsim_objects"] = results

@@ -3839,7 +3839,7 @@ function renderObjectSimCombined(job){
   html+=chip("added",nAdded,nAdded?"#d97706":"#6b7280");
   html+='</div>';
   if(cv2&&cv2.padding_note)html+='<div style="font-size:.72rem;color:var(--muted);margin-bottom:2px">\u2139 '+esc(cv2.padding_note)+'</div>';
-  if(bgRemoved)html+='<div style="font-size:.72rem;color:var(--muted);margin-bottom:2px">\u2139 Background ignored for comparison (each image\u2019s flat background was removed before scoring and QA; the crops shown keep their original background).</div>';
+  if(bgRemoved)html+='<div style="font-size:.72rem;color:var(--muted);margin-bottom:2px">\u2139 Background ignored for comparison (each image\u2019s flat background was removed before similarity scoring). QA runs on the original artwork as supplied; the crops shown keep their original background.</div>';
   html+='<div style="font-size:.72rem;color:var(--muted);margin-bottom:12px">\u2139 Object areas are approximate (from ChatGPT grid cells). Click a row for the full comparison.</div>';
   // --- Filter buttons ---
   function fbtn(key,label){var on=osFilter===key;return '<button onclick="osSetFilter(\''+key+'\')" style="font-size:.74rem;font-weight:600;padding:5px 12px;border:1px solid '+(on?"var(--accent)":"var(--border)")+';border-radius:8px;background:'+(on?"#eff6ff":"var(--surface)")+';color:'+(on?"var(--accent)":"var(--text)")+';cursor:pointer;margin-right:6px">'+label+'</button>'}
@@ -3925,7 +3925,7 @@ function _osDetailPanel(o){
   h+='</div>';
   h+='<div style="font-size:.7rem;color:var(--muted);margin-bottom:6px">\u2139 '+esc(o.crop_note||"approximate object area")
     +(o.reason?' \u00b7 '+esc(o.reason):'')
-    +'. Scoring and QA ran on the background-removed artwork; the crops above keep their original background.</div>';
+    +'. Similarity scored the background-removed artwork; QA below ran on the original crops (the artwork as supplied).</div>';
   if(o.similarity&&o.similarity.similarity){
     h+=_renderSimilarity(o.similarity.similarity,"This object, original vs generated (background ignored)");
   }else if(o.similarity_error){
