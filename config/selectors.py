@@ -64,11 +64,28 @@ STOP_BUTTON   = ("button[aria-label='Stop'], "
 # working (reasoning in progress). While ANY of them is visible the turn is NOT
 # done. Matched broadly (visible text + common aria/class fragments) since the
 # exact markup is not pinned; a miss is harmless (we fall back to reading).
-THINKING_INDICATOR = ("button[aria-label*='reasoning' i], "
-                      "[data-testid*='thinking'], "
-                      "[class*='thinking' i], "
-                      "[class*='reasoning' i], "
-                      "[aria-label*='Thinking' i]")
+# IMPORTANT: scope to the CONVERSATION THREAD only, never the composer. The
+# composer has a PERMANENT model-picker button (aria-label='Select ChatGPT
+# model', text 'Thinking effort\nMedium') and a bare [class*='thinking'] /
+# [aria-label*='Thinking'] match hit it, so the turn-complete wait thought the
+# model was reasoning forever. These selectors therefore target reasoning-stream
+# markers inside <main> only; _is_thinking() further excludes the composer form
+# and the model picker, and ignores the model-picker's text.
+THINKING_INDICATOR = ("main [data-testid*='thinking'], "
+                      "main [data-testid*='reasoning'], "
+                      "main [class*='result-thinking' i], "
+                      "main [class*='reasoning-chunk' i]")
+# Buttons that are PERMANENT composer chrome and must never be read as a
+# "thinking" signal (the model picker carries the word "Thinking").
+MODEL_PICKER_BUTTON = "button[aria-label='Select ChatGPT model'], button[aria-label*='model' i]"
+# The composer form/root — used to exclude composer chrome from thread scans.
+COMPOSER_ROOT = "form, div[contenteditable='true'][role='textbox']"
+# While a file is still uploading, the composer shows a button with this
+# aria-label and Send is a no-op — submitting then starts no turn. Wait until
+# this is gone before sending.
+UPLOAD_PENDING_BUTTON = ("button[aria-label='File upload pending'], "
+                         "button[aria-label*='upload pending' i], "
+                         "button[aria-label*='uploading' i]")
 # Chat URL shapes seen live. The 2026 local build uses /c/local-chatgpt%3A<uuid>
 # (the %3A is an encoded ':'), alongside the classic /c/<uuid> and project
 # /g/g-p-.../project. Kept here for reference; open_chat matches on /c/ broadly.

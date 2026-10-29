@@ -912,7 +912,21 @@ function render(job){
     }
   }else if(job.status==="failed"||job.status==="cancelled"){
     clr();var msg=job.status==="cancelled"?"Job cancelled.":"Something went wrong: "+(job.error||"Unknown error");
-    statusArea.innerHTML='<div class="status-box failed">'+esc(msg)+'</div>';resultArea.innerHTML="";clearActiveJob();updBtn();addHist(job);
+    statusArea.innerHTML='<div class="status-box failed">'+esc(msg)+'</div>';
+    // Similarity Check and Object Similarity own the full-width #resultArea
+    // (the uploads strip lives inside it). Blanking it would leave the page with
+    // no upload boxes, so REBUILD the page instead and show the failure in the
+    // results area — the strip must always render, whatever the job state.
+    if(currentWorkflow==="objectsim"){
+      window._osJob=null;renderObjectSimPage();
+      if($("osResults"))$("osResults").innerHTML='<div class="status-box failed" style="margin-top:12px">'+esc(msg)+'</div>';
+    }else if(currentWorkflow==="similarity"){
+      window._simReviewJob=null;renderSimilarityPage();
+      if($("simResults"))$("simResults").innerHTML='<div class="status-box failed" style="margin-top:12px">'+esc(msg)+'</div>';
+    }else{
+      resultArea.innerHTML="";
+    }
+    clearActiveJob();updBtn();addHist(job);
   }
   lastStatus=job.status;lastStage=job.stage;lastImgKey=imgKey;
   }catch(e){console.error("[render] error:",e);resultArea.innerHTML='<div class="status-box failed">UI rendering error: '+esc(e.message)+'</div>'}

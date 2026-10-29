@@ -35,6 +35,8 @@ from config.selectors import (
     STOP_BUTTON,
     STOP_BUTTON_LABELS,
     THINKING_INDICATOR,
+    MODEL_PICKER_BUTTON,
+    UPLOAD_PENDING_BUTTON,
     TURN_ACTION_CONTROLS,
 )
 from src.browser import GenerationTimeoutError, RateLimitError
@@ -932,38 +934,100 @@ def _count_dil_renderers(page: Page) -> int:
         return 0
 
 
-def _is_thinking(page: Page) -> bool:
-    """True if a 'Thinking'/'Reasoning' model is still working — a reasoning
-    phase shows no Stop button, so without this the turn-complete wait would end
-    early and read 0 chars. Matches THINKING_INDICATOR (visible only). A visible
-    'Thinking…' / 'Reasoning' text node in <main> also counts. Never raises."""
+def _thread_signature(page: Page) -> str:
+    """A cheap fingerprint of the conversation thread's current content, used to
+    tell whether anything NEW has appeared. Changes when a reply container is
+    added or its text grows. Never raises."""
     try:
-        el = page.query_selector(THINKING_INDICATOR)
-        if el is not None and el.is_visible():
-            return True
-    except Exception:
-        pass
-    # Text probe: ChatGPT shows a live "Thinking…" / "Reasoning" / "Worked for Ns"
-    # label while reasoning. Look for it as a short standalone status line.
-    try:
-        return bool(page.evaluate(
+        return str(page.evaluate(
             r"""() => {
                 const main = document.querySelector('main');
-                if (!main) return false;
-                const re = /^(thinking|reasoning|thought for|reasoned)\b/i;
-                const els = main.querySelectorAll('span,div,p,button');
-                for (const el of els) {
-                    const t = (el.innerText || '').trim();
-                    if (t && t.length < 40 && re.test(t)) {
-                        const r = el.getBoundingClientRect();
-                        if (r.width > 0 && r.height > 0) return true;
-                    }
-                }
-                return false;
+                if (!main) return '0';
+                const dil = main.querySelectorAll("[class*='DilRenderer']");
+                let lastLen = 0;
+                if (dil.length) lastLen = (dil[dil.length-1].innerText || '').length;
+                return dil.length + ':' + lastLen;
             }"""
         ))
     except Exception:
+        return ""
+
+
+_THINKING_MATCH_LOGGED = False
+
+
+def _is_thinking(page: Page) -> bool:
+    """True if a 'Thinking'/'Reasoning' model is still working in the CONVERSATION
+    THREAD — a reasoning phase shows no Stop button, so without this the
+    turn-complete wait would end early and read 0 chars.
+
+    STRICTLY SCOPED to the latest assistant turn / main thread. It NEVER counts:
+      * anything inside the composer form or the contenteditable,
+      * the model picker button (aria-label 'Select ChatGPT model', whose text
+        is the permanent 'Thinking effort\\nMedium' — the earlier false positive),
+      * any element whose text looks like the model-picker label.
+    The first time it matches, logs the element's tag / aria-label / text[:80] so
+    a future false positive is diagnosable. Never raises."""
+    global _THINKING_MATCH_LOGGED
+    try:
+        info = page.evaluate(
+            r"""(sel) => {
+                const main = document.querySelector('main');
+                if (!main) return null;
+                const form = main.querySelector('form');
+                const editable = main.querySelector("div[contenteditable='true'][role='textbox']");
+                const inComposer = (el) => (form && form.contains(el)) ||
+                                            (editable && editable.contains(el));
+                // Reject the model picker and any element carrying its label.
+                const isModelPicker = (el) => {
+                    let n = el;
+                    for (let d = 0; n && d < 4; d++, n = n.parentElement) {
+                        const al = (n.getAttribute && n.getAttribute('aria-label')) || '';
+                        if (/select chatgpt model/i.test(al) || /\bmodel\b/i.test(al)) return true;
+                    }
+                    return false;
+                };
+                const seen = (el) => {
+                    if (!el || inComposer(el) || isModelPicker(el)) return null;
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return null;
+                    return {tag: el.tagName,
+                            al: (el.getAttribute && el.getAttribute('aria-label')) || '',
+                            text: (el.innerText || '').trim().slice(0, 80)};
+                };
+                // 1) The scoped structural indicator selector.
+                for (const el of main.querySelectorAll(sel)) {
+                    const m = seen(el);
+                    if (m) return m;
+                }
+                // 2) A live reasoning STATUS line in the thread: a short standalone
+                //    label starting with thinking/reasoning/thought for. The
+                //    model-picker text 'Thinking effort Medium' is excluded both
+                //    by isModelPicker and by requiring the word boundary not be
+                //    followed by 'effort'.
+                const re = /^(thinking|reasoning|thought for|reasoned)\b/i;
+                for (const el of main.querySelectorAll('span,div,p')) {
+                    if (inComposer(el) || isModelPicker(el)) continue;
+                    const t = (el.innerText || '').trim();
+                    if (!t || t.length >= 40) continue;
+                    if (/thinking effort/i.test(t)) continue;   // the model picker
+                    if (!re.test(t)) continue;
+                    const m = seen(el);
+                    if (m) return m;
+                }
+                return null;
+            }""",
+            THINKING_INDICATOR,
+        )
+    except Exception:
         return False
+    if not info:
+        return False
+    if not _THINKING_MATCH_LOGGED:
+        _THINKING_MATCH_LOGGED = True
+        logger.info("[thinking] indicator matched: <%s> aria-label=%r text=%r (selector=%r)",
+                    info.get("tag"), info.get("al"), info.get("text"), THINKING_INDICATOR)
+    return True
 
 
 def _read_reply_via_dil(page: Page, sent_prompt: str | None,
@@ -1875,13 +1939,33 @@ def _wait_for_turn_complete(page: Page, quiet_ms: int = 5000, timeout: int = 900
     streamed = False       # has the button been sustained-present (turn ran)?
     turn_over = False       # text_only: latched once it detaches after streaming
     poll = 0
+    # Stale-thinking guard: a Thinking model keeps _is_thinking() true during its
+    # reasoning phase, but if the thread stops changing AND there is no stop
+    # button for THINKING_STALE_S, the reasoning is done (or the indicator is a
+    # false positive) — stop treating it as active so the reply can be read.
+    THINKING_STALE_S = 60.0
+    thread_sig = _thread_signature(page)
+    thread_changed_at = time.monotonic()
     while time.monotonic() < deadline:
-        # The turn is "active" if the Stop button is up OR a Thinking/Reasoning
-        # model is still in its reasoning phase (no Stop button shown then). Both
-        # count as still-generating so the quiet window does not start early.
-        raw_present = (page.query_selector(STOP_BUTTON) is not None) or _is_thinking(page)
-        poll += 1
         now = time.monotonic()
+        # Track thread progress: reset the stale timer whenever new content lands.
+        cur_sig = _thread_signature(page)
+        if cur_sig != thread_sig:
+            thread_sig = cur_sig
+            thread_changed_at = now
+        stop_present = page.query_selector(STOP_BUTTON) is not None
+        thinking = _is_thinking(page)
+        # The turn is "active" if the Stop button is up, OR a Thinking/Reasoning
+        # model is still reasoning — BUT thinking is only honoured while the
+        # thread is still progressing: once nothing new for THINKING_STALE_S and
+        # no stop button, a lingering/false 'thinking' no longer holds the turn.
+        thinking_active = thinking and (now - thread_changed_at) < THINKING_STALE_S
+        if thinking and not thinking_active and not stop_present:
+            logger.info("[turn-wait %s] thinking indicator still on but thread idle "
+                        "for %.0fs and no stop button — treating turn as finished.",
+                        label, now - thread_changed_at)
+        raw_present = stop_present or thinking_active
+        poll += 1
 
         if raw_present:
             present_streak += 1
@@ -2100,6 +2184,32 @@ def _submission_confirmed(page: Page, before_len: int) -> bool:
     return False
 
 
+def _wait_no_upload_pending(page: Page, run_id: str = "submit", timeout_s: float = 90.0) -> None:
+    """Block until no 'File upload pending' button exists (or timeout). Sending
+    while this is present starts no turn. Logs while it waits. Never raises."""
+    t0 = time.monotonic()
+    last_log = 0.0
+    while time.monotonic() - t0 < timeout_s:
+        try:
+            pending = page.query_selector(UPLOAD_PENDING_BUTTON)
+        except Exception:
+            pending = None
+        if pending is None:
+            if last_log:   # only note clearance if we actually waited
+                logger.info("[submit %s] upload pending cleared after %.0fs.", run_id, time.monotonic() - t0)
+            return
+        now = time.monotonic()
+        if now - last_log >= 5.0:
+            logger.info("[submit %s] waiting to send — 'File upload pending' still present (%.0fs).",
+                        run_id, now - t0)
+            last_log = now
+        page.wait_for_timeout(500)
+    logger.warning("[submit %s] 'File upload pending' still present after %.0fs — sending anyway.",
+                   run_id, timeout_s)
+    _diag_event("upload_issue", "Upload still pending at send time",
+                step=run_id, detail=f"waited {timeout_s:.0f}s")
+
+
 def _submit_prompt(page: Page, run_id: str = "submit") -> bool:
     """Submit the prompt already typed into the composer, resiliently.
 
@@ -2118,6 +2228,11 @@ def _submit_prompt(page: Page, run_id: str = "submit") -> bool:
     Logs which path was taken and whether submission was confirmed. Returns True
     iff submission was confirmed.
     """
+    # GATE: never submit while a file upload is still pending — Send is a no-op
+    # then and the turn never starts (confirmed live). Wait up to 90s for the
+    # 'File upload pending' button to disappear.
+    _wait_no_upload_pending(page, run_id=run_id, timeout_s=90.0)
+
     before_len = len(_composer_text(page))
 
     # --- Path 1: Enter (ProseMirror native submit) ---
