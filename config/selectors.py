@@ -58,6 +58,22 @@ STOP_BUTTON   = ("button[aria-label='Stop'], "
                  "button[aria-label='Stop generating'], "
                  "[data-testid='stop-button']")
 
+# "Thinking" / "Reasoning" models stream their answer only AFTER a reasoning
+# phase during which NO stop button is shown — so the turn-complete wait used to
+# end early and read 0 chars. These selectors mark that the model is still
+# working (reasoning in progress). While ANY of them is visible the turn is NOT
+# done. Matched broadly (visible text + common aria/class fragments) since the
+# exact markup is not pinned; a miss is harmless (we fall back to reading).
+THINKING_INDICATOR = ("button[aria-label*='reasoning' i], "
+                      "[data-testid*='thinking'], "
+                      "[class*='thinking' i], "
+                      "[class*='reasoning' i], "
+                      "[aria-label*='Thinking' i]")
+# Chat URL shapes seen live. The 2026 local build uses /c/local-chatgpt%3A<uuid>
+# (the %3A is an encoded ':'), alongside the classic /c/<uuid> and project
+# /g/g-p-.../project. Kept here for reference; open_chat matches on /c/ broadly.
+CHAT_URL_FRAGMENTS = ("/c/", "local-chatgpt")
+
 IMAGE_LOADER  = "[data-testid='image-gen-loading-state']"   # not queried in code (docstring ref only)
 IMAGE_OVERLAY = "[data-testid='image-gen-overlay-actions']"   # defined but currently unused
 NEW_CHAT      = "[data-testid='create-new-chat-button']"      # defined but currently unused
@@ -134,7 +150,15 @@ UPLOAD_LABELS = ("Add files and more", "Add photos & files", "Attach files", "Up
 # read back as 0 chars. The remaining selectors target the real turn container.
 CONVERSATION_TURN = ("[data-testid^='conversation-turn-'], "
                      "main [class*='conversation-turn'], "
-                     "main article[class*='turn']")
+                     "main article[class*='turn'], "
+                     # 2026 layout (chat URL /c/local-chatgpt%3A<uuid>): the old
+                     # turn classes/testids all vanished. Broaden to any <article>
+                     # in <main> (ChatGPT wraps each turn in an <article>), and to
+                     # a data-turn attribute if it returns. Scoped to main so
+                     # composer/sidebar chrome is excluded.
+                     "main article, "
+                     "main [data-turn], "
+                     "main [data-message-author-role]")
 
 # The per-reply action bar (Copy / read-aloud / like / dislike). ChatGPT renders
 # it once per assistant turn with a class fragment "turn-action-controls". It is
@@ -150,6 +174,8 @@ TURN_ACTION_CONTROLS = ("[class*='turn-action-controls'], "
 # ```json blocks intact), which is exactly what the identify/box JSON parsers
 # want — far more robust than scraping rendered innerText.
 COPY_BUTTON = ("button[aria-label='Copy'], "
+               "button[aria-label='Copy message'], "
+               "button[aria-label*='Copy'], "
                "button[data-testid='copy-turn-action-button']")
 
 # The ASSISTANT message body specifically (not the whole user+assistant turn).
@@ -160,8 +186,14 @@ COPY_BUTTON = ("button[aria-label='Copy'], "
 # for the diagnostics dump and the last-ditch innerText path. Match, in order:
 #   1. the rendered-markdown container inside main (the assistant answer body,
 #      including <pre>/<code> blocks), scoped to main so composer/sidebar excluded.
-ASSISTANT_MESSAGE = ("main [class*='markdown'], "
-                     "main [class*='prose']")
+ASSISTANT_MESSAGE = ("main [data-message-author-role='assistant'] [class*='markdown'], "
+                     "main [data-message-author-role='assistant'], "
+                     "main [class*='markdown'], "
+                     "main [class*='prose'], "
+                     # 2026 layout fallback: the assistant body is the rendered
+                     # markdown; if the class churns, an <article>'s last
+                     # substantive block is picked up by the DOM reader instead.
+                     "main article [class*='markdown']")
 
 # The rendered reply container. Live inspection showed the assistant reply text
 # sits in  P.TextBase-<hash> < DIV.DilRenderer-<hash>.  The class names are
