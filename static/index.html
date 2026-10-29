@@ -782,7 +782,27 @@ window.confirmLogin=function(){
   });
 };
 
-function pollJob(id){stepStart=Date.now();clr();elapsedTimer=setInterval(updElapsed,1000);pollingTimer=setInterval(function(){fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(render)},2000);fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(render)}
+// TURN-TIMING phase f: log (to the browser console) the moment the UI poll
+// FIRST sees a new result image for the active job, relative to when polling
+// started — the last hop of the a->f table. One line per new image name.
+var _ttSeenImgs={};
+function _ttRenderTiming(job){
+  try{
+    if(!job||!_ttPollStart)return;
+    var names=[].concat(job.images||[]);
+    var si=job.stage_images||{};
+    Object.keys(si).forEach(function(k){ if(si[k]) names.push(si[k]); });
+    names.forEach(function(n){
+      if(n&&!_ttSeenImgs[n]){
+        _ttSeenImgs[n]=1;
+        console.log("TURN-TIMING run="+job.id+" kind=web phase=f_shown image="+n+
+                    " t=+"+((Date.now()-_ttPollStart)/1000).toFixed(2)+"s");
+      }
+    });
+  }catch(e){}
+}
+var _ttPollStart=0;
+function pollJob(id){stepStart=Date.now();_ttPollStart=Date.now();_ttSeenImgs={};clr();elapsedTimer=setInterval(updElapsed,1000);pollingTimer=setInterval(function(){fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(function(j){_ttRenderTiming(j);render(j)})},2000);fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(function(j){_ttRenderTiming(j);render(j)})}
 function clr(){if(pollingTimer)clearInterval(pollingTimer);if(elapsedTimer)clearInterval(elapsedTimer);pollingTimer=elapsedTimer=null}
 function updElapsed(){var el=$("stepEl");if(el&&stepStart)el.textContent=fmt(Math.round((Date.now()-stepStart)/1000))}
 

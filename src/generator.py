@@ -334,6 +334,12 @@ def send_text_turn(
     def _ts(msg: str) -> None:
         logger.info("[text-turn %s] %s  t=+%.1fs", run_id, msg, time.monotonic() - t0)
 
+    # Machine-parseable per-phase timing, RELATIVE TO SUBMIT (t0 is just before
+    # submit for a text turn), so a live run yields the a->f table.
+    def _tt(phase: str, extra: str = "") -> None:
+        logger.info("TURN-TIMING run=%s kind=text phase=%s t=+%.2fs%s",
+                    run_id, phase, time.monotonic() - t0, (" " + extra) if extra else "")
+
     try:
         # Upload files if given
         if image_paths:
@@ -389,12 +395,18 @@ def send_text_turn(
         # before the answer streams, and _is_thinking keeps the turn "active"
         # throughout, so the old 120s could trip during a long reasoning phase.
         _wait_for_turn_complete(page, quiet_ms=1500, timeout=300_000, label=f"text-turn {run_id}", on_phase=_ts, text_only=True)
+        # a_finished + b_detected: for a text turn, ChatGPT finishing == the stop
+        # button gone + quiet period done (that is what _wait_for_turn_complete
+        # returns on). Reading the reply is the very next step.
+        _tt("a_finished", "stop gone + quiet elapsed")
+        _tt("b_detected")
 
         # Return the text reply. Pass the sent prompt so the reader can reject a
         # read that came back equal to it (i.e. the user turn, not the reply), and
         # the prior DilRenderer count so it only accepts a NEW reply container.
         reply = (get_last_text_reply(page, sent_prompt=prompt, prior_dil_count=prior_dil) or "").strip()
         _ts(f"reply read ({len(reply)} chars)")
+        _tt("c_read", f"{len(reply)} chars")
         # EMPTY REPLY = ERROR. An empty read means the page layout changed or the
         # turn was not actually finished — storing "" silently gave the UI empty
         # results with no error. Retry the read ONCE (give the reply a moment to
@@ -482,6 +494,13 @@ def send_turn(
         def _ts(msg: str) -> None:
             logger.info("[image-turn %s] %s  t=+%.1fs", run_id, msg, time.monotonic() - t0)
 
+        # Machine-parseable per-phase timing, RELATIVE TO SUBMIT, so a live run
+        # yields the a->f table. phase is one of: a_finished, b_detected,
+        # c_read, d_uploaded, e_synced (e is logged by _sync_job, f by the UI).
+        def _tt(phase: str, extra: str = "") -> None:
+            logger.info("TURN-TIMING run=%s kind=image phase=%s t=+%.2fs%s",
+                        run_id, phase, time.monotonic() - t0, (" " + extra) if extra else "")
+
         # --- Confirm the new turn started (stop control appears). ---
         try:
             page.wait_for_selector(STOP_BUTTON, state="attached", timeout=60_000)
@@ -507,7 +526,15 @@ def send_turn(
         # --- Now WAIT for the actual generated image. It appears 30–120s after
         #     the stop button detaches, so this poll is what really gates
         #     collection (the old code collected here and always found 0). ---
-        new_srcs = _wait_for_new_image(page, pre_existing_ids, run_id, timeout_ms=180_000)
+        # on_phase reports a_finished (first fully-loaded candidate seen) and
+        # b_detected (confirmed stable + collected) against the submit t0.
+        def _img_phase(ph):
+            if ph == "a_finished":
+                _tt("a_finished", "image first visible/complete")
+            elif ph == "b_detected":
+                _tt("b_detected", "image confirmed stable")
+        new_srcs = _wait_for_new_image(page, pre_existing_ids, run_id,
+                                       timeout_ms=180_000, on_phase=_img_phase)
         logger.info("send_turn after-collection: %d new images", len(new_srcs))
 
         if not new_srcs:
@@ -534,6 +561,7 @@ def send_turn(
             )
             images.append(bytes(byte_array))
 
+        _tt("c_read", f"downloaded {len(images)} image(s), {sum(len(b) for b in images)} bytes")
         return _prefer_transparent(images)
 
     except (GenerationTimeoutError, RateLimitError):
@@ -1845,7 +1873,8 @@ def _is_user_attachment(src: str, alt: str) -> bool:
 
 
 def _wait_for_new_image(page: Page, exclude_ids: set[str], run_id: str,
-                        timeout_ms: int = 180_000, poll_ms: int = 2000) -> list[str]:
+                        timeout_ms: int = 180_000, poll_ms: int = 2000,
+                        on_phase=None) -> list[str]:
     """Poll until a NEW generated image appears that is not in `exclude_ids` and
     is not a user attachment/avatar, is fully loaded (complete && naturalWidth>0,
     >= 256px), and whose src has stopped changing for 2 consecutive polls. Then
@@ -1858,6 +1887,15 @@ def _wait_for_new_image(page: Page, exclude_ids: set[str], run_id: str,
     MIN_DIM = 256
     stable_src = None
     stable_polls = 0
+    _reported_a = False
+
+    def _phase(ph):
+        if on_phase:
+            try:
+                on_phase(ph)
+            except Exception:
+                pass
+
     while time.monotonic() < deadline:
         try:
             cands = page.evaluate(_NEW_IMAGE_PROBE_JS, GENERATED_IMG) or []
@@ -1876,6 +1914,12 @@ def _wait_for_new_image(page: Page, exclude_ids: set[str], run_id: str,
                 continue
             valid.append(src)
         if valid:
+            # a_finished: the FIRST time a fully-loaded generated image is seen
+            # (ChatGPT has finished rendering it) — reported once, before the
+            # stability confirmation below.
+            if not _reported_a:
+                _reported_a = True
+                _phase("a_finished")
             # Require the newest src to stay put for 2 polls (image finished
             # streaming and its blob URL is not being swapped).
             newest = valid[-1]
@@ -1891,6 +1935,7 @@ def _wait_for_new_image(page: Page, exclude_ids: set[str], run_id: str,
                     srcs = valid  # last-turn scope missed it; use the validated set
                 logger.info("[%s] image turn finished after %.0fs, %d new image(s)",
                             run_id, elapsed, len(srcs))
+                _phase("b_detected")
                 return srcs
         time.sleep(poll_ms / 1000.0)
     logger.warning("[%s] no new generated image after %.0fs.",

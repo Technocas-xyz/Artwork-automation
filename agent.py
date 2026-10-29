@@ -199,6 +199,9 @@ _current_job: dict | None = None
 _current_agent_id: str | None = None  # so every progress post carries the agent id (heartbeat)
 _current_watchdog = None              # diag.Watchdog for the running job (stall detection)
 _sync_stop = threading.Event()
+# Tracks which result-image names have already been logged as e_synced, so the
+# a->f timing line fires once per new result, not on every 2s heartbeat.
+_sync_seen: dict = {"imgs": None}
 
 # --- Per-job console capture -------------------------------------------------
 # Everything the agent prints while a job runs is buffered here and shipped to
@@ -335,6 +338,7 @@ def _reset_job_buffers() -> None:
     with _log_lock:
         _log_buffer.clear()
         _warn_buffer.clear()
+    _sync_seen["imgs"] = None   # fresh e_synced tracking per job
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +448,19 @@ def _sync_job() -> None:
             "warnings": _drain_warnings(),
         }
         r = _post(f"/api/agent/job/{_current_job_id}/progress", json=payload)
+        # phase e_synced: log ONCE each time a NEW result image name first rides
+        # a successful sync to the server (not every 2s heartbeat), so the a->f
+        # table shows when the result actually reached the server.
+        if r.ok:
+            try:
+                imgs = (payload.get("job") or {}).get("images") or []
+                sig = tuple(imgs)
+                if imgs and sig != _sync_seen.get("imgs"):
+                    _sync_seen["imgs"] = sig
+                    print(f"TURN-TIMING run={_current_job_id} kind=sync phase=e_synced "
+                          f"images={list(imgs)}")
+            except Exception:
+                pass
         if r.ok and r.json().get("cancelled"):
             raise _CancelledError()
     except _CancelledError:
@@ -739,8 +756,11 @@ def _record_stage_image(job: dict, key: str, data: bytes, filename: str,
     if vault_dir is not None and vault_name:
         (vault_dir / vault_name).write_bytes(data)
 
-    # 1) Upload FIRST and confirm the server received it.
+    # 1) Upload FIRST and confirm the server received it. Time it + record size
+    #    so the a->f timing table shows the upload cost (phase d).
+    _up_t0 = time.monotonic()
     sent = _upload_files(job["id"], [filename])
+    _up_ms = (time.monotonic() - _up_t0) * 1000.0
     _mark_uploaded(job, sent)
 
     if filename in sent:
@@ -748,6 +768,8 @@ def _record_stage_image(job: dict, key: str, data: bytes, filename: str,
         job.setdefault("stage_images", {})[key] = filename
         job["images"] = [filename]
         print(f"[stage-image] uploaded {filename}, then recorded {key} -> {filename}")
+        print(f"TURN-TIMING run={job.get('id')} kind=upload phase=d_uploaded "
+              f"file={filename} bytes={len(data)} upload_ms={_up_ms:.0f}")
     else:
         # Upload did not confirm. Do NOT announce the name (that would 404).
         # The end-of-job upload sweep + audit will retry and surface any file
