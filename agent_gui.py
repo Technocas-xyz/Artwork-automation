@@ -30,6 +30,33 @@ try:
 except Exception:
     _agent_logging = None
 
+import logging as _logging
+
+# Every user-facing failure (a messagebox, the red status line, a failed
+# sign-in / start) is funnelled through here so it ALSO reaches errors.log and
+# the Errors box — not just the popup. Throttled like the claim loop: the same
+# message in a row is logged once, then counted, so a repeated failure does not
+# flood the file. exc_info=True attaches the current traceback when inside an
+# except block.
+_gui_log_lock = __import__("threading").Lock()
+_gui_last_msg = {"text": None}
+
+
+def _gui_log(message: str, level: int = _logging.ERROR, exc: bool = False) -> None:
+    """Log a user-facing GUI failure at WARNING/ERROR (default ERROR) with the
+    same 'repeat logged once' throttle used by the claim loop. Never raises."""
+    try:
+        msg = str(message or "").strip()
+        if not msg:
+            return
+        with _gui_log_lock:
+            if _gui_last_msg["text"] == msg:
+                return   # identical to the previous message — don't re-log
+            _gui_last_msg["text"] = msg
+        _logging.getLogger("agent.gui").log(level, "%s", msg, exc_info=exc)
+    except Exception:
+        pass
+
 # --- Config file in AppData ---
 _APPDATA = Path(os.getenv("APPDATA") or (Path.home() / "AppData" / "Roaming"))
 _CONFIG_DIR = _APPDATA / "ArtworkAgent"
@@ -267,7 +294,13 @@ class AgentGUI:
         self.status_dot.itemconfig(self._dot, fill=colors.get(state, "#9ca3af"))
         labels = {"connected": "Connected — waiting for jobs", "running": "Running a job",
                   "not_signed_in": "Not signed in to ChatGPT", "error": "Error", "stopped": "Stopped"}
-        self.status_var.set(detail or labels.get(state, state))
+        line = detail or labels.get(state, state)
+        self.status_var.set(line)
+        # The red "error" status line is a user-facing failure — log it so it
+        # reaches errors.log and the Errors box, not just the window. This is the
+        # single funnel every error path (sign-in, start, loop) passes through.
+        if state == "error":
+            _gui_log(line, level=_logging.ERROR)
         self._update_tray(state)
 
     # -------------------------------------------------- config
@@ -289,6 +322,7 @@ class AgentGUI:
         email = self.email_var.get().strip()
         password = self.password_var.get()
         if not email or not password:
+            _gui_log("Sign in: email and password are required.", level=_logging.WARNING)
             messagebox.showwarning("Sign in", "Enter your email and password first.")
             return False
         self._persist()
@@ -296,6 +330,10 @@ class AgentGUI:
             self._token = agent.authenticate(server, email, password)
         except agent.AuthError as exc:
             self._token = ""
+            # Log WITH the traceback first (server-reachability failures like
+            # WinError 10061 carry the cause in the traceback), then show the UI.
+            # _set_state below sees the same message and the throttle dedupes it.
+            _gui_log(f"Server sign-in failed: {exc}", level=_logging.ERROR, exc=True)
             self._set_state("error", str(exc))
             messagebox.showerror("Sign-in failed", str(exc))
             return False
@@ -424,6 +462,7 @@ class AgentGUI:
             self._events.put(("signin_done", logged_in))
         except Exception as exc:
             traceback.print_exc()
+            _gui_log(f"ChatGPT sign-in failed: {exc}", level=_logging.ERROR, exc=True)
             # A failed sign-in must NOT leave a half-open context / leaked
             # Playwright driver on this thread — that is what made every retry
             # fail with 'Sync API inside the async loop'. Tear everything down
@@ -476,6 +515,8 @@ class AgentGUI:
             self._events.put(("status", ("stopped", "Stopped")))
         except Exception as exc:
             traceback.print_exc()
+            _gui_log(f"Start failed (browser launch / profile / register): {exc}",
+                     level=_logging.ERROR, exc=True)
             self._events.put(("status", ("error", str(exc))))
 
     def _close_context(self):
