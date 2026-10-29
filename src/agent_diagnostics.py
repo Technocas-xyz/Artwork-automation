@@ -109,12 +109,42 @@ def _scrub_entry(entry: dict) -> dict:
 # Local rotating log
 # ---------------------------------------------------------------------------
 
+# Optional override so the errors log can live in the SAME resolved logs/ folder
+# as agent.log / errors.log (set by src.agent_logging at startup). Defaults to
+# beside the exe (app_dir) when unset, preserving the original behaviour.
+_log_dir_override: Path | None = None
+
+
+def set_log_dir(path) -> None:
+    """Point the diagnostics log (agent_errors.log) + offline queue at `path`
+    instead of app_dir(). Resets the logger so it reopens in the new folder.
+    Never raises."""
+    global _log_dir_override, _logger
+    try:
+        _log_dir_override = Path(path)
+        _log_dir_override.mkdir(parents=True, exist_ok=True)
+        if _logger is not None:
+            for h in list(_logger.handlers):
+                try:
+                    h.close()
+                except Exception:
+                    pass
+                _logger.removeHandler(h)
+            _logger = None   # force _get_logger() to rebuild against the new path
+    except Exception:
+        pass
+
+
+def _log_base() -> Path:
+    return _log_dir_override if _log_dir_override is not None else _app_dir()
+
+
 def log_path() -> Path:
-    return _app_dir() / LOG_NAME
+    return _log_base() / LOG_NAME
 
 
 def _queue_path() -> Path:
-    return _app_dir() / _QUEUE_NAME
+    return _log_base() / _QUEUE_NAME
 
 
 def _get_logger() -> logging.Logger:

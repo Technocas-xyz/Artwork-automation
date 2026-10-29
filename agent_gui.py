@@ -23,6 +23,13 @@ from tkinter import ttk, messagebox
 
 import agent  # the existing agent, reused unchanged
 
+# Error log + errors ring for the agent window. Guarded so a missing module
+# never stops the GUI from launching.
+try:
+    from src import agent_logging as _agent_logging
+except Exception:
+    _agent_logging = None
+
 # --- Config file in AppData ---
 _APPDATA = Path(os.getenv("APPDATA") or (Path.home() / "AppData" / "Roaming"))
 _CONFIG_DIR = _APPDATA / "ArtworkAgent"
@@ -232,7 +239,26 @@ class AgentGUI:
                 foreground="#b45309", wraplength=400,
             ).grid(row=10, column=0, columnspan=3, sticky="w", padx=12, pady=(8, 0))
 
+        # --- Errors area: the last 5 errors + buttons to open the log folder
+        #     and copy the most recent full traceback to the clipboard. Fed from
+        #     the agent_logging errors ring (WARNING+). ---
+        err_head = ttk.Frame(frm)
+        err_head.grid(row=11, column=0, columnspan=3, sticky="we", padx=12, pady=(14, 0))
+        ttk.Label(err_head, text="Recent errors", foreground="#6b7280").pack(side="left")
+        ttk.Button(err_head, text="Open log folder", command=self._open_log_folder).pack(side="right")
+        ttk.Button(err_head, text="Copy last error", command=self._copy_last_error).pack(side="right", padx=(0, 6))
+
+        # Read-only, small, monospace-ish box showing the last 5 one-line errors.
+        self.errors_text = tk.Text(frm, height=5, width=52, wrap="none",
+                                   font=("Consolas", 8), background="#f9fafb",
+                                   foreground="#374151", relief="solid", borderwidth=1)
+        self.errors_text.grid(row=12, column=0, columnspan=3, sticky="we", padx=12, pady=(4, 0))
+        self.errors_text.configure(state="disabled")
+        self._errors_sig = None   # last rendered ring signature, to avoid needless redraws
+        self._last_err_count = 0
+
         frm.columnconfigure(1, weight=1)
+        self._refresh_errors()
 
     def _set_state(self, state: str, detail: str = ""):
         self._state = state
@@ -508,6 +534,9 @@ class AgentGUI:
                     self._on_update_event(payload)
         except queue.Empty:
             pass
+        # Refresh the Errors area from the logging ring (cheap; only redraws on
+        # change). Driven here so it updates without its own timer.
+        self._refresh_errors()
         self.root.after(200, self._drain_events)
 
     # -------------------------------------------------- self-update
@@ -634,6 +663,78 @@ class AgentGUI:
             self._tray.stop()
         self.root.after(0, self.root.destroy)
 
+    # -------------------------------------------------- errors area
+    def _refresh_errors(self):
+        """Redraw the Errors box from the agent_logging ring (last 5). Cheap and
+        idempotent — only rewrites when the ring actually changed, so it is safe
+        to call from the 200ms event pump."""
+        if _agent_logging is None or not hasattr(self, "errors_text"):
+            return
+        try:
+            errs = _agent_logging.last_errors(5)
+        except Exception:
+            errs = []
+        sig = tuple((e.get("time"), e.get("job_id"), e.get("message")) for e in errs)
+        if sig == self._errors_sig:
+            return
+        self._errors_sig = sig
+        self._last_err_count = len(errs)
+        if errs:
+            lines = []
+            for e in errs:
+                jid = (e.get("job_id") or "")[:8]
+                jtag = f" job {jid}" if jid else ""
+                lines.append(f"{e.get('time','')}{jtag}  {e.get('message','')}")
+            text = "\n".join(lines)
+        else:
+            text = "No errors logged this session."
+        try:
+            self.errors_text.configure(state="normal")
+            self.errors_text.delete("1.0", "end")
+            self.errors_text.insert("1.0", text)
+            self.errors_text.see("end")
+            self.errors_text.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _open_log_folder(self):
+        """Open the resolved log folder (logs/agent.log + logs/errors.log)."""
+        try:
+            path = _agent_logging.log_dir() if _agent_logging is not None else Path("logs")
+            Path(path).mkdir(parents=True, exist_ok=True)
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", str(path)])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:
+            messagebox.showinfo("Log folder",
+                                f"Log folder:\n{path}\n\n(Could not open it automatically: {exc})")
+
+    def _copy_last_error(self):
+        """Copy the most recent error's FULL traceback to the clipboard."""
+        full = ""
+        try:
+            if _agent_logging is not None:
+                full = _agent_logging.last_error_full() or ""
+        except Exception:
+            full = ""
+        if not full:
+            messagebox.showinfo("Copy last error", "No error has been logged this session.")
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(full)
+            # Keep it on the clipboard after the window is interacted with.
+            self.root.update()
+            messagebox.showinfo("Copy last error",
+                                "The last error's full details were copied to the clipboard.")
+        except Exception as exc:
+            messagebox.showinfo("Copy last error", f"Could not copy: {exc}")
+
     def _open_profile_folder(self):
         """Open the browser-profile folder in Explorer so support can inspect a
         designer's saved session (and whether Cookies exists) directly."""
@@ -659,6 +760,15 @@ class AgentGUI:
 
 
 def main():
+    # Belt-and-braces: importing agent already set logging up, but call it here
+    # too (idempotent) so the log files + excepthooks are in place even if the
+    # import order ever changes. Never let a logging problem stop the GUI.
+    try:
+        if _agent_logging is not None:
+            _agent_logging.setup_logging(route_print=True)
+            _agent_logging.install_excepthooks()
+    except Exception:
+        pass
     root = tk.Tk()
     gui = AgentGUI(root)
     gui._set_state("stopped", "Stopped")

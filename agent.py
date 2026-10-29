@@ -240,43 +240,58 @@ class _Tee:
 sys.stdout = _Tee(sys.stdout)
 sys.stderr = _Tee(sys.stderr)
 
-# Route library logging (src/generator.py etc. use `logging`, not print) to the
-# teed stdout at INFO, so the per-turn timing lines and raw-reply logs actually
-# reach the agent console AND the web UI job log. Without this the root logger
-# defaults to WARNING with no handler and those diagnostics vanish.
 import logging as _logging  # noqa: E402
-_logging.basicConfig(level=_logging.INFO, format="%(message)s", stream=sys.stdout)
-# Quiet the noisiest third parties so the job log stays readable.
+
+# Persistent rotating logs beside the agent (logs/agent.log + logs/errors.log),
+# print() routed into logging, secrets redacted, an errors ring for the GUI, and
+# unhandled-exception hooks on every thread. setup_logging() installs ITS OWN
+# stdout/stderr tee that WRAPS the _Tee installed just above — so a printed line
+# still (a) reaches the real console, (b) is buffered for the web-UI job log by
+# _Tee, and (c) lands in the rotating files. src/generator.py etc. use `logging`
+# directly; those records reach the root handlers installed here too.
+try:
+    from src import agent_logging as _agent_logging
+    _agent_logging.setup_logging(route_print=True)
+    _agent_logging.install_excepthooks()
+    # Tag error-ring entries with the job currently running (for the GUI).
+    _agent_logging.set_current_job_getter(lambda: _current_job_id or "")
+    _LOG_DIR = _agent_logging.log_dir()
+except Exception as _log_exc:   # logging setup must never stop the agent
+    _agent_logging = None
+    _LOG_DIR = None
+    _logging.basicConfig(level=_logging.INFO, format="%(message)s", stream=sys.stdout)
+    print(f"[agent] logging setup failed, using basic logging: {_log_exc}")
+
+# Quiet the noisiest third parties so the files stay readable.
 for _noisy in ("httpx", "httpcore", "urllib3", "PIL", "asyncio"):
     _logging.getLogger(_noisy).setLevel(_logging.WARNING)
 
-# Route generator/selector diagnostics to a persistent file beside the exe so
-# reply-read failures can be read after the fact without scrolling a terminal.
-# reply_diag.log holds per-turn read attempts, strip notices, and the full
-# diagnostic dump. agent_errors.log is already written by agent_diagnostics;
-# this adds the SAME lines from src.generator to a second file so both are
-# in the same directory and a single "logs/" folder holds everything.
+# Route generator/selector diagnostics to a persistent reply_diag.log in the
+# SAME resolved logs/ folder (per-turn read attempts, strip notices, full
+# diagnostic dumps). The root handlers already capture src.generator at INFO,
+# but this keeps the detailed reply-read trace in its own file as before.
 try:
     from logging.handlers import RotatingFileHandler as _RFH
     from pathlib import Path as _Path
 
     def _add_file_handler(logger_name: str, filename: str) -> None:
-        _log_dir = _Path(__file__).resolve().parent / "logs"
+        _ld = _LOG_DIR or (_Path(__file__).resolve().parent / "logs")
         try:
-            _log_dir.mkdir(parents=True, exist_ok=True)
+            _ld.mkdir(parents=True, exist_ok=True)
         except Exception:
             return
         _lg = _logging.getLogger(logger_name)
         _lg.setLevel(_logging.INFO)
-        # Avoid adding duplicate handlers if agent restarts in the same process.
         if any(isinstance(h, _RFH) and filename in getattr(h, "baseFilename", "")
                for h in _lg.handlers):
             return
         try:
-            _h = _RFH(str(_log_dir / filename), maxBytes=2 * 1024 * 1024,
+            _h = _RFH(str(_ld / filename), maxBytes=2 * 1024 * 1024,
                       backupCount=3, encoding="utf-8")
             _h.setFormatter(_logging.Formatter("%(asctime)s %(message)s",
                                                datefmt="%H:%M:%S"))
+            if _agent_logging is not None:
+                _h.addFilter(_agent_logging.SecretRedactingFilter())
             _lg.addHandler(_h)
         except Exception:
             pass
@@ -2855,7 +2870,15 @@ def _handle_claimed_job(page: Any, claim: dict, logged_in: bool = True) -> None:
         # Capture the FULL traceback (not just str(exc)) plus which step failed,
         # and post it so the failure is fully visible in the web UI.
         tb = traceback.format_exc()
-        print(tb)
+        # Log at ERROR with job id / workflow / step so it lands in errors.log
+        # (and the agent-window errors ring) with the full traceback, not just
+        # as a plain print. exc_info is redacted by the logging filter.
+        _logging.getLogger("agent.job").error(
+            "Job %s FAILED (workflow=%s step=%s): %s",
+            job_id, job.get("workflow", "?"),
+            job.get("stage_label") or f"stage {job.get('stage', '?')}",
+            exc, exc_info=True,
+        )
         job["status"] = "failed"
         job["error"] = str(exc)
         job["finished_at"] = time.time()
@@ -3172,19 +3195,67 @@ def run_loop(page, agent_id, stop_event=None, on_status=None, on_log=None,
             if auto_restart:
                 _apply_and_restart(log, status)
 
+    # --- Poll-log throttling -------------------------------------------------
+    # The claim loop polls every POLL_INTERVAL (2-3s). Logging every poll would
+    # flood the files, so we log STATE CHANGES only (connected<->not_signed_in,
+    # a new error message) and emit a single heartbeat SUMMARY every 5 minutes
+    # with poll/idle/error counts. A repeated identical error is counted, not
+    # re-logged, so a wrong server URL does not spam errors.log every 3s.
+    _poll = {"last_state": None, "last_err": None, "summary_ts": time.monotonic(),
+             "polls": 0, "idle": 0, "errors": 0, "jobs": 0, "suppressed": 0}
+    SUMMARY_EVERY = 300.0  # seconds
+
+    def _log_state(state, detail):
+        """Log a state line only when the state actually changes."""
+        key = (state, detail)
+        if _poll["last_state"] != key:
+            _poll["last_state"] = key
+            log(f"[agent] {detail or state}")
+
+    def _log_loop_error(msg):
+        """Log a loop error only when its text changes; otherwise count it."""
+        _poll["errors"] += 1
+        if _poll["last_err"] != msg:
+            _poll["last_err"] = msg
+            _logging.getLogger("agent.loop").error("%s", msg)
+        else:
+            _poll["suppressed"] += 1
+
+    def _maybe_summary():
+        now = time.monotonic()
+        if now - _poll["summary_ts"] < SUMMARY_EVERY:
+            return
+        _poll["summary_ts"] = now
+        _logging.getLogger("agent.loop").info(
+            "[summary] last 5 min: %d polls, %d idle, %d jobs, %d errors"
+            "%s. Current: %s.",
+            _poll["polls"], _poll["idle"], _poll["jobs"], _poll["errors"],
+            (f" ({_poll['suppressed']} repeat errors suppressed)" if _poll["suppressed"] else ""),
+            (_poll["last_state"][1] if _poll["last_state"] else "starting"),
+        )
+        _poll.update(polls=0, idle=0, errors=0, jobs=0, suppressed=0)
+
     while stop_event is None or not stop_event.is_set():
         try:
+            _poll["polls"] += 1
+            _maybe_summary()
             # Re-check session cheaply so the server's status stays accurate.
             try:
                 logged_in = is_logged_in(page)
             except Exception:
                 logged_in = False
 
+            # Drive the GUI status dot every poll (cheap, no logging), but LOG a
+            # state line only when it changes.
             status("connected" if logged_in else "not_signed_in",
                    "Waiting for jobs" if logged_in else "Not signed in to ChatGPT")
+            _log_state("connected" if logged_in else "not_signed_in",
+                       "Connected — waiting for jobs" if logged_in else "Not signed in to ChatGPT")
 
             r = _get("/api/agent/next-job", params={"agent_id": agent_id, "logged_in": str(logged_in).lower(), "code_version": AGENT_CODE_VERSION})
             if r.status_code == 204:
+                _poll["idle"] += 1
+                _poll["last_err"] = None   # a good poll clears the error throttle
                 # IDLE: the only place a self-update may run, so it can never
                 # interrupt a job. This may re-exec the process (auto mode).
                 maybe_self_update()
@@ -3209,7 +3280,7 @@ def run_loop(page, agent_id, stop_event=None, on_status=None, on_log=None,
                     time.sleep(POLL_INTERVAL)
                 continue
             if not r.ok:
-                log(f"[agent] next-job HTTP {r.status_code}: {r.text[:200]}")
+                _log_loop_error(f"[agent] next-job HTTP {r.status_code}: {r.text[:200]}")
                 time.sleep(POLL_INTERVAL)
                 continue
 
@@ -3222,17 +3293,24 @@ def run_loop(page, agent_id, stop_event=None, on_status=None, on_log=None,
                 log("[agent] session not active — pausing job for sign-in "
                     "(not failing).")
                 status("not_signed_in", "Paused — sign in to ChatGPT to continue")
+            _poll["jobs"] += 1
+            _poll["last_err"] = None   # a claimed job means the server is reachable
             status("running", f"Running job {claim['job']['id']} ({claim['job'].get('workflow')})")
             log(f"[agent] running job {claim['job']['id']} ({claim['job'].get('workflow')})")
             _handle_claimed_job(page, claim, logged_in=logged_in)
             status("connected", "Job finished — waiting for jobs")
+            _poll["last_state"] = None   # force a fresh "waiting for jobs" state line
         except KeyboardInterrupt:
             log("\n[agent] stopping.")
             break
         except Exception as exc:
-            log(f"[agent] loop error: {exc}")
+            # Throttled: a persistent loop error (e.g. a wrong server URL
+            # refusing every poll) is logged once with its traceback, then only
+            # counted until the message changes — so errors.log is not flooded.
             status("error", str(exc))
-            traceback.print_exc()
+            _log_loop_error(f"[agent] loop error: {exc}")
+            if _poll["suppressed"] == 0:  # first occurrence of this message
+                _logging.getLogger("agent.loop").error("loop error traceback:", exc_info=True)
             time.sleep(POLL_INTERVAL)
 
 
