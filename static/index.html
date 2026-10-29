@@ -3862,14 +3862,18 @@ function _renderSimilarityQA(qaOrig,qaGen,gptState){
     var r=entry.reason?'<div style="font-size:.68rem;color:var(--muted);margin-top:2px">'+esc(entry.reason)+'</div>':'';
     return chip+r;
   }
-  // Disagree between cv2 and ChatGPT for the SAME image (both real pass/warn/fail
-  // and different). na/unknown never counts as a disagreement.
-  function disagrees(cvCheck,gptEntry){
+  // Disagree between cv2 and ChatGPT for the SAME image. Only a PASS-vs-problem
+  // split counts: one source says PASS and the other says WARN or FAIL. WARN vs
+  // FAIL is the same direction (both flag a problem) so it is NOT a disagreement.
+  // na/unknown never counts. `dpiAssumed` suppresses the dpi row when cv2's DPI
+  // was only assumed (no DPI in the file) — ChatGPT can't know file metadata.
+  function disagrees(id,cvCheck,gptEntry,dpiAssumed){
     if(!cvCheck||!gptEntry)return false;
+    if(id==="dpi"&&dpiAssumed)return false;
     var a=cvCheck.status, b=gptEntry.status;
-    if(a==="na"||b==="na")return false;
     if(["pass","warn","fail"].indexOf(a)<0||["pass","warn","fail"].indexOf(b)<0)return false;
-    return a!==b;
+    // One is PASS, the other is a problem (warn/fail).
+    return (a==="pass"&&b!=="pass")||(b==="pass"&&a!=="pass");
   }
   var disagreeTag='<span style="display:inline-block;margin-left:5px;font-size:.6rem;font-weight:700;color:#8a6d3b;background:#fdf6e3;border:1px solid #f0c36d;border-radius:8px;padding:1px 5px">disagree</span>';
   var ncols=showGpt?6:4;
@@ -3905,7 +3909,7 @@ function _renderSimilarityQA(qaOrig,qaGen,gptState){
     var diff=_simQaDiff(id,oc,gc,mo,mg);
     var g=gptMap?gptMap[id]:null;
     var gO=g?g.image1:null, gG=g?g.image2:null;
-    var disO=showGpt&&disagrees(oc,gO), disG=showGpt&&disagrees(gc,gG);
+    var disO=showGpt&&disagrees(id,oc,gO,mo.dpi_known===false), disG=showGpt&&disagrees(id,gc,gG,mg.dpi_known===false);
     // Red when the status got worse; amber for a notable change that is not a
     // regression; a cv2/ChatGPT disagreement also tints the row amber.
     var rowbg=diff&&diff.worse?'background:rgba(220,38,38,.09)':((diff&&diff.flag)||disO||disG?'background:rgba(217,119,6,.08)':'');
