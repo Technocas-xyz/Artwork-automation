@@ -1141,6 +1141,93 @@ def _precompute_similarity(job: dict) -> None:
 # padded a little around the cell box to avoid clipping the object. Expressed as
 # a fraction of the image's width/height.
 _OBJECTSIM_PAD = 0.03
+# Colour distance (0-441 over RGB) within which a pixel counts as "the flat
+# background" when removing it for a background-insensitive comparison.
+_OBJECTSIM_BG_TOLERANCE = 48
+
+
+def _sample_border_colour(image_bytes: bytes) -> tuple[int, int, int] | None:
+    """Detect the dominant FLAT background colour by sampling the full image's
+    outer edge (a 1px ring plus the four corners). Returns an (r,g,b) tuple or
+    None if the border is not reasonably uniform (so we don't wrongly strip a
+    busy edge). Never raises."""
+    try:
+        from PIL import Image
+        import io as _io
+        import numpy as _np
+        im = Image.open(_io.BytesIO(image_bytes)).convert("RGB")
+        arr = _np.asarray(im)
+        h, w = arr.shape[:2]
+        if h < 3 or w < 3:
+            return None
+        edge = _np.concatenate([
+            arr[0, :, :], arr[h - 1, :, :], arr[:, 0, :], arr[:, w - 1, :],
+        ], axis=0).astype(_np.float32)
+        med = _np.median(edge, axis=0)
+        # Only treat it as a flat background if most edge pixels are near the
+        # median (uniform border). If the edge is busy, bail — nothing removed.
+        dist = _np.sqrt(((edge - med) ** 2).sum(axis=1))
+        near = float((dist <= _OBJECTSIM_BG_TOLERANCE).mean())
+        if near < 0.7:
+            return None
+        return (int(round(med[0])), int(round(med[1])), int(round(med[2])))
+    except Exception as exc:
+        print(f"[objectsim] border-colour sample failed: {exc}")
+        return None
+
+
+def _remove_flat_background(image_bytes: bytes, bg_rgb, tolerance: int = _OBJECTSIM_BG_TOLERANCE) -> bytes:
+    """Make pixels close to `bg_rgb` AND connected to the image edge transparent
+    (a flood-fill from the border, like remove_white_background but for any flat
+    colour). Interior pixels that happen to match the background colour are kept.
+    Returns PNG bytes; on any failure returns the input unchanged (never raises)."""
+    try:
+        from PIL import Image
+        import io as _io
+        import numpy as _np
+        from collections import deque
+        im = Image.open(_io.BytesIO(image_bytes)).convert("RGBA")
+        arr = _np.asarray(im).astype(_np.int16)
+        h, w = arr.shape[:2]
+        # Float math for the distance so 255**2 sums don't overflow int16 -> NaN.
+        rgb = arr[:, :, :3].astype(_np.float32)
+        bg = _np.array(bg_rgb, dtype=_np.float32)
+        dist = _np.sqrt(((rgb - bg) ** 2).sum(axis=2))
+        is_bg = dist <= tolerance            # colour match (before connectivity)
+        visited = _np.zeros((h, w), dtype=bool)
+        out_alpha = arr[:, :, 3].copy()
+        q = deque()
+        # Seed from every border pixel that matches the background colour.
+        for x in range(w):
+            for y in (0, h - 1):
+                if is_bg[y, x] and not visited[y, x]:
+                    visited[y, x] = True; q.append((x, y))
+        for y in range(h):
+            for x in (0, w - 1):
+                if is_bg[y, x] and not visited[y, x]:
+                    visited[y, x] = True; q.append((x, y))
+        while q:
+            cx, cy = q.popleft()
+            out_alpha[cy, cx] = 0
+            for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
+                if 0 <= nx < w and 0 <= ny < h and not visited[ny, nx] and is_bg[ny, nx]:
+                    visited[ny, nx] = True; q.append((nx, ny))
+        out = arr.copy()
+        out[:, :, 3] = out_alpha
+        res = Image.fromarray(out.astype('uint8'), "RGBA")
+        buf = _io.BytesIO(); res.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as exc:
+        print(f"[objectsim] flat-background removal failed: {exc}")
+        return image_bytes
+
+
+def _clean_for_compare(crop_bytes: bytes, bg_rgb) -> bytes:
+    """Return a background-removed copy of a crop for comparison/QA, or the crop
+    unchanged when no flat background colour was detected."""
+    if not bg_rgb:
+        return crop_bytes
+    return _remove_flat_background(crop_bytes, bg_rgb)
 
 
 def _precompute_objectsim(job: dict) -> None:
@@ -1159,7 +1246,23 @@ def _precompute_objectsim(job: dict) -> None:
         if not op.exists() or not gp.exists():
             job["objectsim_cv2_error"] = "One or both images were not found on the server."
             return
-        job["objectsim_cv2"] = _compare_two_images(op.read_bytes(), gp.read_bytes())
+        ob, gb = op.read_bytes(), gp.read_bytes()
+        job["objectsim_cv2"] = _compare_two_images(ob, gb)
+        # Background-insensitive whole-image compare: strip each image's own flat
+        # border background, then compare only the artwork pixels. Stored
+        # separately so the UI can show both; the overview prefers this when a
+        # background was actually removed (so a black-bg vs white-bg pair scores
+        # on the artwork, not the backdrop).
+        try:
+            bg_o = _sample_border_colour(ob)
+            bg_g = _sample_border_colour(gb)
+            if bg_o or bg_g:
+                cleaned = _compare_two_images(_clean_for_compare(ob, bg_o),
+                                              _clean_for_compare(gb, bg_g))
+                job["objectsim_cv2_nobg"] = cleaned
+                job["objectsim_bg_removed"] = True
+        except Exception as exc:
+            print(f"[objectsim] whole-image no-bg compare failed (non-fatal): {exc}")
     except Exception as exc:
         print(f"[objectsim] whole-image precompute failed: {exc}")
         job["objectsim_cv2_error"] = "The measured comparison could not be completed."
@@ -1276,15 +1379,69 @@ def _crop_norm_bbox(image_bytes: bytes, bbox: dict, pad: float = _OBJECTSIM_PAD)
         return None
 
 
+def _objectsim_expand_cells(cells) -> list[str]:
+    """Normalise the cell formats ChatGPT actually returns into a flat list of
+    single 'A1' cells. Accepts: lower-case, spaces, and RANGES like 'A1-C3' or
+    'A1:C3' (expanded to every cell in the rectangle). Unknown tokens are kept
+    as-is so the downstream parser can still try them."""
+    import re as _re
+    out = []
+    cols = "ABCDEFGHIJ"
+    for raw in (cells or []):
+        tok = str(raw).strip().upper().replace(" ", "")
+        if not tok:
+            continue
+        m = _re.match(r"^([A-J])(\d{1,2})[-:]([A-J])(\d{1,2})$", tok)
+        if m:
+            c0, r0, c1, r1 = cols.index(m.group(1)), int(m.group(2)), cols.index(m.group(3)), int(m.group(4))
+            if c0 > c1: c0, c1 = c1, c0
+            if r0 > r1: r0, r1 = r1, r0
+            for ci in range(c0, c1 + 1):
+                for ri in range(r0, r1 + 1):
+                    out.append(cols[ci] + str(ri))
+        else:
+            out.append(tok)
+    return out
+
+
+def _objectsim_locate(cells):
+    """Turn ChatGPT's cells into a bbox for cropping, returning (bbox, reason,
+    large_area). Reason explains a None bbox so the UI/log can say WHY instead of
+    a bare 'not locatable'. `large_area` flags a box covering almost the whole
+    image (still compared, just tagged)."""
+    from src.annotate import cells_to_bbox, GRID_N, _parse_cell
+    expanded = _objectsim_expand_cells(cells)
+    valid = [p for p in (_parse_cell(c) for c in expanded) if p is not None]
+    if not expanded:
+        return None, "ChatGPT returned no grid cells for this object", False
+    if not valid:
+        return None, f"could not parse cells {expanded[:6]}", False
+    # Fraction of the grid the cells cover (after range expansion).
+    cols = [c for c, _ in valid]; rows = [r for _, r in valid]
+    col_span = max(cols) - min(cols) + 1
+    row_span = max(rows) - min(rows) + 1
+    area_frac = (col_span * row_span) / float(GRID_N * GRID_N)
+    large = area_frac >= 0.6
+    # Build the bbox directly from the expanded cells (bypassing cells_to_bbox's
+    # own rejection thresholds — we handle "large area" ourselves so a big object
+    # is still compared rather than dropped).
+    x = min(cols) / GRID_N; y = min(rows) / GRID_N
+    w = col_span / GRID_N; h = row_span / GRID_N
+    bbox = {"x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4)}
+    return bbox, ("large area (~%d%% of image)" % round(area_frac * 100)) if large else "", large
+
+
 def _compute_objectsim_objects(job: dict) -> None:
     """Parse the agent's object JSON (objectsim_detect) and, for each paired
-    object, crop it from BOTH images (grid cells -> padded bbox), run the same
-    cv2 compare and Print Ready QA used elsewhere, and store the per-object
-    results in `objectsim_objects`. SERVER-owned (cv2/Pillow live here only).
+    object, crop it from BOTH images (grid cells -> padded bbox), remove each
+    image's flat background so only artwork pixels compare, run the same cv2
+    compare and Print Ready QA on the CLEANED crops, and store the per-object
+    results in `objectsim_objects`. The ORIGINAL (uncleaned) crops are saved for
+    display. SERVER-owned (cv2/Pillow live here only).
 
-    An object present in only one image is marked missing/added and gets no
-    compare. Never raises — a problem is recorded in objectsim_objects_error."""
-    from src.annotate import cells_to_bbox
+    Background objects are skipped (compared separately as the whole image).
+    An object present in only one image is marked missing/added. Never raises —
+    a problem is recorded in objectsim_objects_error."""
     detect = job.get("objectsim_detect") or ""
     if not detect.strip():
         return   # nothing to compute yet
@@ -1314,16 +1471,29 @@ def _compute_objectsim_objects(job: dict) -> None:
         job["_objectsim_detect_done"] = detect
         return
 
+    # Sample each FULL image's flat border background once; crops are cleaned
+    # against the colour of the image they came from before comparing.
+    bg_o = _sample_border_colour(orig_bytes)
+    bg_g = _sample_border_colour(gen_bytes)
+    job["objectsim_bg_removed"] = bool(bg_o or bg_g)
+
     results = []
     for obj in parsed:
         c1 = obj.get("cells_image1")
         c2 = obj.get("cells_image2")
         in1 = c1 != "missing" and bool(c1)
         in2 = c2 != "missing" and bool(c2)
+        otype = (obj.get("type", "") or "").lower()
         row = {"id": obj.get("id"), "name": obj.get("name"),
-               "type": obj.get("type", ""), "status": "", "similarity": None,
+               "type": otype, "status": "", "similarity": None,
                "qa_original": None, "qa_generated": None,
-               "crop_note": "approximate object area"}
+               "crop_note": "approximate object area", "reason": ""}
+        # Background objects are compared separately as the whole image — skip the
+        # per-object crop (cropping "the background" is meaningless).
+        if otype == "background":
+            row["status"] = "skipped"
+            row["reason"] = "background — compared separately as the whole image"
+            results.append(row); continue
         if in1 and not in2:
             row["status"] = "missing"      # in original, not in generated
             results.append(row); continue
@@ -1332,23 +1502,31 @@ def _compute_objectsim_objects(job: dict) -> None:
             results.append(row); continue
         if not in1 and not in2:
             row["status"] = "absent"       # ChatGPT listed it but located it in neither
+            row["reason"] = "ChatGPT did not place this object in either image"
             results.append(row); continue
 
-        bb1 = cells_to_bbox(c1)
-        bb2 = cells_to_bbox(c2)
+        bb1, reason1, large1 = _objectsim_locate(c1)
+        bb2, reason2, large2 = _objectsim_locate(c2)
         if not bb1 or not bb2:
-            row["status"] = "unlocatable"  # cells too scattered / everywhere
+            why = reason1 or reason2 or "cells could not be turned into a box"
+            row["status"] = "unlocatable"
+            row["reason"] = why
+            print(f"[objectsim] object {obj.get('id')} ({obj.get('name')!r}) not locatable: "
+                  f"{why}; cells1={c1!r} cells2={c2!r}")
             results.append(row); continue
+        if large1 or large2:
+            row["reason"] = reason1 or reason2  # "large area (~NN% of image)"
 
+        # Crops for DISPLAY keep the original background (what the operator sees).
         crop1 = _crop_norm_bbox(orig_bytes, bb1)
         crop2 = _crop_norm_bbox(gen_bytes, bb2)
         if not crop1 or not crop2:
             row["status"] = "unlocatable"
+            row["reason"] = "the object box fell outside the image"
             results.append(row); continue
 
         row["status"] = "paired"
-        # Save the two crops so the UI can show them side by side. Served via
-        # /api/output/<name>. Non-fatal — a save failure just omits the preview.
+        # Save the ORIGINAL crops for display. Served via /api/output/<name>.
         try:
             oid = obj.get("id") or len(results) + 1
             orig_name = f"{job['id']}_obj{oid}_orig.png"
@@ -1359,19 +1537,25 @@ def _compute_objectsim_objects(job: dict) -> None:
             row["crop_generated_file"] = gen_name
         except Exception as exc:
             print(f"[objectsim] could not save crops for object {obj.get('id')}: {exc}")
+
+        # Compare + QA run on the CLEANED crops (background removed) so a black-bg
+        # vs white-bg pair scores on the artwork, not the backdrop.
+        ccrop1 = _clean_for_compare(crop1, bg_o)
+        ccrop2 = _clean_for_compare(crop2, bg_g)
         try:
-            row["similarity"] = _compare_two_images(crop1, crop2)
+            row["similarity"] = _compare_two_images(ccrop1, ccrop2)
         except Exception as exc:
             row["similarity_error"] = str(exc)
-        # Per-object Print Ready QA on each crop (same as the Similarity QA).
-        row["qa_original"] = _qa_measure_bytes(crop1)
-        row["qa_generated"] = _qa_measure_bytes(crop2)
+        row["qa_original"] = _qa_measure_bytes(ccrop1)
+        row["qa_generated"] = _qa_measure_bytes(ccrop2)
         results.append(row)
 
     job["objectsim_objects"] = results
     job["objectsim_objects_error"] = ""
     job["_objectsim_detect_done"] = detect
-    print(f"[objectsim] computed {len(results)} object(s) from detect JSON.")
+    n_paired = sum(1 for r in results if r["status"] == "paired")
+    print(f"[objectsim] computed {len(results)} object(s) from detect JSON "
+          f"({n_paired} paired; background_removed={job['objectsim_bg_removed']}).")
 
 
 def _precompute_printready(job: dict, artwork_file: str) -> None:
@@ -1766,6 +1950,7 @@ def create_job(req: GenerateRequest, request: Request):
         "objectsim_original_file": (req.artwork_files[0] if len(req.artwork_files) > 0 else ""),
         "objectsim_generated_file": (req.artwork_files[1] if len(req.artwork_files) > 1 else ""),
         "objectsim_cv2": None, "objectsim_cv2_error": "",
+        "objectsim_cv2_nobg": None, "objectsim_bg_removed": False,
         "objectsim_detect": "", "objectsim_detect_error": "",
         "objectsim_objects": None, "objectsim_objects_error": "",
         "aspect_dpi": req.aspect_dpi, "aspect_info": None, "aspect_recommendations": "",
@@ -3139,6 +3324,7 @@ _SERVER_OWNED_FIELDS = {
     # The agent only produces objectsim_detect (the object JSON), so these must
     # never be overwritten by an agent echo.
     "objectsim_cv2", "objectsim_cv2_error",
+    "objectsim_cv2_nobg", "objectsim_bg_removed",
     "objectsim_objects", "objectsim_objects_error",
 }
 
