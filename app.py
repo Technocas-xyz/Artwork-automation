@@ -455,6 +455,10 @@ class GenerateRequest(BaseModel):
     aspect_dpi: int = 0  # operator-set DPI for Aspect Ratio Enhancement (0 = use file/300)
     halftone_settings: dict = {}  # {lpi, angle, dot} for the local Half Tone op
     blackout_settings: dict = {}  # {threshold} for the local Black Out op
+    # "Use Photocraft MCP": when true, the agent appends one line asking ChatGPT
+    # to do the job with the Photocraft MCP tool (applied at send time only;
+    # managed prompts are unchanged). Default off = behaves exactly as today.
+    use_photocraft_mcp: bool = False
     # Pixel Geometry (Before -> Generate -> After) operator inputs. Blank values
     # fall back to the DTF profile defaults in src/pixel_geometry.py; blank
     # optional free-text (garment style/colour, element policies) renders N/A.
@@ -1855,6 +1859,10 @@ def create_job(req: GenerateRequest, request: Request):
         # Attribution: which user created this job (identity only — everyone
         # still sees all jobs). No leading underscore so it survives _public_job.
         "created_by": _created_by, "created_by_name": _created_by_name,
+        # Photocraft MCP toggle: stored on the job, synced to the agent in the
+        # full job dict (agent_next_job) and surfaced to the UI by _public_job
+        # (non-underscore key) so the result + Previous Runs can show the tag.
+        "use_photocraft_mcp": bool(req.use_photocraft_mcp),
         "stage": 0, "stage_label": "", "awaiting_input": False,
         "selection_prompt": "", "choices": [], "prompts": [],
         "extracted_text": "", "confirmed_text": "", "paused_at": None,

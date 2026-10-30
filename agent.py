@@ -54,7 +54,7 @@ from src.browser import launch_context, is_logged_in
 from src.generator import (
     generate, open_chat, rename_chat, send_turn, send_text_turn,
     get_last_text_reply, get_boxes, extract_artwork_images,
-    check_project_urls, dump_page_controls,
+    check_project_urls, dump_page_controls, set_photocraft_mcp,
 )
 from src.postprocess import (
     is_opaque_white_bg, remove_white_background,
@@ -2805,6 +2805,12 @@ def _handle_claimed_job(page: Any, claim: dict, logged_in: bool = True) -> None:
 
     _current_job_id = job_id
     _current_job = job
+    # Photocraft MCP: when the operator enabled the toggle for this job, every
+    # prompt this job sends to ChatGPT gets the MCP line appended (in ONE place,
+    # generator._enter_prompt). Set it for the job's duration; reset in finally.
+    _use_mcp = bool(job.get("use_photocraft_mcp"))
+    set_photocraft_mcp(_use_mcp)
+    print(f"[photocraft] job {job_id}: Use Photocraft MCP = {_use_mcp}")
     _sync_stop.clear()
     sync_thread = threading.Thread(target=_sync_loop, daemon=True)
     sync_thread.start()
@@ -2890,6 +2896,11 @@ def _handle_claimed_job(page: Any, claim: dict, logged_in: bool = True) -> None:
             print(f"[agent] final sync failed: {exc}")
         _current_job_id = None
         _current_job = None
+        # Reset the Photocraft MCP flag so it never leaks into the next job.
+        try:
+            set_photocraft_mcp(False)
+        except Exception:
+            pass
 
 
 def _find_error_screenshot(job_id: str):

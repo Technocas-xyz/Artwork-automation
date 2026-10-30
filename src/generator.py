@@ -44,6 +44,41 @@ from src.postprocess import is_opaque_white_bg
 
 logger = logging.getLogger(__name__)
 
+# --- Photocraft MCP toggle -------------------------------------------------
+# When the operator enables "Use Photocraft MCP" for a job, the agent sets this
+# flag for the duration of the job (set_photocraft_mcp). Every prompt sent to
+# ChatGPT then gets ONE extra line appended as its LAST line — done in exactly
+# ONE place, _enter_prompt(), which every send path (send_turn, send_text_turn,
+# get_boxes, extract_artwork_images, generate) funnels through. When off, the
+# prompt is sent unchanged. Managed prompts are never edited; the line is only
+# appended at send time.
+_photocraft_on = False
+PHOTOCRAFT_LINE = "Do this job using photocraft mcp"
+
+
+def set_photocraft_mcp(on: bool) -> None:
+    """Enable/disable the Photocraft MCP prompt line for subsequent turns. The
+    agent calls this at job start (from job['use_photocraft_mcp']) and resets it
+    to False when the job ends."""
+    global _photocraft_on
+    _photocraft_on = bool(on)
+
+
+def photocraft_enabled() -> bool:
+    return _photocraft_on
+
+
+def _apply_photocraft(prompt: str) -> str:
+    """Append the Photocraft MCP line as the LAST line of the prompt when the
+    toggle is on; otherwise return the prompt unchanged. Idempotent — never adds
+    the line twice if it is already the last line."""
+    if not _photocraft_on or not prompt:
+        return prompt
+    if prompt.rstrip().endswith(PHOTOCRAFT_LINE):
+        return prompt
+    return prompt.rstrip() + "\n\n" + PHOTOCRAFT_LINE
+
+
 # Set once we have dumped the page controls on a control-not-found failure, so
 # the diagnostic fires the FIRST time a submit/selector fails in a process (when
 # it is most informative) without spamming the log on every later turn.
@@ -334,6 +369,8 @@ def send_text_turn(
     def _ts(msg: str) -> None:
         logger.info("[text-turn %s] %s  t=+%.1fs", run_id, msg, time.monotonic() - t0)
 
+    logger.info("[text-turn %s] photocraft MCP: %s", run_id,
+                "ON (line appended to prompt)" if _photocraft_on else "off")
     try:
         # Upload files if given
         if image_paths:
@@ -458,6 +495,8 @@ def send_turn(
         Downloaded image bytes for images generated in THIS turn only.
         Empty list if the turn produced no images (unless require_images).
     """
+    logger.info("[image-turn %s] photocraft MCP: %s", run_id,
+                "ON (line appended to prompt)" if _photocraft_on else "off")
     try:
         # --- Upload images if provided ---
         if image_paths:
@@ -2032,6 +2071,10 @@ def _enter_prompt(page: Page, prompt: str) -> None:
     element PROMPT_BOX matched (a contenteditable, so its text is in
     textContent/innerText, NOT .value), and every outcome is logged.
     """
+    # The ONE place the Photocraft MCP line is appended — every send path reaches
+    # ChatGPT through here, so this covers image turns, text turns, box/extract
+    # turns, and operator-edited prompts alike. No-op when the toggle is off.
+    prompt = _apply_photocraft(prompt)
     expected = len(prompt.strip())
 
     # 1) Write to the clipboard. A permission failure here is a DISTINCT problem

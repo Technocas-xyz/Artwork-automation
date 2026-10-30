@@ -686,12 +686,42 @@ function renderCol2(){
     var tpl1Id="tpl1__"+textMode;
     promptBlock='<div class="edit-toggle" id="tplTog">Edit prompt for step 1</div><div class="edit-body" id="tplBody"><textarea id="tpl1" data-prompt-id="'+tpl1Id+'">'+esc(seedPromptText(tpl1Id,step1Tpl))+'</textarea><div class="tpl-error" id="tplErr"></div></div>';
   }
-  col2.innerHTML=promptBlock+'<button class="gen-btn" id="genBtn" disabled>Generate</button><div class="blocker-msg" id="blkMsg"></div>';
+  col2.innerHTML=promptBlock+_photocraftCheckboxHtml()+'<button class="gen-btn" id="genBtn" disabled>Generate</button><div class="blocker-msg" id="blkMsg"></div>';
   wirePromptEdits(col2);
+  _wirePhotocraft();
   $("tplTog").onclick=function(){$("tplTog").classList.toggle("open");$("tplBody").classList.toggle("open")};
   var t2=$("tplTog2");if(t2)t2.onclick=function(){t2.classList.toggle("open");$("tplBody2").classList.toggle("open")};
   $("genBtn").onclick=submitJob;
   checkStatus();
+}
+// --- "Use Photocraft MCP" toggle -------------------------------------------
+// One checkbox shown next to the Generate/Run/Compare button of every workflow
+// that sends a turn to ChatGPT. The last choice is remembered per browser in
+// localStorage (default off). _photocraftCheckboxHtml() is dropped into each
+// workflow's col2; _photocraftWanted() reads the current state for the submit
+// body; _wirePhotocraft() persists a change.
+function _photocraftSaved(){
+  try{return localStorage.getItem("usePhotocraftMcp")==="1"}catch(e){return false}
+}
+function _photocraftCheckboxHtml(){
+  var on=_photocraftSaved();
+  return '<label style="display:flex;align-items:center;gap:7px;margin:8px 0 0;font-size:.82rem;cursor:pointer">'
+    +'<input type="checkbox" id="photocraftMcp"'+(on?' checked':'')+'>'
+    +'<span>Use Photocraft MCP<span style="color:var(--muted);font-weight:400"> — ask ChatGPT to do this job with the Photocraft tool</span></span></label>';
+}
+function _wirePhotocraft(){
+  var cb=$("photocraftMcp");if(!cb)return;
+  cb.onchange=function(){try{localStorage.setItem("usePhotocraftMcp",cb.checked?"1":"0")}catch(e){}};
+}
+function _photocraftWanted(){
+  var cb=$("photocraftMcp");
+  if(cb)return !!cb.checked;
+  return _photocraftSaved();
+}
+// Small pill shown on a job result header and in Previous Runs when the job was
+// run with the Photocraft MCP line appended to its prompts.
+function _photocraftTagHtml(){
+  return '<span style="display:inline-block;padding:1px 7px;border-radius:999px;background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;font-size:.68rem;font-weight:600;vertical-align:middle">Photocraft MCP</span>';
 }
 function updBtn(){
   var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();updIdentifyBtn();updPrintReadyBtn();updColorwayBtn();updSimilarityAgentNote();updObjectSimAgentNote();updObjectSimBtn();return}
@@ -707,7 +737,7 @@ function updBtn(){
   if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is waiting for the client\u2019s choice. Cancel it or complete it to start a new one.");else blk.textContent=""}
 }
 function submitJob(){
-  var body={workflow:"text",text_mode:textMode,client:jobClient.trim(),files:[],options:[],params:{},custom_note:""};
+  var body={workflow:"text",text_mode:textMode,client:jobClient.trim(),files:[],options:[],params:{},custom_note:"",use_photocraft_mcp:_photocraftWanted()};
   if(textMode==="replace"){
     var rc=$("tplRC"),rf=$("tplRF"),err=$("tplErr"),err2=$("tplErr2");
     if(err)err.textContent="";if(err2)err2.textContent="";
@@ -888,7 +918,8 @@ function render(job){
     clr();var activeT=job.active_time?Math.round(job.active_time):0;
     var doneMsg=job.status==="done_with_errors"?'Done with some errors ('+fmt(activeT)+' processing time)':'All done! ('+fmt(activeT)+' processing time)';
     var doneClass=job.status==="done_with_errors"?"awaiting":"done";
-    statusArea.innerHTML='<div class="status-box '+doneClass+'">'+doneMsg+'</div>'+createdByLine(job);
+    var mcpHdr=job.use_photocraft_mcp?' '+_photocraftTagHtml():'';
+    statusArea.innerHTML='<div class="status-box '+doneClass+'">'+doneMsg+mcpHdr+'</div>'+createdByLine(job);
     if(job.workflow==="mockup")resultArea.innerHTML=renderMockupResults(job);
     else if(job.workflow==="artwork")resultArea.innerHTML=renderArtworkResults(job);
     else if(job.workflow==="custom")resultArea.innerHTML=renderCustomResults(job);
@@ -1090,9 +1121,10 @@ function upMockup(file){
   fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){mockupImageFile=d.saved[0].name;$("mdzPrev").innerHTML='<img src="/input/'+mockupImageFile+'" style="max-height:180px">';updMockupBtn()}}).catch(function(e){$("mdzErr").textContent=e.message});
 }
 function renderMockupCol2(){
-  col2.innerHTML='<div class="edit-toggle" id="mTplTog">Edit detection prompt</div><div class="edit-body" id="mTplBody"><textarea id="tplExtract" data-prompt-id="tplExtract">'+esc(seedPromptText("tplExtract",tpl("extract")))+'</textarea><div class="tpl-error" id="mTplErr"></div></div><div class="edit-toggle" id="mAdvTog">Advanced settings</div><div class="edit-body" id="mAdvBody"><div class="field-group"><label>Manual grid override (leave 0 for ChatGPT auto-detect)</label></div><div style="display:flex;gap:8px"><div class="field-group"><label>Cols</label><input type="number" id="mCols" value="0" min="0" max="10"></div><div class="field-group"><label>Rows</label><input type="number" id="mRows" value="0" min="0" max="10"></div></div><div class="field-group"><label>Padding (px around each design)</label><input type="number" id="mPad" value="0" min="0" max="50"></div></div><button class="gen-btn" id="mGenBtn" disabled>Extract Artworks</button><div class="blocker-msg" id="mBlkMsg"></div>';
+  col2.innerHTML='<div class="edit-toggle" id="mTplTog">Edit detection prompt</div><div class="edit-body" id="mTplBody"><textarea id="tplExtract" data-prompt-id="tplExtract">'+esc(seedPromptText("tplExtract",tpl("extract")))+'</textarea><div class="tpl-error" id="mTplErr"></div></div><div class="edit-toggle" id="mAdvTog">Advanced settings</div><div class="edit-body" id="mAdvBody"><div class="field-group"><label>Manual grid override (leave 0 for ChatGPT auto-detect)</label></div><div style="display:flex;gap:8px"><div class="field-group"><label>Cols</label><input type="number" id="mCols" value="0" min="0" max="10"></div><div class="field-group"><label>Rows</label><input type="number" id="mRows" value="0" min="0" max="10"></div></div><div class="field-group"><label>Padding (px around each design)</label><input type="number" id="mPad" value="0" min="0" max="50"></div></div>'+_photocraftCheckboxHtml()+'<button class="gen-btn" id="mGenBtn" disabled>Extract Artworks</button><div class="blocker-msg" id="mBlkMsg"></div>';
   wireClientTask("mcn","mti",updMockupBtn);
   wirePromptEdits(col2);
+  _wirePhotocraft();
   $("mTplTog").onclick=function(){$("mTplTog").classList.toggle("open");$("mTplBody").classList.toggle("open")};
   $("mAdvTog").onclick=function(){$("mAdvTog").classList.toggle("open");$("mAdvBody").classList.toggle("open")};
   $("mGenBtn").onclick=submitMockupJob;
@@ -1111,7 +1143,7 @@ function submitMockupJob(){
   var mode=(cols>0&&rows>0)?"grid":"auto";
   var tplExt=$("tplExtract");
   if($("mTplErr"))$("mTplErr").textContent="";
-  var body={workflow:"mockup",mockup_image:mockupImageFile,extract_mode:mode,grid_cols:cols||4,grid_rows:rows||2,client:jobClient.trim(),text:"",text_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:tplExt?tplExt.value:"",template_regen:""};
+  var body={workflow:"mockup",mockup_image:mockupImageFile,extract_mode:mode,grid_cols:cols||4,grid_rows:rows||2,client:jobClient.trim(),text:"",text_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:tplExt?tplExt.value:"",template_regen:"",use_photocraft_mcp:_photocraftWanted()};
   console.log("[submitMockupJob] body:",body);
   $("mGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("mGenBtn").disabled=false});
@@ -1156,9 +1188,10 @@ function renderArtworkList(){
 window.removeArtwork=function(idx){artworkFiles.splice(idx,1);renderArtworkList();updArtworkBtn()};
 function renderArtworkCol2(){
   var artTpl=tpl("artwork")||tpl("artwork_regen")||"Regenerate this artwork as a clean final version suitable for DTF garment printing.";
-  col2.innerHTML='<div class="edit-toggle" id="aTplTog">Edit regeneration prompt</div><div class="edit-body" id="aTplBody"><textarea id="tplArtRegen" data-prompt-id="tplArtRegen">'+esc(seedPromptText("tplArtRegen",artTpl))+'</textarea></div><button class="gen-btn" id="aGenBtn" disabled>Generate</button><div class="blocker-msg" id="aBlkMsg"></div>';
+  col2.innerHTML='<div class="edit-toggle" id="aTplTog">Edit regeneration prompt</div><div class="edit-body" id="aTplBody"><textarea id="tplArtRegen" data-prompt-id="tplArtRegen">'+esc(seedPromptText("tplArtRegen",artTpl))+'</textarea></div>'+_photocraftCheckboxHtml()+'<button class="gen-btn" id="aGenBtn" disabled>Generate</button><div class="blocker-msg" id="aBlkMsg"></div>';
   wireClientTask("acn","ati",updArtworkBtn);
   wirePromptEdits(col2);
+  _wirePhotocraft();
   $("aTplTog").onclick=function(){$("aTplTog").classList.toggle("open");$("aTplBody").classList.toggle("open")};
   $("aGenBtn").onclick=submitArtworkJob;
   checkStatus();
@@ -1172,7 +1205,7 @@ function updArtworkBtn(){
 }
 function submitArtworkJob(){
   var tpl=$("tplArtRegen");
-  var body={workflow:"artwork",artwork_files:artworkFiles,client:jobClient.trim(),template_regen:tpl?tpl.value:"",text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
+  var body={workflow:"artwork",artwork_files:artworkFiles,client:jobClient.trim(),template_regen:tpl?tpl.value:"",text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",extract_mode:"auto",grid_cols:4,grid_rows:2,use_photocraft_mcp:_photocraftWanted()};
   console.log("[submitArtworkJob] artworkFiles:",artworkFiles,"body:",body);
   $("aGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("aGenBtn").disabled=false});
@@ -1296,6 +1329,7 @@ function renderCustomCol2(){
   }
   html+='</div>';
   html+='<div id="cOpWarnings"></div>';
+  html+=_photocraftCheckboxHtml();
   html+='<button class="gen-btn" id="cGenBtn" disabled>Run Operations</button>';
   html+='<div class="blocker-msg" id="cBlkMsg"></div>';
   col2.innerHTML=html;
@@ -1303,6 +1337,7 @@ function renderCustomCol2(){
   // Client/job + edited prompts survive the re-render on every op toggle.
   wireClientTask("ccn","cti",updCustomBtn);
   wirePromptEdits(col2);
+  _wirePhotocraft();
   $("cGenBtn").onclick=submitCustomJob;
   updCustomBtn();
 }
@@ -1366,7 +1401,7 @@ function submitCustomJob(){
     var bt=$("boThreshold");
     if(bt&&bt.value)blackout.threshold=parseInt(bt.value,10);
   }
-  var body={workflow:"custom",artwork_files:[customFile],custom_operations:customOps,custom_prompts:prompts,aspect_dpi:customDpi,halftone_settings:halftone,blackout_settings:blackout,client:jobClient.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
+  var body={workflow:"custom",artwork_files:[customFile],custom_operations:customOps,custom_prompts:prompts,aspect_dpi:customDpi,halftone_settings:halftone,blackout_settings:blackout,client:jobClient.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",extract_mode:"auto",grid_cols:4,grid_rows:2,use_photocraft_mcp:_photocraftWanted()};
   $("cGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("cGenBtn").disabled=false});
 }
@@ -1401,10 +1436,12 @@ function upPrintReady(file){
 function renderPrintReadyCol2(){
   var html='<div class="col-title">Print Ready QA</div>';
   html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">A full set of measurements runs on the server the moment you submit; ChatGPT then judges the artwork against them.</p>';
+  html+=_photocraftCheckboxHtml();
   html+='<button class="gen-btn" id="prGenBtn" disabled>Check print readiness</button>';
   html+='<div class="blocker-msg" id="prBlkMsg"></div>';
   col2.innerHTML=html;
   wireClientSlot(updPrintReadyBtn);
+  _wirePhotocraft();
   $("prGenBtn").onclick=submitPrintReadyJob;
   updPrintReadyBtn();
 }
@@ -1420,7 +1457,7 @@ function submitPrintReadyJob(){
     client:jobClient.trim(),
     text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",
     template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},
-    extract_mode:"auto",grid_cols:4,grid_rows:2};
+    extract_mode:"auto",grid_cols:4,grid_rows:2,use_photocraft_mcp:_photocraftWanted()};
   $("prGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("prGenBtn").disabled=false});
 }
@@ -2163,10 +2200,12 @@ function upColorway(file){
 function renderColorwayCol2(){
   var html='<div class="col-title">Colorways</div>';
   html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Find which garment colours the artwork suits, see it on those shirts, and optionally have it adapted for the ones you pick.</p>';
+  html+=_photocraftCheckboxHtml();
   html+='<button class="gen-btn" id="cwGenBtn" disabled>Recommend garment colours</button>';
   html+='<div class="blocker-msg" id="cwBlkMsg"></div>';
   col2.innerHTML=html;
   wireClientTask("cwcn","cwti",updColorwayBtn);
+  _wirePhotocraft();
   $("cwGenBtn").onclick=submitColorwayJob;
   updColorwayBtn();
 }
@@ -2182,7 +2221,7 @@ function submitColorwayJob(){
     client:jobClient.trim(),
     text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",
     template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},
-    extract_mode:"auto",grid_cols:4,grid_rows:2};
+    extract_mode:"auto",grid_cols:4,grid_rows:2,use_photocraft_mcp:_photocraftWanted()};
   $("cwGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("cwGenBtn").disabled=false});
 }
@@ -2443,11 +2482,13 @@ function renderIdentifyCol2(){
   html+='<div class="edit-body"><textarea id="tplIdentify" data-prompt-id="'+listId+'">'+esc(seedPromptText(listId,listTpl))+'</textarea></div>';
   html+='<div class="edit-toggle" onclick="this.classList.toggle(\'open\');this.nextElementSibling.classList.toggle(\'open\')">Edit prompt \u2014 regenerate with changes</div>';
   html+='<div class="edit-body"><textarea id="tplIdentifyRegen" data-prompt-id="tplIdentifyRegen">'+esc(seedPromptText("tplIdentifyRegen",tRegen))+'</textarea></div>';
+  html+=_photocraftCheckboxHtml();
   html+='<button class="gen-btn" id="iGenBtn" disabled>'+(isColour?"List colour groups":"List objects")+'</button>';
   html+='<div class="blocker-msg" id="iBlkMsg"></div>';
   col2.innerHTML=html;
   wireClientTask("icn","iti",updIdentifyBtn);
   wirePromptEdits(col2);
+  _wirePhotocraft();
   $("iGenBtn").onclick=submitIdentifyJob;
   updIdentifyBtn();
 }
@@ -2460,7 +2501,7 @@ function updIdentifyBtn(){
 }
 function submitIdentifyJob(){
   var tObj=$("tplIdentify"),tRegen=$("tplIdentifyRegen");
-  var body={workflow:"identify",identify_mode:identifyMode,artwork_files:[identifyFile],aspect_dpi:identifyDpi,template_identify:tObj?tObj.value:"",template_identify_regen:tRegen?tRegen.value:"",client:jobClient.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},extract_mode:"auto",grid_cols:4,grid_rows:2};
+  var body={workflow:"identify",identify_mode:identifyMode,artwork_files:[identifyFile],aspect_dpi:identifyDpi,template_identify:tObj?tObj.value:"",template_identify_regen:tRegen?tRegen.value:"",client:jobClient.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},extract_mode:"auto",grid_cols:4,grid_rows:2,use_photocraft_mcp:_photocraftWanted()};
   $("iGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("iGenBtn").disabled=false});
 }
@@ -3464,7 +3505,8 @@ function _startSimilarityReview(){
       var body={workflow:"similarity",artwork_files:[saved[0].name,saved[1].name],
         client:"Similarity Check",text:"",text_image:"",mockup_image:"",files:[],options:[],
         params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",
-        custom_operations:[],custom_prompts:{},extract_mode:"auto",grid_cols:4,grid_rows:2};
+        custom_operations:[],custom_prompts:{},extract_mode:"auto",grid_cols:4,grid_rows:2,
+        use_photocraft_mcp:_photocraftWanted()};
       return fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     })
     .then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()})
@@ -4599,7 +4641,8 @@ function renderHist(){
     var det=stageThumbs(job,si);
     var div=document.createElement("div");div.className="history-item";
     var byTag=job.created_by_name?' <span style="color:var(--muted)">· by '+esc(job.created_by_name)+'</span>':'';
-    div.innerHTML='<span class="hi-label">'+st+'</span> \u2014 '+esc(job.client)+' / '+esc(job.task_id)+' \u2014 '+desc+byTag+'<div class="history-detail" id="'+did+'">'+det+'</div>';
+    var mcpTag=job.use_photocraft_mcp?' '+_photocraftTagHtml():'';
+    div.innerHTML='<span class="hi-label">'+st+'</span> \u2014 '+esc(job.client)+' / '+esc(job.task_id)+' \u2014 '+desc+byTag+mcpTag+'<div class="history-detail" id="'+did+'">'+det+'</div>';
     div.onclick=function(){$(did).classList.toggle("open")};
     historyList.appendChild(div);
   });
