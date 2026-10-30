@@ -394,7 +394,11 @@ def send_text_turn(
         # 300s ceiling: a Thinking/Reasoning model can spend a minute+ reasoning
         # before the answer streams, and _is_thinking keeps the turn "active"
         # throughout, so the old 120s could trip during a long reasoning phase.
-        _wait_for_turn_complete(page, quiet_ms=1500, timeout=300_000, label=f"text-turn {run_id}", on_phase=_ts, text_only=True)
+        # Quiet window trimmed 1500 -> 800ms: still > the flicker guard's 2-poll
+        # (~1s at 500ms) detection so a single post-answer button flicker never
+        # ends the turn early, and the Thinking / 60s-stale handling inside
+        # _wait_for_turn_complete is unchanged — we only pass a shorter window.
+        _wait_for_turn_complete(page, quiet_ms=800, timeout=300_000, label=f"text-turn {run_id}", on_phase=_ts, text_only=True)
         # a_finished + b_detected: for a text turn, ChatGPT finishing == the stop
         # button gone + quiet period done (that is what _wait_for_turn_complete
         # returns on). Reading the reply is the very next step.
@@ -1393,7 +1397,11 @@ def get_last_text_reply(page: Page, sent_prompt: str | None = None,
     # unchanged for 3 consecutive reads (~1.5s) AND no streaming indicator is
     # showing. Capped at the same 20s deadline. Short replies stabilise instantly.
     if text:
-        STABLE_NEEDED = 3
+        # One short confirming check (~0.5s): accept once the reply is unchanged
+        # on 2 consecutive reads (was 3 ~= 1.5s). The streaming-indicator reset
+        # below still protects against reading mid-stream, so a growing reply
+        # resets the window — we never accept a partial reply.
+        STABLE_NEEDED = 2
         stable_reads = 1          # the read above counts as the first
         last = text
         while stable_reads < STABLE_NEEDED and time.time() < deadline:
@@ -1873,19 +1881,25 @@ def _is_user_attachment(src: str, alt: str) -> bool:
 
 
 def _wait_for_new_image(page: Page, exclude_ids: set[str], run_id: str,
-                        timeout_ms: int = 180_000, poll_ms: int = 2000,
+                        timeout_ms: int = 180_000, poll_ms: int = 400,
                         on_phase=None) -> list[str]:
-    """Poll until a NEW generated image appears that is not in `exclude_ids` and
-    is not a user attachment/avatar, is fully loaded (complete && naturalWidth>0,
-    >= 256px), and whose src has stopped changing for 2 consecutive polls. Then
+    """Poll until a NEW generated image is present and DEMONSTRABLY FINISHED, then
     collect and return the new srcs (scoped to the last turn, page-wide fallback).
+
+    "Finished" guard (replaces the old fixed 5s quiet period — ChatGPT renders
+    images progressively, so a partial image can momentarily look complete):
+      * the image is loaded (complete && naturalWidth>0) and >= 256px, AND
+      * its SRC *and* its NATURAL SIZE are identical on 2 consecutive checks
+        ~`poll_ms` apart (default ~400ms), AND
+      * the STOP button is gone (the turn is no longer streaming).
+    Only when all three hold do we return it — never a partial image.
 
     Image generation can take 30–120s AFTER the stop button detaches, so this is
     what actually gates collection. Returns [] on timeout. Never raises."""
     t0 = time.monotonic()
     deadline = time.monotonic() + timeout_ms / 1000.0
     MIN_DIM = 256
-    stable_src = None
+    stable_key = None     # (src, nw, nh) that has to repeat to count as finished
     stable_polls = 0
     _reported_a = False
 
@@ -1901,7 +1915,8 @@ def _wait_for_new_image(page: Page, exclude_ids: set[str], run_id: str,
             cands = page.evaluate(_NEW_IMAGE_PROBE_JS, GENERATED_IMG) or []
         except Exception:
             cands = []
-        # Keep only real, loaded, large-enough, NEW candidates.
+        # Keep only real, loaded, large-enough, NEW candidates (full dicts so we
+        # can compare natural size, not just src).
         valid = []
         for c in cands:
             src, alt = c.get("src", ""), c.get("alt", "")
@@ -1912,7 +1927,7 @@ def _wait_for_new_image(page: Page, exclude_ids: set[str], run_id: str,
             ident = _image_identity(src, alt)
             if not ident or ident in exclude_ids:
                 continue
-            valid.append(src)
+            valid.append(c)
         if valid:
             # a_finished: the FIRST time a fully-loaded generated image is seen
             # (ChatGPT has finished rendering it) — reported once, before the
@@ -1920,21 +1935,28 @@ def _wait_for_new_image(page: Page, exclude_ids: set[str], run_id: str,
             if not _reported_a:
                 _reported_a = True
                 _phase("a_finished")
-            # Require the newest src to stay put for 2 polls (image finished
-            # streaming and its blob URL is not being swapped).
+            # FINISHED guard: the newest candidate's src AND natural size must be
+            # identical on 2 consecutive checks (image stopped growing / its blob
+            # URL is not being swapped), AND the stop button must be gone.
             newest = valid[-1]
-            if newest == stable_src:
+            key = (newest.get("src", ""), newest.get("nw", 0), newest.get("nh", 0))
+            if key == stable_key:
                 stable_polls += 1
             else:
-                stable_src, stable_polls = newest, 1
-            if stable_polls >= 2:
+                stable_key, stable_polls = key, 1
+            stop_gone = False
+            try:
+                stop_gone = page.query_selector(STOP_BUTTON) is None
+            except Exception:
+                stop_gone = True
+            if stable_polls >= 2 and stop_gone:
                 elapsed = time.monotonic() - t0
                 # Collect via the normal path so dedup/scoping stay identical.
                 srcs = _collect_last_turn_images(page, exclude_ids)
                 if not srcs:
-                    srcs = valid  # last-turn scope missed it; use the validated set
-                logger.info("[%s] image turn finished after %.0fs, %d new image(s)",
-                            run_id, elapsed, len(srcs))
+                    srcs = [c.get("src", "") for c in valid if c.get("src")]  # last-turn scope missed it
+                logger.info("[%s] image turn finished after %.1fs (src+size stable x2, stop gone), "
+                            "%d new image(s)", run_id, elapsed, len(srcs))
                 _phase("b_detected")
                 return srcs
         time.sleep(poll_ms / 1000.0)

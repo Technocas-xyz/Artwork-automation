@@ -770,6 +770,15 @@ def _record_stage_image(job: dict, key: str, data: bytes, filename: str,
         print(f"[stage-image] uploaded {filename}, then recorded {key} -> {filename}")
         print(f"TURN-TIMING run={job.get('id')} kind=upload phase=d_uploaded "
               f"file={filename} bytes={len(data)} upload_ms={_up_ms:.0f}")
+        # 3) Push a progress sync RIGHT NOW so the result reaches the server
+        #    (and thus the website) immediately, instead of waiting up to
+        #    SYNC_INTERVAL (2s) for the background sync loop. Non-fatal.
+        try:
+            _sync_job()
+        except _CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[stage-image] immediate sync after upload failed (will retry on loop): {exc}")
     else:
         # Upload did not confirm. Do NOT announce the name (that would 404).
         # The end-of-job upload sweep + audit will retry and surface any file

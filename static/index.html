@@ -802,7 +802,11 @@ function _ttRenderTiming(job){
   }catch(e){}
 }
 var _ttPollStart=0;
-function pollJob(id){stepStart=Date.now();_ttPollStart=Date.now();_ttSeenImgs={};clr();elapsedTimer=setInterval(updElapsed,1000);pollingTimer=setInterval(function(){fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(function(j){_ttRenderTiming(j);render(j)})},2000);fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(function(j){_ttRenderTiming(j);render(j)})}
+// Poll the active job every 1s WHILE IT RUNS so a finished result shows within
+// ~1s of reaching the server (was 2s). Polling stops entirely when the job
+// hits a terminal/awaiting state (the render path calls clearActiveJob/clr), so
+// "back to normal when done" = no polling once done.
+function pollJob(id){stepStart=Date.now();_ttPollStart=Date.now();_ttSeenImgs={};clr();elapsedTimer=setInterval(updElapsed,1000);pollingTimer=setInterval(function(){fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(function(j){_ttRenderTiming(j);render(j)})},1000);fetch("/api/jobs/"+id).then(function(r){return r.json()}).then(function(j){_ttRenderTiming(j);render(j)})}
 function clr(){if(pollingTimer)clearInterval(pollingTimer);if(elapsedTimer)clearInterval(elapsedTimer);pollingTimer=elapsedTimer=null}
 function updElapsed(){var el=$("stepEl");if(el&&stepStart)el.textContent=fmt(Math.round((Date.now()-stepStart)/1000))}
 
