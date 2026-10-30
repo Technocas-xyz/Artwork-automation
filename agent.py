@@ -54,7 +54,7 @@ from src.browser import launch_context, is_logged_in
 from src.generator import (
     generate, open_chat, rename_chat, send_turn, send_text_turn,
     get_last_text_reply, get_boxes, extract_artwork_images,
-    check_project_urls, dump_page_controls, set_photocraft_mcp,
+    check_project_urls, dump_page_controls, set_photocraft_mcp, photocraft_note,
 )
 from src.postprocess import (
     is_opaque_white_bg, remove_white_background,
@@ -1651,6 +1651,10 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                 result_images = send_turn(page, prompt=prompt, image_paths=[current_image_path], run_id=f"{job_id}_{op}_{i}")
                 _track_end(job)
                 _rename_chat_once(page, job)
+                # Surface a PhotoCraft "looks regenerated" note to the operator.
+                _note = photocraft_note()
+                if _note:
+                    job["photocraft_note"] = _note
             except Exception as exc:
                 _track_end(job)
                 errors.append(f"Step {i} ({label}): {exc}")

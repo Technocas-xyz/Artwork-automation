@@ -149,10 +149,41 @@ SEND_BUTTON   = ("button[aria-label='Send prompt'], "
                  "button[aria-label*='Send'], "
                  "[data-testid='send-button']")
 
-# The "Add files and more" composer control (aria-label confirmed live). Not
-# used for the actual upload (that targets the hidden input above) but kept as a
-# candidate list for the diagnostic / future menu-driven upload.
+# The "Add files and more" composer control (aria-label confirmed live). Clicking
+# it opens the menu that lists tools/plugins (Web search, Deep research, Sketch,
+# then plugins with an "@" icon: PhotoCraft, Chrome, ...). Also used to drive the
+# PhotoCraft tool selection (select_photocraft_tool).
 UPLOAD_LABELS = ("Add files and more", "Add photos & files", "Attach files", "Upload files")
+ADD_MENU_BUTTON = ("button[aria-label='Add files and more'], "
+                   "button[aria-label='Add photos & files'], "
+                   "button[aria-label*='Add files' i], "
+                   "button[aria-label*='more' i]")
+
+# --- PhotoCraft composer-tool selection -----------------------------------
+# PhotoCraft must be SELECTED in the composer before sending (a text request
+# alone makes ChatGPT regenerate the image itself). The "+" menu has a
+# "Type to search plugins" box at the bottom; typing "PhotoCraft" filters the
+# list, and the menu item labelled exactly "PhotoCraft" selects the tool, which
+# then shows as a pill in the composer. Labels/roles confirmed loosely from the
+# live menu; select_photocraft_tool() logs the real DOM and matches the EXACT
+# "PhotoCraft" label so it never clicks "Chrome" or another plugin.
+PLUGIN_SEARCH_INPUT = ("input[placeholder*='search plugins' i], "
+                       "input[placeholder*='Type to search' i], "
+                       "input[placeholder*='plugin' i], "
+                       "input[type='search']")
+# Candidate containers for a menu item (role=menuitem / option, or a button/div
+# inside the open menu). The exact-label match is done in code, not CSS.
+MENU_ITEM = ("[role='menuitem'], [role='option'], "
+             "[role='menu'] button, [role='menu'] [role='button'], "
+             "[role='menu'] li, [role='dialog'] [role='menuitem']")
+# The selected-tool pill shown in the composer once PhotoCraft is chosen. Match
+# broadly (text + common pill/chip class fragments); confirmed in code by text.
+PHOTOCRAFT_PILL = ("button:has-text('PhotoCraft'), "
+                   "[class*='pill']:has-text('PhotoCraft'), "
+                   "[class*='chip']:has-text('PhotoCraft'), "
+                   "[class*='badge']:has-text('PhotoCraft'), "
+                   "[data-testid*='tool']:has-text('PhotoCraft')")
+PHOTOCRAFT_TOOL_NAME = "PhotoCraft"
 
 # A single prompt/response TURN. No data-testid exists any more; the live page
 # has 6 turn elements matching a class fragment inside <main>. Match on the

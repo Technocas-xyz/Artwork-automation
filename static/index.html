@@ -920,7 +920,8 @@ function render(job){
     var doneMsg=job.status==="done_with_errors"?'Done with some errors ('+fmt(activeT)+' processing time)':'All done! ('+fmt(activeT)+' processing time)';
     var doneClass=job.status==="done_with_errors"?"awaiting":"done";
     var mcpHdr=job.use_photocraft_mcp?' '+_photocraftTagHtml():'';
-    statusArea.innerHTML='<div class="status-box '+doneClass+'">'+doneMsg+mcpHdr+'</div>'+createdByLine(job);
+    var mcpNote=job.photocraft_note?'<div style="margin-top:6px;padding:6px 10px;border-radius:8px;background:#fffbeb;color:#92400e;border:1px solid #fde68a;font-size:.78rem">\u26a0 '+esc(job.photocraft_note)+'</div>':'';
+    statusArea.innerHTML='<div class="status-box '+doneClass+'">'+doneMsg+mcpHdr+'</div>'+mcpNote+createdByLine(job);
     if(job.workflow==="mockup")resultArea.innerHTML=renderMockupResults(job);
     else if(job.workflow==="artwork")resultArea.innerHTML=renderArtworkResults(job);
     else if(job.workflow==="custom")resultArea.innerHTML=renderCustomResults(job);

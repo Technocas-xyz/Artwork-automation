@@ -38,6 +38,11 @@ from config.selectors import (
     MODEL_PICKER_BUTTON,
     UPLOAD_PENDING_BUTTON,
     TURN_ACTION_CONTROLS,
+    ADD_MENU_BUTTON,
+    PLUGIN_SEARCH_INPUT,
+    MENU_ITEM,
+    PHOTOCRAFT_PILL,
+    PHOTOCRAFT_TOOL_NAME,
 )
 from src.browser import GenerationTimeoutError, RateLimitError
 from src.postprocess import is_opaque_white_bg
@@ -54,12 +59,30 @@ logger = logging.getLogger(__name__)
 # appended at send time.
 _photocraft_on = False
 PHOTOCRAFT_LINE = (
-    "Use the Photocraft MCP for this edit: load the attached image with "
-    "load_image, do the edit with edit_image, then export the final result "
-    "with export_image as a full-resolution PNG with transparency and give me "
-    "the download link. If Photocraft cannot do it, do it with normal image "
-    "generation instead. Do not ask me any questions."
+    "Use PhotoCraft for this edit and export the result as a full-resolution "
+    "transparent PNG download link. Do not ask me any questions."
 )
+
+# A short note set during collection (e.g. the result looked regenerated) that
+# the agent reads after a turn and surfaces to the operator. Reset at the start
+# of each collection so it only reflects the latest turn.
+_photocraft_note = ""
+
+
+def _set_photocraft_note(note: str) -> None:
+    global _photocraft_note
+    _photocraft_note = note or ""
+
+
+def _reset_photocraft_note() -> None:
+    global _photocraft_note
+    _photocraft_note = ""
+
+
+def photocraft_note() -> str:
+    """The note (if any) from the most recent PhotoCraft collection — empty when
+    the result looked normal. The agent reads this after send_turn to tag the job."""
+    return _photocraft_note
 
 
 def set_photocraft_mcp(on: bool) -> None:
@@ -492,6 +515,154 @@ def send_text_turn(
         raise
 
 
+def _dump_add_menu(page: Page, run_id: str = "") -> None:
+    """DIAGNOSTIC: log the open "+" menu's items (role, label text) and whether a
+    plugin-search input is present, so the PhotoCraft selection can be matched
+    against the REAL DOM. Never raises."""
+    banner = "[photocraft-menu]" + (f" {run_id}" if run_id else "")
+    try:
+        items = page.evaluate(
+            r"""() => {
+                const roots = Array.from(document.querySelectorAll(
+                    "[role='menu'], [role='listbox'], [role='dialog']"));
+                const root = roots[roots.length - 1] || document.body;
+                const nodes = Array.from(root.querySelectorAll(
+                    "[role='menuitem'],[role='option'],button,[role='button'],li"));
+                const seen = new Set(); const out = [];
+                for (const n of nodes) {
+                    const t = (n.textContent || "").trim().replace(/\s+/g, " ").slice(0, 60);
+                    if (!t || seen.has(t)) continue;
+                    seen.add(t);
+                    out.push({role: n.getAttribute('role') || n.tagName.toLowerCase(), text: t});
+                }
+                const search = root.querySelector(
+                    "input[placeholder*='plugin' i], input[placeholder*='search' i], input[type='search']");
+                return {count: out.length, items: out.slice(0, 30),
+                        hasSearch: !!search,
+                        searchPlaceholder: search ? (search.getAttribute('placeholder') || "") : null};
+            }"""
+        ) or {}
+        logger.info("%s items=%s hasSearch=%s placeholder=%r", banner,
+                    items.get("count"), items.get("hasSearch"), items.get("searchPlaceholder"))
+        for it in (items.get("items") or []):
+            logger.info("%s   [%s] %r", banner, it.get("role"), it.get("text"))
+    except Exception as exc:
+        logger.info("%s dump FAILED (%s)", banner, exc)
+
+
+def _photocraft_pill_present(page: Page) -> bool:
+    """True if the composer currently shows the selected PhotoCraft tool pill.
+    Confirmed by visible text so a class/role change does not hide it."""
+    try:
+        if page.query_selector(PHOTOCRAFT_PILL) is not None:
+            return True
+    except Exception:
+        pass
+    # Fallback: any small composer control whose text is exactly the tool name,
+    # scoped to the composer form so a thread mention is not mistaken for a pill.
+    try:
+        return bool(page.evaluate(
+            r"""(name) => {
+                const form = document.querySelector("form") || document.body;
+                const els = Array.from(form.querySelectorAll("button,[role='button'],span,div"));
+                return els.some(e => (e.textContent || "").trim() === name);
+            }""",
+            PHOTOCRAFT_TOOL_NAME,
+        ))
+    except Exception:
+        return False
+
+
+def select_photocraft_tool(page: Page, run_id: str = "photocraft") -> None:
+    """Select the PhotoCraft tool in the ChatGPT composer so the turn actually
+    runs through PhotoCraft (a text request alone makes ChatGPT regenerate the
+    image itself). Mirrors the manual steps:
+
+        click "+"  ->  type "PhotoCraft" in the plugin search  ->  click the
+        menu item whose label is EXACTLY "PhotoCraft"  ->  confirm the pill.
+
+    Logs the real menu DOM and what was clicked. Raises
+    GenerationTimeoutError("Could not select PhotoCraft in ChatGPT") if the pill
+    is not present afterwards — the caller must NOT silently fall back."""
+    name = PHOTOCRAFT_TOOL_NAME
+
+    # Already selected from a prior turn in the same chat? Nothing to do.
+    if _photocraft_pill_present(page):
+        logger.info("[photocraft %s] tool pill already present — skipping selection", run_id)
+        return
+
+    # 1) Open the "+" (Add files and more) menu.
+    add_btn = page.query_selector(ADD_MENU_BUTTON)
+    if add_btn is None:
+        add_btn = find_button_by_labels(page, UPLOAD_LABELS, name="add-menu")
+    if add_btn is None:
+        raise GenerationTimeoutError("Could not select PhotoCraft in ChatGPT")
+    add_btn.click()
+    page.wait_for_timeout(500)
+    _dump_add_menu(page, run_id=run_id)
+
+    # 2) Type the tool name into the plugin-search box (if present) to filter.
+    try:
+        search = page.query_selector(PLUGIN_SEARCH_INPUT)
+        if search is not None:
+            search.click()
+            search.fill(name)
+            logger.info("[photocraft %s] typed %r into plugin search", run_id, name)
+            page.wait_for_timeout(600)
+            _dump_add_menu(page, run_id=f"{run_id}-filtered")
+        else:
+            logger.info("[photocraft %s] no plugin-search input found; matching menu directly", run_id)
+    except Exception as exc:
+        logger.info("[photocraft %s] plugin-search fill failed (%s); matching menu directly", run_id, exc)
+
+    # 3) Click the menu item whose VISIBLE LABEL is EXACTLY the tool name. Doing
+    #    the exact-match in code (not CSS) so we never click "Chrome" etc.
+    clicked = False
+    try:
+        items = page.query_selector_all(MENU_ITEM)
+        # Prefer an exact text match; fall back to a startswith if ChatGPT adds a
+        # subtitle line ("PhotoCraft\nPhotoCraft") inside the same item.
+        exact = None
+        startswith = None
+        for it in items:
+            try:
+                txt = (it.inner_text() or "").strip()
+            except Exception:
+                continue
+            first = txt.splitlines()[0].strip() if txt else ""
+            if first == name and exact is None:
+                exact = it
+            elif first.startswith(name) and startswith is None:
+                startswith = it
+        target = exact or startswith
+        if target is not None:
+            logger.info("[photocraft %s] clicking menu item %r", run_id,
+                        (target.inner_text() or "").strip().splitlines()[:1])
+            target.click()
+            clicked = True
+    except Exception as exc:
+        logger.info("[photocraft %s] menu-item click failed (%s)", run_id, exc)
+
+    if not clicked:
+        logger.warning("[photocraft %s] no menu item labelled exactly %r was found", run_id, name)
+
+    # 4) Confirm the pill is in the composer.
+    for _ in range(12):  # ~3s
+        if _photocraft_pill_present(page):
+            logger.info("[photocraft %s] PhotoCraft tool pill confirmed in composer", run_id)
+            # Close any lingering menu so the composer is ready for typing.
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return
+        page.wait_for_timeout(250)
+
+    logger.warning("[photocraft %s] PhotoCraft pill NOT present after selection", run_id)
+    _diag_event("fallback", "Could not select PhotoCraft in ChatGPT", step=run_id)
+    raise GenerationTimeoutError("Could not select PhotoCraft in ChatGPT")
+
+
 def send_turn(
     page: Page,
     prompt: str,
@@ -540,6 +711,14 @@ def send_turn(
         pre_existing_ids = _collect_image_ids(page)
         logger.info("send_turn before-ids: %d ids captured", len(pre_existing_ids))
 
+        # --- Photocraft MCP: SELECT the PhotoCraft composer tool BEFORE typing
+        #     the prompt. A text request alone makes ChatGPT regenerate the image
+        #     itself; selecting the tool is what routes the turn through
+        #     PhotoCraft. Order is: upload (above) -> select tool -> type -> send.
+        #     Raises if the tool can't be selected (no silent fallback). ---
+        if _photocraft_on:
+            select_photocraft_tool(page, run_id=run_id)
+
         # --- Type prompt ---
         page.click(PROMPT_BOX)
         _enter_prompt(page, prompt)
@@ -587,7 +766,9 @@ def send_turn(
         #     also handles the question-stall. ---
         if _photocraft_on:
             _dump_photocraft_reply(page, run_id=run_id)
-            return _prefer_transparent(_photocraft_collect(page, run_id))
+            input_wh = _measure_image_file(image_paths[0]) if image_paths else None
+            return _prefer_transparent(
+                _photocraft_collect(page, run_id, input_wh=input_wh))
 
         if not new_srcs:
             # No image after the full wait. Dump the image diagnostic AGAIN, now
@@ -1898,8 +2079,8 @@ def _dump_photocraft_reply(page: Page, run_id: str = "") -> None:
 
 def _fetch_bytes_via_session(page: Page, url: str) -> bytes:
     """Download `url` inside the ChatGPT browser session (same cookies) and
-    return the raw bytes. Used for Photocraft export download links, which are
-    served behind the same auth as the page. Raises on a non-OK response."""
+    return the raw bytes. Used as the LAST-RESORT for a preview <img> src.
+    Raises on a non-OK response."""
     byte_array: list[int] = page.evaluate(
         """async (url) => {
             const resp = await fetch(url, { credentials: 'include' });
@@ -1910,6 +2091,82 @@ def _fetch_bytes_via_session(page: Page, url: str) -> bytes:
         url,
     )
     return bytes(byte_array)
+
+
+def _measure_image_bytes(data: bytes):
+    """(width, height) of an image given its bytes, or None. Lazy PIL import so
+    this module keeps working if PIL is ever absent (it is present project-wide)."""
+    try:
+        from io import BytesIO
+        from PIL import Image
+        with Image.open(BytesIO(data)) as im:
+            return (im.width, im.height)
+    except Exception:
+        return None
+
+
+def _measure_image_file(path: str):
+    """(width, height) of an image file, or None. Used to capture the INPUT size
+    so the result can be compared against it (a much larger result means ChatGPT
+    regenerated rather than PhotoCraft editing)."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return (im.width, im.height)
+    except Exception:
+        return None
+
+
+def _download_photocraft_link(page: Page, href: str, run_id: str) -> bytes:
+    """Download a PhotoCraft export link, trying the most reliable methods first:
+      1. page.context.request.get(href) — reuses the page's cookies, no UI.
+      2. click the link and capture page.expect_download() — for links that
+         trigger a browser download rather than a direct-servable URL.
+      3. in-page fetch(credentials:'include') — last resort.
+    Logs the href domain. Raises if all methods fail."""
+    try:
+        from urllib.parse import urlparse
+        dom = urlparse(href).netloc or "(relative)"
+    except Exception:
+        dom = "(unparsed)"
+    logger.info("[photocraft %s] export link domain=%s", run_id, dom)
+
+    # 1) context.request.get — same cookies, no navigation.
+    try:
+        resp = page.context.request.get(href)
+        if resp.ok:
+            data = resp.body()
+            if data:
+                logger.info("[photocraft %s] downloaded via context.request.get: %d bytes",
+                            run_id, len(data))
+                return data
+        logger.info("[photocraft %s] context.request.get status=%s — trying click/download",
+                    run_id, getattr(resp, "status", "?"))
+    except Exception as exc:
+        logger.info("[photocraft %s] context.request.get failed (%s) — trying click/download",
+                    run_id, exc)
+
+    # 2) Click the link and capture the triggered download.
+    try:
+        link = page.query_selector(f"a[href='{href}']")
+        if link is not None:
+            with page.expect_download(timeout=30_000) as dl_info:
+                link.click()
+            dl = dl_info.value
+            tmp = dl.path()
+            if tmp:
+                data = Path(tmp).read_bytes()
+                logger.info("[photocraft %s] downloaded via expect_download: %d bytes",
+                            run_id, len(data))
+                return data
+    except Exception as exc:
+        logger.info("[photocraft %s] click/expect_download failed (%s) — trying in-page fetch",
+                    run_id, exc)
+
+    # 3) In-page fetch (same session).
+    data = _fetch_bytes_via_session(page, href)
+    logger.info("[photocraft %s] downloaded via in-page fetch: %d bytes", run_id, len(data))
+    return data
 
 
 # A link in the reply is treated as a Photocraft export download when its href or
@@ -1981,23 +2238,49 @@ def _find_photocraft_result(page: Page):
         return None
 
 
-def _photocraft_collect(page: Page, run_id: str) -> list[bytes]:
-    """Collect the Photocraft edit result from the last turn, in the contract
-    order: (a) export download link -> download via the browser session; (b)
-    else the largest image preview; (c) else fail. Logs which path was used and
-    the resulting byte size. Raises GenerationTimeoutError on (c).
+PHOTOCRAFT_REGEN_NOTE = "Photocraft requested, result looks regenerated"
+
+
+def _check_photocraft_size(data: bytes, input_wh, run_id: str) -> None:
+    """Log the result pixel size vs the input size and, if the result is more
+    than ~2x the input in either dimension, flag that it looks REGENERATED (not
+    a PhotoCraft edit) via the module-level note the agent reads. Never raises."""
+    out_wh = _measure_image_bytes(data)
+    if not out_wh:
+        logger.info("[photocraft %s] result size: unmeasurable (%d bytes)", run_id, len(data))
+        return
+    ow, oh = out_wh
+    if not input_wh:
+        logger.info("[photocraft %s] result size: %dx%d (input size unknown)", run_id, ow, oh)
+        return
+    iw, ih = input_wh
+    logger.info("[photocraft %s] result size: %dx%d  input: %dx%d", run_id, ow, oh, iw, ih)
+    if iw and ih and (ow > 2 * iw or oh > 2 * ih):
+        logger.warning("[photocraft %s] result is >2x the input (%dx%d vs %dx%d) — %s",
+                       run_id, ow, oh, iw, ih, PHOTOCRAFT_REGEN_NOTE)
+        _set_photocraft_note(PHOTOCRAFT_REGEN_NOTE)
+
+
+def _photocraft_collect(page: Page, run_id: str, input_wh=None) -> list[bytes]:
+    """Collect the PhotoCraft edit result from the last turn, in the contract
+    order: (a) export download link -> download (context.request.get, else click
+    + expect_download, else in-page fetch); (b) else the largest image preview;
+    (c) else fail. Logs which path was used and the byte size, and flags a
+    result that looks regenerated (much larger than the input). Raises
+    GenerationTimeoutError on (c).
 
     Question-stall guard: if there is no link and no image AND the reply ends in
-    a question, fail with QUESTION_INSTEAD_OF_RESULT instead of the generic
-    'no image' message."""
+    a question, fail with QUESTION_INSTEAD_OF_RESULT. Otherwise fail with
+    'PhotoCraft returned no file'."""
+    _reset_photocraft_note()
     found = _find_photocraft_result(page)
     if found and found.get("kind") == "link":
         href = found.get("href") or ""
         logger.info("[photocraft %s] result=download-link text=%r href=%r",
                     run_id, found.get("text"), href[:160])
         try:
-            data = _fetch_bytes_via_session(page, href)
-            logger.info("[photocraft %s] downloaded export PNG: %d bytes", run_id, len(data))
+            data = _download_photocraft_link(page, href, run_id)
+            _check_photocraft_size(data, input_wh, run_id)
             return [data]
         except Exception as exc:
             logger.warning("[photocraft %s] export link download FAILED (%s) — "
@@ -2010,6 +2293,7 @@ def _photocraft_collect(page: Page, run_id: str) -> list[bytes]:
                     run_id, found.get("w"), found.get("h"), src[:160])
         data = _fetch_bytes_via_session(page, src)
         logger.info("[photocraft %s] downloaded preview image: %d bytes", run_id, len(data))
+        _check_photocraft_size(data, input_wh, run_id)
         return [data]
 
     # Nothing usable. Distinguish a question-stall from a plain empty result.
@@ -2023,9 +2307,9 @@ def _photocraft_collect(page: Page, run_id: str) -> list[bytes]:
                        preview, " …" if len(reply) > 300 else "")
         _diag_event("fallback", QUESTION_INSTEAD_OF_RESULT, step=run_id, detail=preview)
         raise GenerationTimeoutError(QUESTION_INSTEAD_OF_RESULT)
-    logger.warning("[photocraft %s] Photocraft returned no image", run_id)
-    _diag_event("fallback", "Photocraft returned no image", step=run_id)
-    raise GenerationTimeoutError("Photocraft returned no image")
+    logger.warning("[photocraft %s] PhotoCraft returned no file", run_id)
+    _diag_event("fallback", "PhotoCraft returned no file", step=run_id)
+    raise GenerationTimeoutError("PhotoCraft returned no file")
 
 
 def _srcs_from(elements, exclude_ids: set[str]) -> list[str]:
