@@ -53,7 +53,11 @@ logger = logging.getLogger(__name__)
 # prompt is sent unchanged. Managed prompts are never edited; the line is only
 # appended at send time.
 _photocraft_on = False
-PHOTOCRAFT_LINE = "Do this job using photocraft mcp"
+PHOTOCRAFT_LINE = (
+    "Use the Photocraft MCP tools for this job wherever they can do it. "
+    "If Photocraft cannot do any part of it, do that part with normal image "
+    "generation instead. Do not ask me any questions; just produce the result."
+)
 
 
 def set_photocraft_mcp(on: bool) -> None:
@@ -77,6 +81,30 @@ def _apply_photocraft(prompt: str) -> str:
     if prompt.rstrip().endswith(PHOTOCRAFT_LINE):
         return prompt
     return prompt.rstrip() + "\n\n" + PHOTOCRAFT_LINE
+
+
+# Message raised when a turn that was supposed to produce an image instead
+# comes back as a text reply ending in a question — ChatGPT asking the operator
+# something (e.g. "Would you like me to proceed using image generation
+# instead?") rather than producing the result. The automation can never answer,
+# so the step must fail with a clear message instead of waiting for an image
+# that will never arrive.
+QUESTION_INSTEAD_OF_RESULT = "ChatGPT asked a question instead of producing a result"
+
+
+def _ends_with_question(text: str) -> bool:
+    """True if the reply's last non-empty, non-chrome line ends with a question
+    mark. Used to detect a turn where ChatGPT asked something instead of
+    producing the expected image. Tolerant of trailing UI chrome and the '?'
+    full-width variant."""
+    if not text:
+        return False
+    for line in reversed(text.splitlines()):
+        s = line.strip()
+        if not s or _is_edge_chrome(s):
+            continue
+        return s.endswith("?") or s.endswith("\uff1f")
+    return False
 
 
 # Set once we have dumped the page controls on a control-not-found failure, so
@@ -555,6 +583,24 @@ def send_turn(
             # image likely lives inside the new DilRenderer structure.
             _diagnose_images(page, reason="0 new images after image-wait")
             _dump_last_dil_html(page, reason=f"0-images turn {run_id}")
+            # If instead of an image ChatGPT came back with a text reply that
+            # ends in a question, it is asking the operator something (common
+            # with the Photocraft MCP line, e.g. "Would you like me to proceed
+            # using image generation instead?"). The automation can never
+            # answer, so FAIL the step now with a clear message rather than
+            # waiting on an image that will never come.
+            try:
+                reply = (get_last_text_reply(page) or "").strip()
+            except Exception:
+                reply = ""
+            if reply and _ends_with_question(reply):
+                preview = reply.replace("\n", " ")[:300]
+                logger.warning("[image-turn %s] %s: %r%s", run_id,
+                               QUESTION_INSTEAD_OF_RESULT, preview,
+                               " …" if len(reply) > 300 else "")
+                _diag_event("fallback", QUESTION_INSTEAD_OF_RESULT,
+                            step=run_id, detail=preview)
+                raise GenerationTimeoutError(QUESTION_INSTEAD_OF_RESULT)
             if require_images:
                 raise GenerationTimeoutError("ChatGPT returned no images")
             return []
