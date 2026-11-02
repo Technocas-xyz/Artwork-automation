@@ -255,29 +255,50 @@ def make_print_ready(png_bytes: bytes, target_w: int, target_h: int,
     """Server/agent-side verification of a PhotoCraft print-ready export.
 
     PhotoCraft is asked to resize to the target and hard-threshold the alpha, but
-    we verify and correct deterministically so the saved file is exactly right:
+    we verify and correct deterministically so the saved file is exactly right
+    and the DESIGN IS NEVER STRETCHED:
 
-      1. If the image is not within +/-2 px of (target_w, target_h) in EITHER
-         dimension, resize to the exact target with LANCZOS.
+      1. If the image is already within +/-2 px of (target_w, target_h), keep it.
+         Otherwise FIT it INSIDE the target keeping its own aspect ratio
+         (LANCZOS downscale/upscale), then PAD with fully transparent pixels to
+         the exact target size, centered. This never distorts the artwork — a
+         portrait result into a portrait target just scales; a mismatched aspect
+         gets transparent bars rather than a squash.
       2. If ANY pixel has an alpha strictly between 0 and 255, apply the alpha
          threshold ourselves: alpha < `alpha_threshold` -> 0, else 255 (no
          semi-transparent fringe). Pixels already at 0 or 255 are untouched.
+         (The transparent padding is alpha 0, so it is unaffected.)
       3. Save as PNG with dpi=(dpi, dpi).
 
     Returns (out_bytes, info) where info is a dict:
-      {resized: bool, from_size: (w,h), to_size: (w,h),
-       thresholded: bool, changed_pixels: int, dpi: int,
+      {resized: bool, padded: bool, from_size: (w,h), fitted_size: (w,h),
+       to_size: (w,h), thresholded: bool, changed_pixels: int, dpi: int,
        width_in: float, height_in: float, summary: str}
     Never raises for a measurement issue — on a hard failure it re-raises so the
     caller can fail the step with a clear error."""
     img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
     from_w, from_h = img.size
 
-    # 1) Resize to the exact target if off by more than 2 px in either dim.
+    # 1) Fit-inside (keep aspect) + transparent pad to the exact target. Never
+    #    stretch. If already at target (within 2px), do nothing.
     resized = False
+    padded = False
+    fit_w, fit_h = from_w, from_h
     if abs(from_w - target_w) > 2 or abs(from_h - target_h) > 2:
-        img = img.resize((target_w, target_h), Image.LANCZOS)
-        resized = True
+        # Scale factor that fits the image inside the target without cropping.
+        scale = min(target_w / from_w, target_h / from_h)
+        fit_w = max(1, round(from_w * scale))
+        fit_h = max(1, round(from_h * scale))
+        if (fit_w, fit_h) != (from_w, from_h):
+            img = img.resize((fit_w, fit_h), Image.LANCZOS)
+            resized = True
+        # Pad to the exact target on a fully transparent canvas, centered.
+        if (fit_w, fit_h) != (target_w, target_h):
+            canvas = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+            off = ((target_w - fit_w) // 2, (target_h - fit_h) // 2)
+            canvas.paste(img, off)
+            img = canvas
+            padded = True
 
     # 2) Hard alpha threshold if any semi-transparent pixel exists.
     arr = np.array(img)  # H x W x 4, uint8
@@ -303,7 +324,9 @@ def make_print_ready(png_bytes: bytes, target_w: int, target_h: int,
                f"= {width_in} x {height_in} in")
     info = {
         "resized": resized,
+        "padded": padded,
         "from_size": (from_w, from_h),
+        "fitted_size": (fit_w, fit_h),
         "to_size": (out_w, out_h),
         "thresholded": thresholded,
         "changed_pixels": changed_pixels,

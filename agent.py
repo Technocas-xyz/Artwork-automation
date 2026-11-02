@@ -55,6 +55,7 @@ from src.generator import (
     generate, open_chat, rename_chat, send_turn, send_text_turn,
     get_last_text_reply, get_boxes, extract_artwork_images,
     check_project_urls, dump_page_controls, set_photocraft_mcp, photocraft_note,
+    set_photocraft_skip_regen_check,
 )
 from src.postprocess import (
     is_opaque_white_bg, remove_white_background,
@@ -2269,11 +2270,17 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
     height_in_req = job.get("pr_height_in")
 
     width_px = round(width_in * dpi)
+    # Measure the ACTUAL print_ready input image (the previous step's output for
+    # the custom op, or the uploaded file for the standalone workflow) with PIL
+    # directly — robust even if image_info() can't parse it. The height (when
+    # auto) MUST come from this image's aspect, never a default.
+    src_w = src_h = 0
     try:
-        info = image_info(Path(input_path).read_bytes())
-        src_w, src_h = int(info.get("width") or 0), int(info.get("height") or 0)
-    except Exception:
-        src_w = src_h = 0
+        from PIL import Image as _PILImage
+        with _PILImage.open(input_path) as _im:
+            src_w, src_h = int(_im.width), int(_im.height)
+    except Exception as exc:
+        print(f"[printready {run_id}] could not measure input {input_path!r}: {exc}")
     if height_in_req:
         height_in = float(height_in_req)
         height_px = round(height_in * dpi)
@@ -2281,12 +2288,13 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
         height_px = round(width_px * src_h / src_w)
         height_in = round(height_px / dpi, 2)
     else:
+        # Last resort only when the input could not be measured at all.
         height_px = width_px
         height_in = round(width_in, 2)
 
-    print(f"[printready {run_id}] target {width_in}x{height_in} in @ {dpi} DPI "
-          f"= {width_px}x{height_px} px, alpha_threshold={alpha_threshold} "
-          f"(source {src_w}x{src_h})")
+    print(f"[printready {run_id}] target {width_px}x{height_px} px "
+          f"({width_in}x{height_in} in @ {dpi} DPI) from input {src_w}x{src_h}, "
+          f"alpha_threshold={alpha_threshold}")
 
     # Build the PhotoCraft edit prompt (Decoinks key, fallback constant).
     template = _tpl(job, "PRINT_READY_PHOTOCRAFT", PRINT_READY_PHOTOCRAFT)
@@ -2301,8 +2309,10 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
             prompt = prompt.replace("{" + k + "}", str(v))
     job.setdefault("prompts", []).append(prompt)
 
-    # Run the PhotoCraft edit turn. Enable PhotoCraft ONLY here.
+    # Run the PhotoCraft edit turn. Enable PhotoCraft ONLY here, and skip the
+    # ">2x = looks regenerated" check (upscaling to the print target is expected).
     set_photocraft_mcp(True)
+    set_photocraft_skip_regen_check(True)
     try:
         _track_start(job)
         result_images = send_turn(page, prompt=prompt, image_paths=[input_path],
@@ -2312,6 +2322,7 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
     finally:
         try:
             set_photocraft_mcp(False)
+            set_photocraft_skip_regen_check(False)
         except Exception:
             pass
 
@@ -2330,8 +2341,11 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
         dpi=dpi, alpha_threshold=alpha_threshold)
 
     if pr_info.get("resized"):
-        print(f"[printready {run_id}] resized {pr_info['from_size']} -> "
-              f"{pr_info['to_size']} (LANCZOS) to hit the target.")
+        print(f"[printready {run_id}] fit {pr_info['from_size']} -> "
+              f"{pr_info['fitted_size']} (LANCZOS, aspect kept).")
+    if pr_info.get("padded"):
+        print(f"[printready {run_id}] padded transparent {pr_info['fitted_size']} -> "
+              f"{pr_info['to_size']} (centered) to hit the exact target.")
     if pr_info.get("thresholded"):
         print(f"[printready {run_id}] applied alpha threshold {alpha_threshold}: "
               f"{pr_info['changed_pixels']} pixel(s) changed.")

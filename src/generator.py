@@ -60,10 +60,21 @@ logger = logging.getLogger(__name__)
 # prompt is sent unchanged. Managed prompts are never edited; the line is only
 # appended at send time.
 _photocraft_on = False
+# When True, the ">2x input = looks regenerated" check is skipped. The Print
+# Ready step sets this (upscaling to a large print target is expected there);
+# other PhotoCraft uses leave it False so the regen flag still fires.
+_photocraft_skip_regen = False
 PHOTOCRAFT_LINE = (
     "Use PhotoCraft for this edit and export the result as a full-resolution "
     "transparent PNG download link. Do not ask me any questions."
 )
+
+
+def set_photocraft_skip_regen_check(skip: bool) -> None:
+    """Enable/disable the regen-size check skip for subsequent PhotoCraft turns.
+    The Print Ready step wraps its turn with True/finally False."""
+    global _photocraft_skip_regen
+    _photocraft_skip_regen = bool(skip)
 
 # A short note set during collection (e.g. the result looked regenerated) that
 # the agent reads after a turn and surfaces to the operator. Reset at the start
@@ -2585,6 +2596,11 @@ def _check_photocraft_size(data: bytes, input_wh, run_id: str) -> None:
         return
     iw, ih = input_wh
     logger.info("[photocraft %s] result size: %dx%d  input: %dx%d", run_id, ow, oh, iw, ih)
+    if _photocraft_skip_regen:
+        # Print Ready: upscaling to a large print target is expected, so the
+        # >2x "looks regenerated" flag does not apply.
+        logger.info("[photocraft %s] regen-size check skipped (print-ready upscale)", run_id)
+        return
     if iw and ih and (ow > 2 * iw or oh > 2 * ih):
         logger.warning("[photocraft %s] result is >2x the input (%dx%d vs %dx%d) — %s",
                        run_id, ow, oh, iw, ih, PHOTOCRAFT_REGEN_NOTE)
@@ -3192,9 +3208,18 @@ def _wait_no_upload_pending(page: Page, run_id: str = "submit", timeout_s: float
     while time.monotonic() - t0 < timeout_s:
         try:
             pending = page.query_selector(UPLOAD_PENDING_BUTTON)
+            if pending is None:
+                # Belt-and-braces: some builds show the pending state as a
+                # disabled button whose TEXT (not aria-label) says "upload
+                # pending"/"uploading". Treat that as pending too.
+                pending = page.evaluate(
+                    r"""() => Array.from(document.querySelectorAll('button')).some(b =>
+                        (b.disabled || b.getAttribute('aria-disabled') === 'true') &&
+                        /upload pending|uploading/i.test((b.innerText || '') + ' ' +
+                            (b.getAttribute('aria-label') || '')))""")
         except Exception:
             pending = None
-        if pending is None:
+        if not pending:
             if last_log:   # only note clearance if we actually waited
                 logger.info("[submit %s] upload pending cleared after %.0fs.", run_id, time.monotonic() - t0)
             return
@@ -3229,9 +3254,9 @@ def _submit_prompt(page: Page, run_id: str = "submit") -> bool:
     iff submission was confirmed.
     """
     # GATE: never submit while a file upload is still pending — Send is a no-op
-    # then and the turn never starts (confirmed live). Wait up to 90s for the
+    # then and the turn never starts (confirmed live). Wait up to 60s for the
     # 'File upload pending' button to disappear.
-    _wait_no_upload_pending(page, run_id=run_id, timeout_s=90.0)
+    _wait_no_upload_pending(page, run_id=run_id, timeout_s=60.0)
 
     before_len = len(_composer_text(page))
 
@@ -3387,11 +3412,26 @@ def find_button_by_labels(page: Page, labels, css_fallback: str | None = None,
 # element that looks like a conversation turn. Pure DOM, returns plain data.
 _CONTROLS_DUMP_JS = r"""
 () => {
-  const btns = Array.from(document.querySelectorAll('button')).map(b => ({
-    label: b.getAttribute('aria-label'),
-    text: (b.innerText || '').trim().slice(0, 40),
-    disabled: b.disabled || b.getAttribute('aria-disabled') === 'true'
-  }));
+  // The sidebar/history repeats the same per-conversation buttons (Pin chat,
+  // Chat actions, Delete, ...) dozens of times — noise that drowns the
+  // composer controls we actually need. Skip those labels, and de-duplicate by
+  // (label|text|disabled) so each distinct control is logged once.
+  const SKIP = new Set(['Pin chat','Unpin chat','Chat actions','Chat history',
+                        'Open sidebar','Close sidebar','Delete','Rename','Archive',
+                        'Share chat','More actions']);
+  const total = document.querySelectorAll('button').length;
+  const seen = new Set();
+  const btns = [];
+  for (const b of Array.from(document.querySelectorAll('button'))) {
+    const label = b.getAttribute('aria-label');
+    const text = (b.innerText || '').trim().slice(0, 40);
+    if (label && SKIP.has(label)) continue;
+    const disabled = b.disabled || b.getAttribute('aria-disabled') === 'true';
+    const key = (label || '') + '|' + text + '|' + disabled;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    btns.push({ label, text, disabled });
+  }
   // Best-effort "last turn": prefer explicit turn markers, else a class
   // fragment inside <main>, so we log whatever ChatGPT now uses.
   const turnSel = "[data-testid^='conversation-turn-'], main [class*='conversation-turn'], main article[class*='turn'], main [class*='turn']";
@@ -3407,7 +3447,7 @@ _CONTROLS_DUMP_JS = r"""
       outerStart: (t.outerHTML || '').slice(0, 600)
     };
   }
-  return { buttonCount: btns.length, buttons: btns, lastTurn };
+  return { buttonCount: total, distinctCount: btns.length, buttons: btns, lastTurn };
 }
 """
 
@@ -3431,7 +3471,8 @@ def dump_page_controls(page: Page, reason: str = "") -> None:
 
     banner = "[control-dump]" + (f" reason={reason}" if reason else "")
     buttons = data.get("buttons") or []
-    logger.info("%s %d button(s) on the page:", banner, data.get("buttonCount", 0))
+    logger.info("%s %d distinct button(s) (of %d on the page, sidebar duplicates skipped):",
+                banner, data.get("distinctCount", len(buttons)), data.get("buttonCount", 0))
     for b in buttons:
         logger.info("%s   button aria-label=%r text=%r disabled=%s",
                     banner, b.get("label"), b.get("text"), b.get("disabled"))
