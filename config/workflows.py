@@ -683,6 +683,10 @@ CUSTOM_OPERATIONS_ORDER = [
     "half_tone",
     "change_object_color",
     "aspect_ratio",
+    # print_ready runs ABSOLUTELY LAST: it takes the output of every preceding
+    # step and makes it print-ready via PhotoCraft (resize + transparent +
+    # export). It is the only Custom op that uses PhotoCraft.
+    "print_ready",
 ]
 
 CUSTOM_OPERATIONS_LABELS = {
@@ -693,6 +697,7 @@ CUSTOM_OPERATIONS_LABELS = {
     "half_tone": "Half Tone",
     "change_object_color": "Change Object Colour",
     "aspect_ratio": "Aspect Ratio Enhancement",
+    "print_ready": "Print Ready (PhotoCraft)",
 }
 
 # Single-sourced operation definitions: key, label, description, template.
@@ -723,4 +728,13 @@ CUSTOM_OPERATIONS = [
     {"key": "aspect_ratio", "label": "Aspect Ratio Enhancement", "desc": "Pad canvas to a print-friendly ratio (local, never crops)",
      "advisory": True,
      "template": CUSTOM_ASPECT_ADVICE},
+    # print_ready uses the PhotoCraft composer tool (NOT normal ChatGPT) to make
+    # the previous step's output print-ready: resize to the target print size at
+    # the chosen DPI, transparent background with a hard alpha cutoff, exported
+    # PNG. Carries no editable prompt template (the agent builds it from the
+    # print-size inputs via PRINT_READY_PHOTOCRAFT); flagged "photocraft" so the
+    # UI shows the width/height/DPI/threshold inputs only when it is ticked.
+    {"key": "print_ready", "label": "Print Ready (PhotoCraft)",
+     "desc": "Resize, make transparent and export a print-ready PNG via PhotoCraft",
+     "photocraft": True},
 ]

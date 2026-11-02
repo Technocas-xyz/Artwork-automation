@@ -946,7 +946,8 @@ function render(job){
     clr();var activeT=job.active_time?Math.round(job.active_time):0;
     var doneMsg=job.status==="done_with_errors"?'Done with some errors ('+fmt(activeT)+' processing time)':'All done! ('+fmt(activeT)+' processing time)';
     var doneClass=job.status==="done_with_errors"?"awaiting":"done";
-    var usedPc=(job.workflow==="printready")&&(job.pr_via_photocraft||job.printready_summary);
+    var usedPc=((job.workflow==="printready")&&(job.pr_via_photocraft||job.printready_summary))
+               ||job.printready_summary;
     var mcpHdr=usedPc?' '+_photocraftTagHtml():'';
     var mcpNote=job.photocraft_note?'<div style="margin-top:6px;padding:6px 10px;border-radius:8px;background:#fffbeb;color:#92400e;border:1px solid #fde68a;font-size:.78rem">\u26a0 '+esc(job.photocraft_note)+'</div>':'';
     var prSummary=job.printready_summary?'<div style="margin-top:6px;padding:6px 10px;border-radius:8px;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;font-size:.8rem;font-weight:600">'+esc(job.printready_summary)+'</div>':'';
@@ -1346,6 +1347,18 @@ function renderCustomCol2(){
         html+='<div style="font-size:.72rem;font-weight:600;margin:8px 0 4px">Step B \u2014 apply colours</div>';
         html+='<textarea id="cTplApply_'+op.key+'" data-prompt-id="cTplApply_'+op.key+'">'+esc(seedPromptText("cTplApply_"+op.key,tApply))+'</textarea>';
         html+='</div>';
+      } else if(op.photocraft){
+        // Print Ready (PhotoCraft): no editable prompt. Show the print-size
+        // inputs (width / height-auto / DPI / alpha threshold). The agent builds
+        // the prompt from these via PRINT_READY_PHOTOCRAFT.
+        html+='<div onclick="event.stopPropagation()" style="margin-top:8px">';
+        html+='<div style="display:flex;gap:8px">';
+        html+='<div class="field-group" style="flex:1"><label>Print width (in)</label><input type="number" id="cPrWidthIn" value="10.75" step="0.01" min="0"></div>';
+        html+='<div class="field-group" style="flex:1"><label>Print height (in) \u2014 blank = auto</label><input type="number" id="cPrHeightIn" placeholder="auto" step="0.01" min="0"></div>';
+        html+='</div><div style="display:flex;gap:8px">';
+        html+='<div class="field-group" style="flex:1"><label>DPI</label><input type="number" id="cPrDpi" value="300" step="1" min="1"></div>';
+        html+='<div class="field-group" style="flex:1"><label>Alpha threshold</label><input type="number" id="cPrAlpha" value="120" step="1" min="0" max="255"></div>';
+        html+='</div></div>';
       } else {
         // Single-turn ChatGPT operation: template comes directly from the server object — no key construction.
         var tplVal=op.template||"";
@@ -1429,6 +1442,18 @@ function submitCustomJob(){
     if(bt&&bt.value)blackout.threshold=parseInt(bt.value,10);
   }
   var body={workflow:"custom",artwork_files:[customFile],custom_operations:customOps,custom_prompts:prompts,aspect_dpi:customDpi,halftone_settings:halftone,blackout_settings:blackout,client:jobClient.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
+  // Print Ready (PhotoCraft) print-size inputs, only present when that op is ticked.
+  if(customOps.indexOf("print_ready")>=0){
+    var pw=parseFloat(($("cPrWidthIn")||{}).value);
+    var ph=parseFloat(($("cPrHeightIn")||{}).value);
+    var pdpi=parseInt(($("cPrDpi")||{}).value,10);
+    var palpha=parseInt(($("cPrAlpha")||{}).value,10);
+    body.pr_via_photocraft=true;
+    body.pr_width_in=(isFinite(pw)&&pw>0)?pw:10.75;
+    body.pr_height_in=(isFinite(ph)&&ph>0)?ph:0;
+    body.pr_dpi=(isFinite(pdpi)&&pdpi>0)?pdpi:300;
+    body.pr_alpha_threshold=(isFinite(palpha)&&palpha>=0)?palpha:120;
+  }
   $("cGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("cGenBtn").disabled=false});
 }
@@ -4678,7 +4703,7 @@ function renderHist(){
     var det=stageThumbs(job,si);
     var div=document.createElement("div");div.className="history-item";
     var byTag=job.created_by_name?' <span style="color:var(--muted)">· by '+esc(job.created_by_name)+'</span>':'';
-    var mcpTag=((job.workflow==="printready")&&(job.pr_via_photocraft||job.printready_summary))?' '+_photocraftTagHtml():'';
+    var mcpTag=(((job.workflow==="printready")&&(job.pr_via_photocraft||job.printready_summary))||job.printready_summary)?' '+_photocraftTagHtml():'';
     div.innerHTML='<span class="hi-label">'+st+'</span> \u2014 '+esc(job.client)+' / '+esc(job.task_id)+' \u2014 '+desc+byTag+mcpTag+'<div class="history-detail" id="'+did+'">'+det+'</div>';
     div.onclick=function(){$(did).classList.toggle("open")};
     historyList.appendChild(div);

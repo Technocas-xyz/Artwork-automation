@@ -1333,10 +1333,14 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
     # Sort operations into fixed execution order. Operations published in Prompt
     # Management (pm_*) are single-step and run in the order ticked, before
     # Aspect Ratio, which always runs last.
-    ordered_ops = [op for op in CUSTOM_OPERATIONS_ORDER if op in operations and op != "aspect_ratio"]
+    _tail = ("aspect_ratio", "print_ready")  # these run last, in this order
+    ordered_ops = [op for op in CUSTOM_OPERATIONS_ORDER if op in operations and op not in _tail]
     ordered_ops += [op for op in operations if op.startswith("pm_") and op not in ordered_ops]
-    if "aspect_ratio" in operations:
-        ordered_ops.append("aspect_ratio")
+    # Aspect Ratio pads the canvas; Print Ready (PhotoCraft) then makes the final
+    # canvas print-ready. Both after everything else, in this fixed order.
+    for _t in _tail:
+        if _t in operations:
+            ordered_ops.append(_t)
     op_labels = dict(CUSTOM_OPERATIONS_LABELS, **(job.get("custom_operation_labels") or {}))
     total = len(ordered_ops)
     job["stage_label"] = f"Running {total} operation(s)"
@@ -1640,6 +1644,36 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
             current_image_path = str(OUTPUT_DIR / step_name)
             steps_done.append({"step": i, "op": op, "label": label, "file": step_name})
             _mark_uploaded(job, _upload_files(job_id, [step_name]))
+
+        elif op == "print_ready":
+            # Print Ready (PhotoCraft): the LAST op. Takes the previous step's
+            # output and makes it print-ready via the SHARED PhotoCraft step
+            # (resize + transparent + export + verify). PhotoCraft is enabled
+            # ONLY inside the shared helper (set_photocraft_mcp True/finally
+            # False), so every other op stayed on normal ChatGPT.
+            job["stage_label"] = f"Step {i} of {total} \u2014 {label}"
+            try:
+                out_bytes, pr_info = _photocraft_print_ready_step(
+                    page, job, current_image_path, run_id=f"{job_id}_printready_{i}")
+            except Exception as exc:
+                _track_end(job)
+                errors.append(f"Step {i} ({label}): {exc}")
+                break
+
+            step_name = f"{job_id}_step{i}_{op}.png"
+            (OUTPUT_DIR / step_name).write_bytes(out_bytes)
+            (run_dir / f"{task_id}_R{run_number}_step{i}_{op}.png").write_bytes(out_bytes)
+            current_image_path = str(OUTPUT_DIR / step_name)
+            steps_done.append({"step": i, "op": op, "label": label, "file": step_name})
+            _mark_uploaded(job, _upload_files(job_id, [step_name]))
+            # Surface the print-ready summary/target for the Results panel.
+            job["printready_summary"] = pr_info["summary"]
+            job["printready_target"] = {
+                "width_in": pr_info["width_in"], "height_in": pr_info["height_in"],
+                "dpi": pr_info["dpi"], "width_px": pr_info["to_size"][0],
+                "height_px": pr_info["to_size"][1],
+                "alpha_threshold": int(job.get("pr_alpha_threshold") or 120),
+            }
 
         else:
             # Single-turn operation
@@ -2209,42 +2243,34 @@ def _printready_measurements_block(report: dict) -> str:
     return "\n".join(lines)
 
 
-def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
-    """Print Ready via PhotoCraft. This is the ONLY step that uses PhotoCraft.
+def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str,
+                                 run_id: str):
+    """The SHARED PhotoCraft print-ready step, used by both the Print Ready
+    workflow and the Custom "Print Ready (PhotoCraft)" operation.
 
-    The agent SELECTS the PhotoCraft composer tool and sends ONE edit turn that
-    asks PhotoCraft to resize the artwork to the operator's target print size at
-    the chosen DPI, make the background transparent with a hard alpha threshold,
-    and export a full-resolution transparent PNG download link. The exported PNG
-    is downloaded, then VERIFIED/corrected deterministically on this side
-    (make_print_ready: resize to the exact target if off by >2px, hard-threshold
-    any semi-transparent alpha, save at the chosen DPI). The server-precomputed
-    13-check report, if present, is left on the job for display.
+    Selects the PhotoCraft composer tool and sends ONE edit turn asking it to
+    resize `input_path` to the operator's target print size at the chosen DPI,
+    make the background transparent with a hard alpha threshold, and export a
+    full-resolution transparent PNG download link. The exported PNG is then
+    VERIFIED/corrected deterministically (make_print_ready: resize to the exact
+    target if off by >2px, hard-threshold any semi-transparent alpha, save at the
+    chosen DPI).
 
     PhotoCraft is enabled ONLY for this turn (set_photocraft_mcp True) and reset
-    to False in finally so no other step ever routes through PhotoCraft."""
-    job_id = job["id"]
-    artwork_file = job.get("artwork_files", [""])[0]
-    current_image_path = str(INPUT_DIR / artwork_file)
-    if not artwork_file or not Path(current_image_path).exists():
-        job["status"] = "failed"
-        job["error"] = f"Input file not found: {artwork_file!r}"
-        job["finished_at"] = time.time()
-        return
+    to False in finally so no other step ever routes through PhotoCraft.
 
-    job["printready_original_file"] = Path(current_image_path).name
-
-    # --- Resolve the print-size parameters (operator overrides, else defaults). ---
+    The print-size params come from the job (pr_width_in default 10.75, optional
+    pr_height_in, pr_dpi 300, pr_alpha_threshold 120). Appends the prompt to
+    job['prompts'] and surfaces a "looks regenerated" note on job. Returns
+    (out_bytes, pr_info). Raises on any failure (no file, download, verify)."""
     width_in = float(job.get("pr_width_in") or 10.75)
     dpi = int(job.get("pr_dpi") or 300)
     alpha_threshold = int(job.get("pr_alpha_threshold") or 120)
-    # Height is optional: blank -> keep the artwork's aspect ratio.
     height_in_req = job.get("pr_height_in")
 
     width_px = round(width_in * dpi)
-    # Aspect ratio from the source image.
     try:
-        info = image_info(Path(current_image_path).read_bytes())
+        info = image_info(Path(input_path).read_bytes())
         src_w, src_h = int(info.get("width") or 0), int(info.get("height") or 0)
     except Exception:
         src_w = src_h = 0
@@ -2255,15 +2281,14 @@ def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
         height_px = round(width_px * src_h / src_w)
         height_in = round(height_px / dpi, 2)
     else:
-        # No source dimensions and no explicit height — fall back to square.
         height_px = width_px
         height_in = round(width_in, 2)
 
-    print(f"[printready] target {width_in}x{height_in} in @ {dpi} DPI "
+    print(f"[printready {run_id}] target {width_in}x{height_in} in @ {dpi} DPI "
           f"= {width_px}x{height_px} px, alpha_threshold={alpha_threshold} "
           f"(source {src_w}x{src_h})")
 
-    # --- Build the PhotoCraft edit prompt (Decoinks key, fallback constant). ---
+    # Build the PhotoCraft edit prompt (Decoinks key, fallback constant).
     template = _tpl(job, "PRINT_READY_PHOTOCRAFT", PRINT_READY_PHOTOCRAFT)
     fields = dict(width_in=width_in, height_in=height_in, dpi=dpi,
                   width_px=width_px, height_px=height_px,
@@ -2276,32 +2301,15 @@ def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
             prompt = prompt.replace("{" + k + "}", str(v))
     job.setdefault("prompts", []).append(prompt)
 
-    # Open the chat in this workflow's project (falls back to plain chat).
-    _track_start(job)
-    _open_chat_for(page, job)
-    _track_end(job)
-
-    job["stage"] = 1
-    job["stage_label"] = "Making it print-ready with PhotoCraft"
-
-    # --- Run the PhotoCraft edit turn. Enable PhotoCraft ONLY here. ---
+    # Run the PhotoCraft edit turn. Enable PhotoCraft ONLY here.
     set_photocraft_mcp(True)
     try:
         _track_start(job)
-        result_images = send_turn(page, prompt=prompt,
-                                  image_paths=[current_image_path],
-                                  run_id=f"{job_id}_printready")
+        result_images = send_turn(page, prompt=prompt, image_paths=[input_path],
+                                  run_id=run_id)
         _track_end(job)
         _rename_chat_once(page, job)
-    except Exception as exc:
-        _track_end(job)
-        print(f"[printready] PhotoCraft turn failed: {exc}")
-        job["status"] = "failed"
-        job["error"] = str(exc)
-        job["finished_at"] = time.time()
-        return
     finally:
-        # PhotoCraft must never leak into any later step.
         try:
             set_photocraft_mcp(False)
         except Exception:
@@ -2313,31 +2321,59 @@ def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
         job["photocraft_note"] = _note
 
     if not result_images:
-        job["status"] = "failed"
-        job["error"] = "PhotoCraft returned no file"
-        job["finished_at"] = time.time()
-        return
+        raise RuntimeError("PhotoCraft returned no file")
 
-    # --- Server/agent-side verify: resize to exact target if off by >2px, hard
-    #     alpha threshold, save at the chosen DPI. ---
-    try:
-        out_bytes, pr_info = make_print_ready(
-            result_images[0], target_w=width_px, target_h=height_px,
-            dpi=dpi, alpha_threshold=alpha_threshold)
-    except Exception as exc:
-        print(f"[printready] print-ready verify failed: {exc}")
-        job["status"] = "failed"
-        job["error"] = f"Print-ready verification failed: {exc}"
-        job["finished_at"] = time.time()
-        return
+    # Verify/correct: resize to exact target if off by >2px, hard alpha
+    # threshold, save at the chosen DPI.
+    out_bytes, pr_info = make_print_ready(
+        result_images[0], target_w=width_px, target_h=height_px,
+        dpi=dpi, alpha_threshold=alpha_threshold)
 
     if pr_info.get("resized"):
-        print(f"[printready] resized {pr_info['from_size']} -> {pr_info['to_size']} "
-              f"(LANCZOS) to hit the target.")
+        print(f"[printready {run_id}] resized {pr_info['from_size']} -> "
+              f"{pr_info['to_size']} (LANCZOS) to hit the target.")
     if pr_info.get("thresholded"):
-        print(f"[printready] applied alpha threshold {alpha_threshold}: "
+        print(f"[printready {run_id}] applied alpha threshold {alpha_threshold}: "
               f"{pr_info['changed_pixels']} pixel(s) changed.")
-    print(f"[printready] {pr_info['summary']}")
+    print(f"[printready {run_id}] {pr_info['summary']}")
+    return out_bytes, pr_info
+
+
+def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
+    """Print Ready via PhotoCraft (standalone workflow). Thin wrapper around the
+    shared _photocraft_print_ready_step: open the chat, run the step on the
+    uploaded artwork, save + upload the result PNG and its summary. The
+    server-precomputed 13-check report, if present, is left on the job for
+    display."""
+    job_id = job["id"]
+    artwork_file = job.get("artwork_files", [""])[0]
+    current_image_path = str(INPUT_DIR / artwork_file)
+    if not artwork_file or not Path(current_image_path).exists():
+        job["status"] = "failed"
+        job["error"] = f"Input file not found: {artwork_file!r}"
+        job["finished_at"] = time.time()
+        return
+
+    job["printready_original_file"] = Path(current_image_path).name
+
+    # Open the chat in this workflow's project (falls back to plain chat).
+    _track_start(job)
+    _open_chat_for(page, job)
+    _track_end(job)
+
+    job["stage"] = 1
+    job["stage_label"] = "Making it print-ready with PhotoCraft"
+
+    try:
+        out_bytes, pr_info = _photocraft_print_ready_step(
+            page, job, current_image_path, run_id=f"{job_id}_printready")
+    except Exception as exc:
+        _track_end(job)
+        print(f"[printready] failed: {exc}")
+        job["status"] = "failed"
+        job["error"] = str(exc)
+        job["finished_at"] = time.time()
+        return
 
     final_name = f"{job_id}_printready.png"
     (OUTPUT_DIR / final_name).write_bytes(out_bytes)
@@ -2345,12 +2381,12 @@ def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
     job["final_names"] = [final_name]
     _mark_uploaded(job, _upload_files(job_id, [final_name]))
 
-    # Summary for the Results panel.
     job["printready_summary"] = pr_info["summary"]
     job["printready_target"] = {
-        "width_in": width_in, "height_in": height_in, "dpi": dpi,
-        "width_px": width_px, "height_px": height_px,
-        "alpha_threshold": alpha_threshold,
+        "width_in": pr_info["width_in"], "height_in": pr_info["height_in"],
+        "dpi": pr_info["dpi"], "width_px": pr_info["to_size"][0],
+        "height_px": pr_info["to_size"][1],
+        "alpha_threshold": int(job.get("pr_alpha_threshold") or 120),
     }
 
     job["status"] = "done"
