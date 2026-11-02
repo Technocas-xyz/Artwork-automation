@@ -966,23 +966,42 @@ def send_turn(
                                 label=f"image-turn {run_id}", on_phase=_ts)
         _ts("stop button detached / quiet period elapsed")
 
+        # --- Photocraft MCP edit result: when the toggle is on, PhotoCraft does
+        #     NOT render a normal generated <img>; it replies with a download
+        #     link (sometimes only a link). So DO NOT wait 180s for a generated
+        #     <img> here — give the reply a short settle, dump its structure, and
+        #     collect: export link -> acceptable preview -> corrective follow-up
+        #     -> fail. Every download step has a hard timeout so this never
+        #     hangs. ---
+        if _photocraft_on:
+            page.wait_for_timeout(1500)
+            _dump_photocraft_reply(page, run_id=run_id)
+            input_wh = _measure_image_file(image_paths[0]) if image_paths else None
+
+            def _retry_sender(followup_prompt: str) -> None:
+                """Send ONE text-only corrective follow-up in the SAME chat (the
+                PhotoCraft tool is already selected). Waits for the turn to
+                settle so the new reply can be collected."""
+                page.click(PROMPT_BOX)
+                _enter_prompt(page, followup_prompt)
+                _submit_prompt(page, run_id=f"{run_id}-retry")
+                try:
+                    page.wait_for_selector(STOP_BUTTON, state="attached", timeout=30_000)
+                except Exception:
+                    pass
+                _wait_for_turn_complete(page, quiet_ms=5000, timeout=900_000,
+                                        label=f"image-turn {run_id}-retry", on_phase=_ts)
+                page.wait_for_timeout(1500)
+
+            return _prefer_transparent(
+                _photocraft_collect(page, run_id, input_wh=input_wh,
+                                    retry_sender=_retry_sender))
+
         # --- Now WAIT for the actual generated image. It appears 30–120s after
         #     the stop button detaches, so this poll is what really gates
         #     collection (the old code collected here and always found 0). ---
         new_srcs = _wait_for_new_image(page, pre_existing_ids, run_id, timeout_ms=180_000)
         logger.info("send_turn after-collection: %d new images", len(new_srcs))
-
-        # --- Photocraft MCP edit result: when the toggle is on, Photocraft does
-        #     NOT render a normal generated <img>; it exports a file and gives a
-        #     download link (or an inline preview inside a tool-result block).
-        #     Dump the reply structure for diagnosis, then collect in the
-        #     contract order: export link -> largest preview -> fail. This path
-        #     also handles the question-stall. ---
-        if _photocraft_on:
-            _dump_photocraft_reply(page, run_id=run_id)
-            input_wh = _measure_image_file(image_paths[0]) if image_paths else None
-            return _prefer_transparent(
-                _photocraft_collect(page, run_id, input_wh=input_wh))
 
         if not new_srcs:
             # No image after the full wait. Dump the image diagnostic AGAIN, now
@@ -2331,55 +2350,95 @@ def _measure_image_file(path: str):
         return None
 
 
+def _fetch_bytes_with_abort(page: Page, url: str, timeout_ms: int = 20_000) -> bytes:
+    """In-page fetch of `url` with an AbortController hard timeout, so a hung
+    download can never block the turn forever. Raises on timeout / non-OK."""
+    byte_array: list[int] = page.evaluate(
+        """async ({url, ms}) => {
+            const ctl = new AbortController();
+            const t = setTimeout(() => ctl.abort(), ms);
+            try {
+                const resp = await fetch(url, { credentials: 'include', signal: ctl.signal });
+                if (!resp.ok) throw new Error('Fetch failed: ' + resp.status);
+                const buf = await resp.arrayBuffer();
+                return Array.from(new Uint8Array(buf));
+            } finally { clearTimeout(t); }
+        }""",
+        {"url": url, "ms": timeout_ms},
+    )
+    return bytes(byte_array)
+
+
 def _download_photocraft_link(page: Page, href: str, run_id: str) -> bytes:
-    """Download a PhotoCraft export link, trying the most reliable methods first:
-      1. page.context.request.get(href) — reuses the page's cookies, no UI.
-      2. click the link and capture page.expect_download() — for links that
-         trigger a browser download rather than a direct-servable URL.
-      3. in-page fetch(credentials:'include') — last resort.
-    Logs the href domain. Raises if all methods fail."""
+    """Download a PhotoCraft export link with a HARD timeout on every attempt, so
+    collection can never hang. Order:
+      1. page.context.request.get(href, timeout=30s) — same cookies, no UI.
+      2. click the link; if it opens a NEW TAB (target=_blank / ↗), capture the
+         page via context.expect_page and read the image from it, else capture a
+         triggered page.expect_download(timeout=20s). Then close the tab.
+      3. in-page fetch with a 20s AbortController.
+    Logs the href domain and the start/end of each attempt. Raises if all fail."""
     try:
         from urllib.parse import urlparse
         dom = urlparse(href).netloc or "(relative)"
     except Exception:
         dom = "(unparsed)"
-    logger.info("[photocraft %s] export link domain=%s", run_id, dom)
+    logger.info("[photocraft %s] export link domain=%s href=%r", run_id, dom, href[:200])
 
     # 1) context.request.get — same cookies, no navigation.
+    logger.info("[photocraft %s] download attempt 1: context.request.get", run_id)
     try:
-        resp = page.context.request.get(href)
+        resp = page.context.request.get(href, timeout=30_000)
         if resp.ok:
             data = resp.body()
             if data:
-                logger.info("[photocraft %s] downloaded via context.request.get: %d bytes",
-                            run_id, len(data))
+                logger.info("[photocraft %s] attempt 1 OK: %d bytes", run_id, len(data))
                 return data
-        logger.info("[photocraft %s] context.request.get status=%s — trying click/download",
-                    run_id, getattr(resp, "status", "?"))
+        logger.info("[photocraft %s] attempt 1 status=%s", run_id, getattr(resp, "status", "?"))
     except Exception as exc:
-        logger.info("[photocraft %s] context.request.get failed (%s) — trying click/download",
-                    run_id, exc)
+        logger.info("[photocraft %s] attempt 1 failed (%s)", run_id, exc)
 
-    # 2) Click the link and capture the triggered download.
+    # 2) Click the link; handle a new tab OR a triggered download.
+    logger.info("[photocraft %s] download attempt 2: click link (new-tab / download)", run_id)
     try:
         link = page.query_selector(f"a[href='{href}']")
         if link is not None:
-            with page.expect_download(timeout=30_000) as dl_info:
-                link.click()
-            dl = dl_info.value
-            tmp = dl.path()
-            if tmp:
-                data = Path(tmp).read_bytes()
-                logger.info("[photocraft %s] downloaded via expect_download: %d bytes",
-                            run_id, len(data))
-                return data
+            target = (link.get_attribute("target") or "")
+            if target == "_blank":
+                # Opens a new tab — capture that page and read the image bytes.
+                with page.context.expect_page(timeout=20_000) as pg_info:
+                    link.click()
+                newpg = pg_info.value
+                try:
+                    newpg.wait_for_load_state("domcontentloaded", timeout=10_000)
+                    data = _fetch_bytes_with_abort(newpg, newpg.url, timeout_ms=20_000)
+                    logger.info("[photocraft %s] attempt 2 OK via new tab (%s): %d bytes",
+                                run_id, newpg.url[:120], len(data))
+                    return data
+                finally:
+                    try:
+                        newpg.close()
+                    except Exception:
+                        pass
+            else:
+                with page.expect_download(timeout=20_000) as dl_info:
+                    link.click()
+                dl = dl_info.value
+                tmp = dl.path()
+                if tmp:
+                    data = Path(tmp).read_bytes()
+                    logger.info("[photocraft %s] attempt 2 OK via expect_download: %d bytes",
+                                run_id, len(data))
+                    return data
+        else:
+            logger.info("[photocraft %s] attempt 2: link element not found for href", run_id)
     except Exception as exc:
-        logger.info("[photocraft %s] click/expect_download failed (%s) — trying in-page fetch",
-                    run_id, exc)
+        logger.info("[photocraft %s] attempt 2 failed (%s)", run_id, exc)
 
-    # 3) In-page fetch (same session).
-    data = _fetch_bytes_via_session(page, href)
-    logger.info("[photocraft %s] downloaded via in-page fetch: %d bytes", run_id, len(data))
+    # 3) In-page fetch with a hard abort timeout.
+    logger.info("[photocraft %s] download attempt 3: in-page fetch (abort 20s)", run_id)
+    data = _fetch_bytes_with_abort(page, href, timeout_ms=20_000)
+    logger.info("[photocraft %s] attempt 3 OK: %d bytes", run_id, len(data))
     return data
 
 
@@ -2389,66 +2448,109 @@ def _download_photocraft_link(page: Page, href: str, run_id: str) -> bytes:
 _PHOTOCRAFT_LINK_EXT = (".png", ".webp", ".jpg", ".jpeg")
 
 
-def _find_photocraft_result(page: Page):
+def _find_photocraft_result(page: Page, run_id: str = ""):
     """Inspect the LAST assistant turn and return a dict describing the best
-    available Photocraft result, or None. Shape:
+    available PhotoCraft result, or None. Shape:
 
-        {"kind": "link", "href": <url>, "text": <str>}          # export download
-        {"kind": "image", "src": <url>, "w": int, "h": int}     # largest preview
+        {"kind": "link", "href": <url>, "text": <str>}
+        {"kind": "image", "src": <url>, "w": int, "h": int,
+         "generated": bool, "inTool": bool}
 
-    Preference order matches the collection contract: a download link (the
-    full-resolution export) beats an inline preview; among previews the LARGEST
-    by natural pixel area wins. Never raises."""
+    Link detection is deliberately broad: ANY <a> in the last turn whose text
+    contains "download" (case-insensitive) OR whose href ends with an image
+    extension / contains "download" / points at a NON-chatgpt.com host. Links
+    inside tool blocks and links with target=_blank (the ↗ icon) are included.
+    Every <a> found is logged (text + href).
+
+    For a preview image we also report whether its alt is "Generated image*"
+    (GPT image generation, NOT PhotoCraft) and whether it sits inside a tool
+    block — the collector uses those to decide whether to accept it. Among
+    previews the LARGEST by natural pixel area wins. Never raises."""
+    banner = "[photocraft%s]" % ((" " + run_id) if run_id else "")
     try:
         bars = page.query_selector_all(TURN_ACTION_CONTROLS)
         if not bars:
             return None
-        return bars[-1].evaluate(
+        result = bars[-1].evaluate(
             r"""(bar, exts) => {
                 const turn = bar.closest("[data-testid^='conversation-turn-'], "
                     + "[class*='conversation-turn'], article[class*='turn']") || bar.parentElement;
                 if (!turn) return null;
-                // 1) Export download link: prefer an href ending in an image
-                //    extension, else one whose href/text mentions download/export.
-                const anchors = Array.from(turn.querySelectorAll('a'));
                 const lower = (s) => (s || "").toLowerCase();
-                let link = anchors.find(a => {
+                const inToolResult = (el) => {
+                    let n = el;
+                    while (n && n !== turn) {
+                        const c = (n.className || "") + "";
+                        const t = (n.getAttribute && (n.getAttribute('data-testid') || "")) + "";
+                        const tag = (n.tagName || "").toLowerCase();
+                        if (tag === 'pre' || tag === 'code') return true;
+                        if (/tool|result|code|invocation|function/i.test(c)) return true;
+                        if (/tool|result|code|invocation|function/i.test(t)) return true;
+                        n = n.parentElement;
+                    }
+                    return false;
+                };
+                // Collect EVERY anchor for logging.
+                const allAnchors = Array.from(turn.querySelectorAll('a')).map(a => ({
+                    href: a.getAttribute('href') || "",
+                    text: (a.textContent || "").trim()
+                }));
+                // Pick the best download link.
+                const anchors = Array.from(turn.querySelectorAll('a'));
+                const isDownload = (a) => {
                     const h = lower(a.getAttribute('href'));
-                    return h && exts.some(e => h.split('?')[0].endsWith(e));
-                });
-                if (!link) {
-                    link = anchors.find(a => {
-                        const h = lower(a.getAttribute('href'));
-                        const t = lower(a.textContent);
-                        return (h && /download|export|photocraft|oaiusercontent|blob:/.test(h))
-                            || /download|export|full.?res|png/.test(t);
-                    });
-                }
+                    const t = lower(a.textContent);
+                    if (!h) return false;
+                    if (t.includes('download')) return true;
+                    if (h.includes('download')) return true;
+                    const path = h.split('?')[0];
+                    if (exts.some(e => path.endsWith(e))) return true;
+                    // Non-chatgpt host (PhotoCraft serves the export elsewhere).
+                    const m = h.match(/^https?:\/\/([^\/]+)/);
+                    if (m && !/(^|\.)chatgpt\.com$|(^|\.)openai\.com$/.test(m[1])) return true;
+                    return false;
+                };
+                let link = anchors.find(isDownload);
+                let linkOut = null;
                 if (link && link.getAttribute('href')) {
-                    return {kind: "link",
-                            href: link.getAttribute('href'),
-                            text: (link.textContent || "").trim().slice(0, 120)};
+                    linkOut = {kind: "link",
+                               href: link.getAttribute('href'),
+                               text: (link.textContent || "").trim().slice(0, 160)};
                 }
-                // 2) Largest image preview by natural pixel area.
+                // Largest image preview by natural pixel area.
                 const imgs = Array.from(turn.querySelectorAll('img'));
                 let best = null, bestArea = -1;
                 for (const im of imgs) {
                     const src = im.getAttribute('src') || "";
-                    const alt = (im.getAttribute('alt') || "").toLowerCase();
+                    const alt = im.getAttribute('alt') || "";
                     if (!src) continue;
-                    // Skip the uploaded original (composer blob without a
-                    // "generated"/"result" alt) so we never return the input.
-                    if (src.startsWith('blob:') && !/generat|result|export|photocraft/.test(alt)) continue;
+                    if (src.startsWith('blob:') && !/generat|result|export|photocraft/i.test(alt)) continue;
                     const area = (im.naturalWidth || 0) * (im.naturalHeight || 0);
-                    if (area > bestArea) { bestArea = area; best = {src, w: im.naturalWidth, h: im.naturalHeight}; }
+                    if (area > bestArea) {
+                        bestArea = area;
+                        best = {src, w: im.naturalWidth, h: im.naturalHeight,
+                                generated: /^generated image/i.test(alt.trim()),
+                                inTool: inToolResult(im)};
+                    }
                 }
-                if (best) return {kind: "image", src: best.src, w: best.w, h: best.h};
-                return null;
+                return {anchors: allAnchors, link: linkOut,
+                        image: best ? {kind: "image", ...best} : null};
             }""",
             list(_PHOTOCRAFT_LINK_EXT),
         )
+        if not result:
+            return None
+        # Log every anchor found.
+        anchors = result.get("anchors") or []
+        logger.info("%s anchors in last turn: %d", banner, len(anchors))
+        for i, a in enumerate(anchors):
+            logger.info("%s   a[%d] text=%r href=%r", banner, i,
+                        (a.get("text") or "")[:120], (a.get("href") or "")[:200])
+        if result.get("link"):
+            return result["link"]
+        return result.get("image")
     except Exception as exc:
-        logger.info("[photocraft] result scan FAILED (%s)", exc)
+        logger.info("%s result scan FAILED (%s)", banner, exc)
         return None
 
 
@@ -2475,52 +2577,96 @@ def _check_photocraft_size(data: bytes, input_wh, run_id: str) -> None:
         _set_photocraft_note(PHOTOCRAFT_REGEN_NOTE)
 
 
-def _photocraft_collect(page: Page, run_id: str, input_wh=None) -> list[bytes]:
-    """Collect the PhotoCraft edit result from the last turn, in the contract
-    order: (a) export download link -> download (context.request.get, else click
-    + expect_download, else in-page fetch); (b) else the largest image preview;
-    (c) else fail. Logs which path was used and the byte size, and flags a
-    result that looks regenerated (much larger than the input). Raises
-    GenerationTimeoutError on (c).
+PHOTOCRAFT_REGEN_FOLLOWUP = (
+    "Do not generate a new image. Use PhotoCraft to edit the uploaded image "
+    "and give me the transparent PNG download link."
+)
 
-    Question-stall guard: if there is no link and no image AND the reply ends in
-    a question, fail with QUESTION_INSTEAD_OF_RESULT. Otherwise fail with
-    'PhotoCraft returned no file'."""
-    _reset_photocraft_note()
-    found = _find_photocraft_result(page)
+
+def _collect_from_found(page, found, run_id, input_wh):
+    """Turn a _find_photocraft_result() dict into image bytes, applying the
+    PhotoCraft-mode acceptance rules. Returns [bytes] on success, or None if the
+    only candidate is an unacceptable "Generated image" preview (caller then
+    sends the corrective follow-up). Raises only on a hard download error."""
     if found and found.get("kind") == "link":
         href = found.get("href") or ""
-        logger.info("[photocraft %s] result=download-link text=%r href=%r",
-                    run_id, found.get("text"), href[:160])
+        logger.info("[photocraft %s] result=download-link text=%r", run_id, found.get("text"))
         try:
             data = _download_photocraft_link(page, href, run_id)
             _check_photocraft_size(data, input_wh, run_id)
             return [data]
         except Exception as exc:
-            logger.warning("[photocraft %s] export link download FAILED (%s) — "
-                           "falling back to preview image", run_id, exc)
-            found = _find_photocraft_result(page)  # re-scan for a preview
+            logger.warning("[photocraft %s] link download FAILED (%s) — checking preview",
+                           run_id, exc)
+            found = _find_photocraft_result(page, run_id)  # re-scan
 
     if found and found.get("kind") == "image":
+        generated = bool(found.get("generated"))
+        in_tool = bool(found.get("inTool"))
         src = found.get("src") or ""
-        logger.info("[photocraft %s] result=preview-image %sx%s src=%r",
-                    run_id, found.get("w"), found.get("h"), src[:160])
-        data = _fetch_bytes_via_session(page, src)
+        # In PhotoCraft mode, a bare "Generated image*" preview is GPT image
+        # generation, NOT PhotoCraft — reject it unless it is inside the tool
+        # block. A non-"Generated image" preview is acceptable.
+        if generated and not in_tool:
+            logger.info("[photocraft %s] only a 'Generated image' preview (not PhotoCraft) "
+                        "— will send corrective follow-up", run_id)
+            return None
+        logger.info("[photocraft %s] result=preview-image %sx%s generated=%s inTool=%s",
+                    run_id, found.get("w"), found.get("h"), generated, in_tool)
+        data = _fetch_bytes_with_abort(page, src, timeout_ms=20_000)
         logger.info("[photocraft %s] downloaded preview image: %d bytes", run_id, len(data))
         _check_photocraft_size(data, input_wh, run_id)
         return [data]
 
-    # Nothing usable. Distinguish a question-stall from a plain empty result.
+    return None
+
+
+def _photocraft_collect(page: Page, run_id: str, input_wh=None, retry_sender=None) -> list[bytes]:
+    """Collect the PhotoCraft edit result from the last turn. PhotoCraft mode
+    PREFERS the download link; a preview image is accepted only when its alt is
+    NOT "Generated image*" (that is GPT generation) or it sits inside the tool
+    block. If the only thing present is a "Generated image", send ONE corrective
+    follow-up (via retry_sender) and collect again. Logs result size vs input.
+
+    Fails (never hangs) with:
+      * QUESTION_INSTEAD_OF_RESULT — reply ends in a question, nothing usable;
+      * "PhotoCraft did not return a file" — after the corrective retry;
+      * "PhotoCraft returned no file" — nothing usable and no retry available."""
+    _reset_photocraft_note()
+    found = _find_photocraft_result(page, run_id)
+    result = _collect_from_found(page, found, run_id, input_wh)
+    if result is not None:
+        return result
+
+    # Only a "Generated image" (or nothing). If the reply is a question, stop.
     try:
         reply = (get_last_text_reply(page) or "").strip()
     except Exception:
         reply = ""
-    if reply and _ends_with_question(reply):
+    nothing = found is None
+    if nothing and reply and _ends_with_question(reply):
         preview = reply.replace("\n", " ")[:300]
         logger.warning("[photocraft %s] %s: %r%s", run_id, QUESTION_INSTEAD_OF_RESULT,
                        preview, " …" if len(reply) > 300 else "")
         _diag_event("fallback", QUESTION_INSTEAD_OF_RESULT, step=run_id, detail=preview)
         raise GenerationTimeoutError(QUESTION_INSTEAD_OF_RESULT)
+
+    # Corrective follow-up: tell ChatGPT to use PhotoCraft, not image gen.
+    if retry_sender is not None:
+        logger.info("[photocraft %s] sending corrective follow-up and re-collecting", run_id)
+        try:
+            retry_sender(PHOTOCRAFT_REGEN_FOLLOWUP)
+        except Exception as exc:
+            logger.warning("[photocraft %s] corrective follow-up send FAILED (%s)", run_id, exc)
+        _dump_photocraft_reply(page, run_id=f"{run_id}-retry")
+        found2 = _find_photocraft_result(page, f"{run_id}-retry")
+        result2 = _collect_from_found(page, found2, f"{run_id}-retry", input_wh)
+        if result2 is not None:
+            return result2
+        logger.warning("[photocraft %s] PhotoCraft did not return a file (after retry)", run_id)
+        _diag_event("fallback", "PhotoCraft did not return a file", step=run_id)
+        raise GenerationTimeoutError("PhotoCraft did not return a file")
+
     logger.warning("[photocraft %s] PhotoCraft returned no file", run_id)
     _diag_event("fallback", "PhotoCraft returned no file", step=run_id)
     raise GenerationTimeoutError("PhotoCraft returned no file")
