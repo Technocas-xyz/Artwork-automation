@@ -686,12 +686,100 @@ function renderCol2(){
     var tpl1Id="tpl1__"+textMode;
     promptBlock='<div class="edit-toggle" id="tplTog">Edit prompt for step 1</div><div class="edit-body" id="tplBody"><textarea id="tpl1" data-prompt-id="'+tpl1Id+'">'+esc(seedPromptText(tpl1Id,step1Tpl))+'</textarea><div class="tpl-error" id="tplErr"></div></div>';
   }
-  col2.innerHTML=promptBlock+'<button class="gen-btn" id="genBtn" disabled>Generate</button><div class="blocker-msg" id="blkMsg"></div>';
+  col2.innerHTML=promptBlock+_printReadyControlsHtml(false)+'<button class="gen-btn" id="genBtn" disabled>Generate</button><div class="blocker-msg" id="blkMsg"></div>';
   wirePromptEdits(col2);
+  _wirePrintReady();
   $("tplTog").onclick=function(){$("tplTog").classList.toggle("open");$("tplBody").classList.toggle("open")};
   var t2=$("tplTog2");if(t2)t2.onclick=function(){t2.classList.toggle("open");$("tplBody2").classList.toggle("open")};
   $("genBtn").onclick=submitJob;
   checkStatus();
+}
+// --- "Print Ready via PhotoCraft" (shared, one component) --------------------
+// Shown on every SINGLE-DESIGN image workflow (Text, Artwork, Identify,
+// Geometry, Print Ready; Custom has its own print_ready op). When ON, after the
+// workflow produces its final image the agent runs a PhotoCraft print-ready
+// step on it (resize to the print size, transparent, export). The switch
+// defaults OFF on general workflows and ON on the Print Ready workflow; the
+// operator's last explicit choice (localStorage) overrides the default.
+// NOT shown on multi-output workflows (Extraction crops, Colorway garment set)
+// or the text-only reviews (Similarity, Object Similarity) — there is no single
+// design to size, and the agent post-step skips those too.
+// _printReadyControlsHtml(defaultOn) is dropped into a workflow's col2;
+// _printReadyBody() reads the inputs for the submit body; _wirePrintReady()
+// persists the toggle and shows/hides the size inputs.
+function _prViaSaved(defaultOn){
+  // The shared switch is remembered per browser. On the Print Ready workflow it
+  // defaults ON; on every other image workflow it defaults OFF. A stored value
+  // (the operator's last explicit choice) overrides the default.
+  try{
+    var v=localStorage.getItem("printReadyViaPhotocraft");
+    if(v==="1")return true;
+    if(v==="0")return false;
+    return !!defaultOn;
+  }catch(e){return !!defaultOn}
+}
+function _printReadyControlsHtml(defaultOn){
+  var on=_prViaSaved(defaultOn);
+  return '<label style="display:flex;align-items:center;gap:7px;margin:10px 0 2px;font-size:.84rem;cursor:pointer">'
+    +'<input type="checkbox" id="prViaPhotocraft"'+(on?' checked':'')+'>'
+    +'<span>Print Ready via PhotoCraft<span style="color:var(--muted);font-weight:400"> — resize, make transparent and export a print-ready PNG</span></span></label>'
+    +'<div id="prSizeFields" style="display:'+(on?'block':'none')+';margin:6px 0 0">'
+    +  '<div style="display:flex;gap:8px">'
+    +    '<div class="field-group" style="flex:1"><label>Print width (in)</label>'
+    +      '<input type="number" id="prWidthIn" value="10.75" step="0.01" min="0"></div>'
+    +    '<div class="field-group" style="flex:1"><label>Print height (in) — blank = auto</label>'
+    +      '<input type="number" id="prHeightIn" placeholder="auto" step="0.01" min="0"></div>'
+    +  '</div>'
+    +  '<div style="display:flex;gap:8px">'
+    +    '<div class="field-group" style="flex:1"><label>DPI</label>'
+    +      '<input type="number" id="prDpi" value="300" step="1" min="1"></div>'
+    +    '<div class="field-group" style="flex:1"><label>Alpha threshold</label>'
+    +      '<input type="number" id="prAlpha" value="120" step="1" min="0" max="255"></div>'
+    +  '</div>'
+    +'</div>';
+}
+function _wirePrintReady(){
+  var cb=$("prViaPhotocraft");if(!cb)return;
+  cb.onchange=function(){
+    try{localStorage.setItem("printReadyViaPhotocraft",cb.checked?"1":"0")}catch(e){}
+    var f=$("prSizeFields");if(f)f.style.display=cb.checked?"block":"none";
+  };
+}
+function _printReadyBody(){
+  var cb=$("prViaPhotocraft");
+  var via=cb?!!cb.checked:false;   // no switch rendered -> off
+  var w=parseFloat(($("prWidthIn")||{}).value);
+  var h=parseFloat(($("prHeightIn")||{}).value);
+  var dpi=parseInt(($("prDpi")||{}).value,10);
+  var alpha=parseInt(($("prAlpha")||{}).value,10);
+  return {
+    pr_via_photocraft:via,
+    pr_width_in:(isFinite(w)&&w>0)?w:10.75,
+    pr_height_in:(isFinite(h)&&h>0)?h:0,
+    pr_dpi:(isFinite(dpi)&&dpi>0)?dpi:300,
+    pr_alpha_threshold:(isFinite(alpha)&&alpha>=0)?alpha:120
+  };
+}
+// Small pill shown on a job result header and in Previous Runs for a Print Ready
+// via PhotoCraft job.
+function _photocraftTagHtml(){
+  return '<span style="display:inline-block;padding:1px 7px;border-radius:999px;background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;font-size:.68rem;font-weight:600;vertical-align:middle">PhotoCraft</span>';
+}
+// Shared "Print Ready (PhotoCraft)" result card: the exported print-ready PNG
+// (the job's final image after the post-step) + the summary line. Used on any
+// workflow whose own renderer does not already show the print-ready PNG.
+function _printReadyCard(job){
+  var si=job.stage_images||{};
+  var finalName=si.final||((job.final_names||[])[0]);
+  if(!finalName)return '';
+  var url="/api/output/"+encodeURIComponent(finalName);
+  var h='<div class="stage-result"><h3>Print Ready (PhotoCraft)</h3>';
+  h+='<a href="'+url+'" target="_blank"><img src="'+url+'" class="transparent-bg"></a>';
+  h+='<a class="dl-btn" href="'+url+'" download="'+esc(job.task_id||"print_ready")+'_print_ready.png">Download print-ready PNG</a>';
+  if(job.printready_summary){
+    h+='<div style="margin-top:6px;font-size:.8rem;color:#065f46;font-weight:600">'+esc(job.printready_summary)+'</div>';
+  }
+  return h+'</div>';
 }
 function updBtn(){
   var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();updIdentifyBtn();updPrintReadyBtn();updColorwayBtn();updSimilarityAgentNote();updObjectSimAgentNote();updObjectSimBtn();return}
@@ -708,6 +796,7 @@ function updBtn(){
 }
 function submitJob(){
   var body={workflow:"text",text_mode:textMode,client:jobClient.trim(),files:[],options:[],params:{},custom_note:""};
+  var _pr=_printReadyBody();for(var _k in _pr){body[_k]=_pr[_k];}
   if(textMode==="replace"){
     var rc=$("tplRC"),rf=$("tplRF"),err=$("tplErr"),err2=$("tplErr2");
     if(err)err.textContent="";if(err2)err2.textContent="";
@@ -888,7 +977,13 @@ function render(job){
     clr();var activeT=job.active_time?Math.round(job.active_time):0;
     var doneMsg=job.status==="done_with_errors"?'Done with some errors ('+fmt(activeT)+' processing time)':'All done! ('+fmt(activeT)+' processing time)';
     var doneClass=job.status==="done_with_errors"?"awaiting":"done";
-    statusArea.innerHTML='<div class="status-box '+doneClass+'">'+doneMsg+'</div>'+createdByLine(job);
+    var usedPc=((job.workflow==="printready")&&(job.pr_via_photocraft||job.printready_summary))
+               ||job.printready_summary;
+    var mcpHdr=usedPc?' '+_photocraftTagHtml():'';
+    var mcpNote=job.photocraft_note?'<div style="margin-top:6px;padding:6px 10px;border-radius:8px;background:#fffbeb;color:#92400e;border:1px solid #fde68a;font-size:.78rem">\u26a0 '+esc(job.photocraft_note)+'</div>':'';
+    var prSummary=job.printready_summary?'<div style="margin-top:6px;padding:6px 10px;border-radius:8px;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;font-size:.8rem;font-weight:600">'+esc(job.printready_summary)+'</div>':'';
+    var prWarn=job.photocraft_warning?'<div style="margin-top:6px;padding:6px 10px;border-radius:8px;background:#fffbeb;color:#92400e;border:1px solid #fde68a;font-size:.78rem">\u26a0 '+esc(job.photocraft_warning)+'</div>':'';
+    statusArea.innerHTML='<div class="status-box '+doneClass+'">'+doneMsg+mcpHdr+'</div>'+prSummary+prWarn+mcpNote+createdByLine(job);
     if(job.workflow==="mockup")resultArea.innerHTML=renderMockupResults(job);
     else if(job.workflow==="artwork")resultArea.innerHTML=renderArtworkResults(job);
     else if(job.workflow==="custom")resultArea.innerHTML=renderCustomResults(job);
@@ -900,6 +995,11 @@ function render(job){
     else if(job.workflow==="geometry")resultArea.innerHTML=renderGeometryResults(job);
     else if(job.workflow==="text"&&job.text_mode==="replace")resultArea.innerHTML=renderReplaceResults(job);
     else resultArea.innerHTML=renderStages(job);
+    // Shared Print Ready (PhotoCraft) card for workflows whose own renderer does
+    // NOT already show the print-ready PNG (printready + custom render it inline).
+    if(job.printready_summary&&job.workflow!=="printready"&&job.workflow!=="custom"){
+      resultArea.innerHTML=_printReadyCard(job)+resultArea.innerHTML;
+    }
     clearActiveJob();updBtn();addHist(job);
   }else if(job.status==="awaiting_signin"){
     // Session dropped on the agent PC. This is a PAUSE, not a failure: the job
@@ -1156,9 +1256,10 @@ function renderArtworkList(){
 window.removeArtwork=function(idx){artworkFiles.splice(idx,1);renderArtworkList();updArtworkBtn()};
 function renderArtworkCol2(){
   var artTpl=tpl("artwork")||tpl("artwork_regen")||"Regenerate this artwork as a clean final version suitable for DTF garment printing.";
-  col2.innerHTML='<div class="edit-toggle" id="aTplTog">Edit regeneration prompt</div><div class="edit-body" id="aTplBody"><textarea id="tplArtRegen" data-prompt-id="tplArtRegen">'+esc(seedPromptText("tplArtRegen",artTpl))+'</textarea></div><button class="gen-btn" id="aGenBtn" disabled>Generate</button><div class="blocker-msg" id="aBlkMsg"></div>';
+  col2.innerHTML='<div class="edit-toggle" id="aTplTog">Edit regeneration prompt</div><div class="edit-body" id="aTplBody"><textarea id="tplArtRegen" data-prompt-id="tplArtRegen">'+esc(seedPromptText("tplArtRegen",artTpl))+'</textarea></div>'+_printReadyControlsHtml(false)+'<button class="gen-btn" id="aGenBtn" disabled>Generate</button><div class="blocker-msg" id="aBlkMsg"></div>';
   wireClientTask("acn","ati",updArtworkBtn);
   wirePromptEdits(col2);
+  _wirePrintReady();
   $("aTplTog").onclick=function(){$("aTplTog").classList.toggle("open");$("aTplBody").classList.toggle("open")};
   $("aGenBtn").onclick=submitArtworkJob;
   checkStatus();
@@ -1173,6 +1274,7 @@ function updArtworkBtn(){
 function submitArtworkJob(){
   var tpl=$("tplArtRegen");
   var body={workflow:"artwork",artwork_files:artworkFiles,client:jobClient.trim(),template_regen:tpl?tpl.value:"",text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
+  var _pr=_printReadyBody();for(var _k in _pr){body[_k]=_pr[_k];}
   console.log("[submitArtworkJob] artworkFiles:",artworkFiles,"body:",body);
   $("aGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("aGenBtn").disabled=false});
@@ -1284,6 +1386,18 @@ function renderCustomCol2(){
         html+='<div style="font-size:.72rem;font-weight:600;margin:8px 0 4px">Step B \u2014 apply colours</div>';
         html+='<textarea id="cTplApply_'+op.key+'" data-prompt-id="cTplApply_'+op.key+'">'+esc(seedPromptText("cTplApply_"+op.key,tApply))+'</textarea>';
         html+='</div>';
+      } else if(op.photocraft){
+        // Print Ready (PhotoCraft): no editable prompt. Show the print-size
+        // inputs (width / height-auto / DPI / alpha threshold). The agent builds
+        // the prompt from these via PRINT_READY_PHOTOCRAFT.
+        html+='<div onclick="event.stopPropagation()" style="margin-top:8px">';
+        html+='<div style="display:flex;gap:8px">';
+        html+='<div class="field-group" style="flex:1"><label>Print width (in)</label><input type="number" id="cPrWidthIn" value="10.75" step="0.01" min="0"></div>';
+        html+='<div class="field-group" style="flex:1"><label>Print height (in) \u2014 blank = auto</label><input type="number" id="cPrHeightIn" placeholder="auto" step="0.01" min="0"></div>';
+        html+='</div><div style="display:flex;gap:8px">';
+        html+='<div class="field-group" style="flex:1"><label>DPI</label><input type="number" id="cPrDpi" value="300" step="1" min="1"></div>';
+        html+='<div class="field-group" style="flex:1"><label>Alpha threshold</label><input type="number" id="cPrAlpha" value="120" step="1" min="0" max="255"></div>';
+        html+='</div></div>';
       } else {
         // Single-turn ChatGPT operation: template comes directly from the server object — no key construction.
         var tplVal=op.template||"";
@@ -1367,6 +1481,18 @@ function submitCustomJob(){
     if(bt&&bt.value)blackout.threshold=parseInt(bt.value,10);
   }
   var body={workflow:"custom",artwork_files:[customFile],custom_operations:customOps,custom_prompts:prompts,aspect_dpi:customDpi,halftone_settings:halftone,blackout_settings:blackout,client:jobClient.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",extract_mode:"auto",grid_cols:4,grid_rows:2};
+  // Print Ready (PhotoCraft) print-size inputs, only present when that op is ticked.
+  if(customOps.indexOf("print_ready")>=0){
+    var pw=parseFloat(($("cPrWidthIn")||{}).value);
+    var ph=parseFloat(($("cPrHeightIn")||{}).value);
+    var pdpi=parseInt(($("cPrDpi")||{}).value,10);
+    var palpha=parseInt(($("cPrAlpha")||{}).value,10);
+    body.pr_via_photocraft=true;
+    body.pr_width_in=(isFinite(pw)&&pw>0)?pw:10.75;
+    body.pr_height_in=(isFinite(ph)&&ph>0)?ph:0;
+    body.pr_dpi=(isFinite(pdpi)&&pdpi>0)?pdpi:300;
+    body.pr_alpha_threshold=(isFinite(palpha)&&palpha>=0)?palpha:120;
+  }
   $("cGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("cGenBtn").disabled=false});
 }
@@ -1399,12 +1525,14 @@ function upPrintReady(file){
   fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){printReadyFile=d.saved[0].name;$("przPrev").innerHTML='<img src="/input/'+printReadyFile+'" style="max-height:120px">';updPrintReadyBtn()}}).catch(function(e){$("przErr").textContent=e.message});
 }
 function renderPrintReadyCol2(){
-  var html='<div class="col-title">Print Ready QA</div>';
-  html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">A full set of measurements runs on the server the moment you submit; ChatGPT then judges the artwork against them.</p>';
-  html+='<button class="gen-btn" id="prGenBtn" disabled>Check print readiness</button>';
+  var html='<div class="col-title">Print Ready</div>';
+  html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">PhotoCraft resizes the artwork to your print size at the chosen DPI, makes the background transparent with a hard alpha cutoff, and exports a print-ready PNG.</p>';
+  html+=_printReadyControlsHtml(true);  // Print Ready workflow: default ON
+  html+='<button class="gen-btn" id="prGenBtn" disabled>Make print ready</button>';
   html+='<div class="blocker-msg" id="prBlkMsg"></div>';
   col2.innerHTML=html;
   wireClientSlot(updPrintReadyBtn);
+  _wirePrintReady();
   $("prGenBtn").onclick=submitPrintReadyJob;
   updPrintReadyBtn();
 }
@@ -1421,6 +1549,7 @@ function submitPrintReadyJob(){
     text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",
     template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},
     extract_mode:"auto",grid_cols:4,grid_rows:2};
+  var _pr=_printReadyBody();for(var _k in _pr){body[_k]=_pr[_k];}
   $("prGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("prGenBtn").disabled=false});
 }
@@ -1439,10 +1568,25 @@ function _prChip(status){
 function renderPrintReadyResults(job){
   _prCurrentJob=job;   // remembered so the Download report button can build the file
   var rep=job.printready_report;
-  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+' \u2014 Print Ready QA</div>';
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+' \u2014 Print Ready</div>';
+
+  // Print-ready PNG produced by PhotoCraft (the primary output of this step).
+  var si=job.stage_images||{};
+  var finalName=si.final||((job.final_names||[])[0]);
+  if(finalName){
+    var url="/api/output/"+encodeURIComponent(finalName);
+    html+='<div class="stage-result"><h3>Print-ready PNG</h3>';
+    html+='<a href="'+url+'" target="_blank"><img src="'+url+'" class="transparent-bg"></a>';
+    html+='<a class="dl-btn" href="'+url+'" download="'+esc(job.task_id||"print_ready")+'_print_ready.png">Download print-ready PNG</a>';
+    html+='</div>';
+  }
+  if(job.printready_summary){
+    html+='<div style="margin:4px 0 14px;padding:8px 12px;border-radius:8px;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;font-size:.82rem;font-weight:600">'+esc(job.printready_summary)+'</div>';
+  }
+
+  // The 13-check measurement report, if the server could measure it, is shown
+  // below as supplementary context (it no longer gates this workflow).
   if(!rep){
-    html+='<div class="status-box failed" style="margin:8px 0">Measurements are not available for this file (it may not have reached the server, or could not be read).</div>';
-    if(job.printready_assessment){html+='<div class="col-title" style="margin-top:12px">Printer\u2019s assessment</div><div style="border:1px solid var(--border);border-radius:8px;padding:12px;white-space:pre-wrap;font-size:.85rem">'+esc(job.printready_assessment)+'</div>'}
     return html;
   }
   var band=rep.band, score=rep.score, col=_prBandColour(band);
@@ -1472,12 +1616,11 @@ function renderPrintReadyResults(job){
     html+='</tr>';
   }
   html+='</tbody></table>';
-  // Printer's written assessment beneath.
-  html+='<div class="col-title">Printer\u2019s assessment</div>';
+  // Printer's written assessment, only if one exists (legacy jobs). The current
+  // Print Ready step does not run a written-assessment turn.
   if(job.printready_assessment){
+    html+='<div class="col-title">Printer\u2019s assessment</div>';
     html+='<div style="border:1px solid var(--border);border-radius:8px;padding:12px;white-space:pre-wrap;font-size:.85rem">'+esc(job.printready_assessment)+'</div>';
-  }else{
-    html+='<div style="font-size:.8rem;color:var(--muted)">Waiting for ChatGPT\u2019s assessment\u2026</div>';
   }
   return html;
 }
@@ -1686,6 +1829,7 @@ function _wireGeometryPage(job){
   var gcn=$("gecn");
   if(gcn&&!gcn.readOnly)gcn.oninput=function(){jobClient=gcn.value;updGeometryBtn()};
   var gb=$("geGenBtn");if(gb)gb.onclick=submitGeometryJob;
+  _wirePrintReady();
   updGeometryBtn();
 }
 function submitGeometryJob(){
@@ -1701,6 +1845,7 @@ function submitGeometryJob(){
     text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",
     template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},
     extract_mode:"auto",grid_cols:4,grid_rows:2};
+  var _pr=_printReadyBody();for(var _k in _pr){body[_k]=_pr[_k];}
   var gb=$("geGenBtn");if(gb)gb.disabled=true;statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';var b=$("geGenBtn");if(b)b.disabled=false});
 }
@@ -1844,6 +1989,7 @@ function _geoSettingsCard(){
   h+='<div class="field-group" style="margin:0"><label>Background</label><input type="text" id="geo_background_requirement" value="'+esc(geoInputs.background_requirement)+'"></div>';
   h+='<div class="field-group" style="margin:0"><label>Distress</label><select id="geo_distress_policy"><option'+(geoInputs.distress_policy==="Preserve"?" selected":"")+'>Preserve</option><option'+(geoInputs.distress_policy==="Remove"?" selected":"")+'>Remove</option></select></div>';
   h+='</div>';
+  h+=_printReadyControlsHtml(false);
   h+='<button class="gen-btn" id="geGenBtn" style="margin-top:8px" disabled>Measure &amp; generate</button>';
   h+='<div class="blocker-msg" id="geBlkMsg"></div>';
   return h+'</div>';
@@ -2443,11 +2589,13 @@ function renderIdentifyCol2(){
   html+='<div class="edit-body"><textarea id="tplIdentify" data-prompt-id="'+listId+'">'+esc(seedPromptText(listId,listTpl))+'</textarea></div>';
   html+='<div class="edit-toggle" onclick="this.classList.toggle(\'open\');this.nextElementSibling.classList.toggle(\'open\')">Edit prompt \u2014 regenerate with changes</div>';
   html+='<div class="edit-body"><textarea id="tplIdentifyRegen" data-prompt-id="tplIdentifyRegen">'+esc(seedPromptText("tplIdentifyRegen",tRegen))+'</textarea></div>';
+  html+=_printReadyControlsHtml(false);
   html+='<button class="gen-btn" id="iGenBtn" disabled>'+(isColour?"List colour groups":"List objects")+'</button>';
   html+='<div class="blocker-msg" id="iBlkMsg"></div>';
   col2.innerHTML=html;
   wireClientTask("icn","iti",updIdentifyBtn);
   wirePromptEdits(col2);
+  _wirePrintReady();
   $("iGenBtn").onclick=submitIdentifyJob;
   updIdentifyBtn();
 }
@@ -2461,6 +2609,7 @@ function updIdentifyBtn(){
 function submitIdentifyJob(){
   var tObj=$("tplIdentify"),tRegen=$("tplIdentifyRegen");
   var body={workflow:"identify",identify_mode:identifyMode,artwork_files:[identifyFile],aspect_dpi:identifyDpi,template_identify:tObj?tObj.value:"",template_identify_regen:tRegen?tRegen.value:"",client:jobClient.trim(),text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},extract_mode:"auto",grid_cols:4,grid_rows:2};
+  var _pr=_printReadyBody();for(var _k in _pr){body[_k]=_pr[_k];}
   $("iGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("iGenBtn").disabled=false});
 }
@@ -4599,7 +4748,8 @@ function renderHist(){
     var det=stageThumbs(job,si);
     var div=document.createElement("div");div.className="history-item";
     var byTag=job.created_by_name?' <span style="color:var(--muted)">· by '+esc(job.created_by_name)+'</span>':'';
-    div.innerHTML='<span class="hi-label">'+st+'</span> \u2014 '+esc(job.client)+' / '+esc(job.task_id)+' \u2014 '+desc+byTag+'<div class="history-detail" id="'+did+'">'+det+'</div>';
+    var mcpTag=(((job.workflow==="printready")&&(job.pr_via_photocraft||job.printready_summary))||job.printready_summary)?' '+_photocraftTagHtml():'';
+    div.innerHTML='<span class="hi-label">'+st+'</span> \u2014 '+esc(job.client)+' / '+esc(job.task_id)+' \u2014 '+desc+byTag+mcpTag+'<div class="history-detail" id="'+did+'">'+det+'</div>';
     div.onclick=function(){$(did).classList.toggle("open")};
     historyList.appendChild(div);
   });

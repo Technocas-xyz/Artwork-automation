@@ -77,6 +77,9 @@ PROMPT_KEYS: dict[str, str] = {
     "IDENTIFY_REGENERATE": "AIS.IDENTIFY.REGENERATE",
     # Print Ready QA (UC-8): measurements are local; this is the one ChatGPT turn.
     "PRINTREADY_REVIEW": "AIS.PRINTREADY.REVIEW",
+    # Print Ready via PhotoCraft: the agent selects the PhotoCraft tool and sends
+    # this edit prompt to produce a print-ready transparent PNG.
+    "PRINT_READY_PHOTOCRAFT": "AIS.PRINT_READY.PHOTOCRAFT",
     # Similarity Check: cv2 gives the instant measured score; this is the one
     # ChatGPT second-opinion turn (both images in, text review out).
     "SIMILARITY_REVIEW": "AIS.SIMILARITY.REVIEW",
@@ -148,7 +151,7 @@ WORKFLOW_PROMPTS: dict[str, list[str]] = {
     "mockup": ["EXTRACT_CONTACT_SHEET", "EXTRACT_SINGLE"],
     "artwork": ["ARTWORK_REGENERATE"],
     "identify": ["IDENTIFY_OBJECTS", "IDENTIFY_COLOR_GROUPS", "IDENTIFY_REGENERATE"],
-    "printready": ["PRINTREADY_REVIEW"],
+    "printready": ["PRINT_READY_PHOTOCRAFT", "PRINTREADY_REVIEW"],
     "colorway": ["COLORWAY_SUGGEST", "COLORWAY_MOCKUP", "COLORWAY_ADAPT"],
     "geometry": ["GEOMETRY_GENERATE"],
     "similarity": ["SIMILARITY_REVIEW"],
