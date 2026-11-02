@@ -248,3 +248,128 @@ def half_tone(
 
     out = Image.fromarray(out_arr, mode="RGBA")
     return _to_png_bytes(out)
+
+
+def alpha_bbox_size(png_bytes: bytes):
+    """(width, height) of the image's VISIBLE content — the bounding box of all
+    pixels with alpha > 0. Returns the full size if the image is fully opaque or
+    fully transparent, None only if it cannot be read. Used so the print target
+    is sized to the DESIGN, not to a canvas with transparent margins."""
+    try:
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    except Exception:
+        return None
+    alpha = img.getchannel("A")
+    bbox = alpha.getbbox()  # None when fully transparent
+    if bbox is None:
+        return img.size
+    return (bbox[2] - bbox[0], bbox[3] - bbox[1])
+
+
+def _trim_transparent_border(img: "Image.Image"):
+    """Crop `img` (RGBA) to the bounding box of its visible pixels (alpha > 0).
+    Returns (cropped_img, was_trimmed). A fully transparent image is returned
+    unchanged (nothing to crop to)."""
+    alpha = img.getchannel("A")
+    bbox = alpha.getbbox()
+    if bbox is None or bbox == (0, 0, img.width, img.height):
+        return img, False
+    return img.crop(bbox), True
+
+
+def make_print_ready(png_bytes: bytes, target_w: int, target_h: int,
+                     dpi: int = 300, alpha_threshold: int = 120):
+    """Server/agent-side verification of a PhotoCraft print-ready export.
+
+    PhotoCraft is asked to resize to the target and hard-threshold the alpha, but
+    we verify and correct deterministically so the saved file is exactly right
+    and the DESIGN IS NEVER STRETCHED:
+
+      1. If the image is already within +/-2 px of (target_w, target_h), keep it.
+         Otherwise FIT it INSIDE the target keeping its own aspect ratio
+         (LANCZOS downscale/upscale), then PAD with fully transparent pixels to
+         the exact target size, centered. This never distorts the artwork — a
+         portrait result into a portrait target just scales; a mismatched aspect
+         gets transparent bars rather than a squash.
+      2. If ANY pixel has an alpha strictly between 0 and 255, apply the alpha
+         threshold ourselves: alpha < `alpha_threshold` -> 0, else 255 (no
+         semi-transparent fringe). Pixels already at 0 or 255 are untouched.
+         (The transparent padding is alpha 0, so it is unaffected.)
+      3. Save as PNG with dpi=(dpi, dpi).
+
+    Returns (out_bytes, info) where info is a dict:
+      {resized: bool, padded: bool, from_size: (w,h), fitted_size: (w,h),
+       to_size: (w,h), thresholded: bool, changed_pixels: int, dpi: int,
+       width_in: float, height_in: float, summary: str}
+    Never raises for a measurement issue — on a hard failure it re-raises so the
+    caller can fail the step with a clear error."""
+    img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    orig_w, orig_h = img.size
+
+    # 0) Trim fully transparent borders FIRST. In DTF the print width is the
+    #    DESIGN width — if PhotoCraft returns a canvas with transparent side
+    #    margins, fitting the whole canvas would make the design narrower than
+    #    the requested inches. Cropping to the alpha bounding box makes the
+    #    design itself span the target.
+    img, trimmed = _trim_transparent_border(img)
+    from_w, from_h = img.size
+
+    # 1) Fit-inside (keep aspect) + transparent pad to the exact target. Never
+    #    stretch. If already at target (within 2px), do nothing.
+    resized = False
+    padded = False
+    fit_w, fit_h = from_w, from_h
+    if abs(from_w - target_w) > 2 or abs(from_h - target_h) > 2:
+        # Scale factor that fits the image inside the target without cropping.
+        scale = min(target_w / from_w, target_h / from_h)
+        fit_w = max(1, round(from_w * scale))
+        fit_h = max(1, round(from_h * scale))
+        if (fit_w, fit_h) != (from_w, from_h):
+            img = img.resize((fit_w, fit_h), Image.LANCZOS)
+            resized = True
+        # Pad to the exact target on a fully transparent canvas, centered.
+        if (fit_w, fit_h) != (target_w, target_h):
+            canvas = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+            off = ((target_w - fit_w) // 2, (target_h - fit_h) // 2)
+            canvas.paste(img, off)
+            img = canvas
+            padded = True
+
+    # 2) Hard alpha threshold if any semi-transparent pixel exists.
+    arr = np.array(img)  # H x W x 4, uint8
+    alpha = arr[:, :, 3]
+    semi = np.logical_and(alpha > 0, alpha < 255)
+    thresholded = False
+    changed_pixels = 0
+    if bool(semi.any()):
+        new_alpha = np.where(alpha < alpha_threshold, 0, 255).astype(np.uint8)
+        changed_pixels = int((new_alpha != alpha).sum())
+        arr[:, :, 3] = new_alpha
+        img = Image.fromarray(arr, mode="RGBA")
+        thresholded = True
+
+    out_w, out_h = img.size
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", dpi=(dpi, dpi))
+    out_bytes = buf.getvalue()
+
+    width_in = round(out_w / dpi, 2) if dpi else 0.0
+    height_in = round(out_h / dpi, 2) if dpi else 0.0
+    summary = (f"Print ready: {out_w} x {out_h} px @ {dpi} DPI "
+               f"= {width_in} x {height_in} in")
+    info = {
+        "trimmed": trimmed,
+        "orig_size": (orig_w, orig_h),
+        "resized": resized,
+        "padded": padded,
+        "from_size": (from_w, from_h),   # the design size after trimming
+        "fitted_size": (fit_w, fit_h),
+        "to_size": (out_w, out_h),
+        "thresholded": thresholded,
+        "changed_pixels": changed_pixels,
+        "dpi": dpi,
+        "width_in": width_in,
+        "height_in": height_in,
+        "summary": summary,
+    }
+    return out_bytes, info

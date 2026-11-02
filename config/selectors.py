@@ -149,10 +149,58 @@ SEND_BUTTON   = ("button[aria-label='Send prompt'], "
                  "button[aria-label*='Send'], "
                  "[data-testid='send-button']")
 
-# The "Add files and more" composer control (aria-label confirmed live). Not
-# used for the actual upload (that targets the hidden input above) but kept as a
-# candidate list for the diagnostic / future menu-driven upload.
+# The "Add files and more" composer control (aria-label confirmed live). Clicking
+# it opens the menu that lists tools/plugins (Web search, Deep research, Sketch,
+# then plugins with an "@" icon: PhotoCraft, Chrome, ...). Also used to drive the
+# PhotoCraft tool selection (select_photocraft_tool).
 UPLOAD_LABELS = ("Add files and more", "Add photos & files", "Attach files", "Upload files")
+
+# The composer FORM root — every composer-scoped lookup (the "+" button, the
+# tool pill) must be done INSIDE this, never the sidebar or chat history. The
+# live page wraps the composer in a <form>; fall back to the contenteditable's
+# nearest form in code if needed.
+COMPOSER_FORM = "form"
+
+# The "+" button MUST be found inside the composer form (the sidebar also has
+# buttons). aria-label first, then the composer's leading button as a fallback;
+# select_photocraft_tool scopes the query to the form element.
+ADD_MENU_BUTTON = ("button[aria-label='Add files and more'], "
+                   "button[aria-label='Add photos & files'], "
+                   "button[aria-label*='Add files' i], "
+                   "button[aria-label*='attach' i]")
+
+# A popup opened by the "+" button. ChatGPT's dropdown is a RADIX popper that
+# does NOT carry role=menu/listbox (confirmed live: our role-based wait timed
+# out while the dropdown was clearly open). So we detect "menu open" by TEXT —
+# an item that is always present ("Add photos & files") or the search row
+# ("Type to search plugins") — and take that element's nearest scrollable
+# ancestor / Radix wrapper as the container. These role/wrapper selectors are
+# kept only as container-resolution candidates, NOT as the open-gate.
+POPUP_CONTAINER = ("[data-radix-popper-content-wrapper], "
+                   "[role='menu'], [role='listbox'], [role='dialog']")
+# Text anchors that reliably appear in the open "+" dropdown. Used with
+# get_by_text to detect that the menu opened regardless of role markup.
+ADD_MENU_ANCHOR_TEXTS = ("Add photos & files", "Type to search plugins", "Web search")
+
+# --- PhotoCraft composer-tool selection -----------------------------------
+# PhotoCraft must be SELECTED in the composer before sending (a text request
+# alone makes ChatGPT regenerate the image itself). The "+" menu MAY have a
+# search box ("Type to search plugins"); if so, typing "PhotoCraft" filters the
+# list. Otherwise we scroll the popup and click the item labelled exactly
+# "PhotoCraft". Second fallback: type "@PhotoCraft" in the composer and pick the
+# suggestion. select_photocraft_tool() logs the real popup DOM and matches the
+# EXACT "PhotoCraft" label so it never clicks "Chrome" or another plugin.
+PLUGIN_SEARCH_INPUT = ("input[placeholder*='search plugins' i], "
+                       "input[placeholder*='Type to search' i], "
+                       "input[placeholder*='plugin' i], "
+                       "input[type='search']")
+# Candidate containers for a popup menu item. The exact-label match is done in
+# code, not CSS.
+MENU_ITEM = ("[role='menuitem'], [role='option'], "
+             "[role='menu'] button, [role='menu'] [role='button'], "
+             "[role='menu'] li, [role='dialog'] [role='menuitem'], "
+             "[role='listbox'] [role='option']")
+PHOTOCRAFT_TOOL_NAME = "PhotoCraft"
 
 # A single prompt/response TURN. No data-testid exists any more; the live page
 # has 6 turn elements matching a class fragment inside <main>. Match on the
