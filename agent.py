@@ -377,6 +377,11 @@ _AGENT_OWNED_FIELDS = (
     # on. printready_report/_measurements are set by the SERVER at job creation,
     # so they are NOT agent-owned and must not be echoed back here.
     "printready_assessment", "printready_original_file",
+    # Print Ready via PhotoCraft (standalone workflow, Custom op, OR the shared
+    # post-step on any image workflow): the agent owns the summary/target, a
+    # soft-fail warning, and the "looks regenerated" note.
+    "printready_summary", "printready_target",
+    "photocraft_warning", "photocraft_note",
     # Similarity Check: the agent produces the ChatGPT second-opinion text; the
     # two image filenames are set by the server but echoed harmlessly. The cv2
     # result (similarity_cv2) is SERVER-owned and must NOT be echoed back.
@@ -2915,6 +2920,99 @@ def _run_colorway_workflow(page: Any, job: dict[str, Any]) -> None:
     job["finished_at"] = time.time()
 
 
+def _job_final_image_path(job: dict) -> "str | None":
+    """Resolve the SINGLE best final image a workflow produced, as an OUTPUT_DIR
+    path, for the Print Ready (PhotoCraft) post-step. Priority mirrors each
+    workflow's final-image convention. Returns None for workflows with no single
+    final (colorway, extraction) or no image (similarity/objectsim)."""
+    si = job.get("stage_images") or {}
+    candidates = [
+        si.get("final"),
+        job.get("geometry_output_file") or si.get("output"),
+        job.get("identify_final_file"),
+        (job.get("final_names") or [None])[0],
+        (si.get("finals") or [None])[0],
+    ]
+    for name in candidates:
+        if name:
+            p = OUTPUT_DIR / name
+            if p.exists():
+                return str(p)
+    return None
+
+
+# Workflows that produce a single print-able design and so support the shared
+# Print Ready (PhotoCraft) post-step. Excludes printready (already print-ready),
+# colorway/mockup (multi-image), and the text-only reviews.
+_PR_POSTSTEP_WORKFLOWS = ("text", "artwork", "custom", "identify", "geometry")
+
+
+def _maybe_run_print_ready_poststep(page: Any, job: dict) -> None:
+    """Shared Print Ready (PhotoCraft) post-step for EVERY image workflow.
+
+    When the operator ticked "Print Ready via PhotoCraft" (job.pr_via_photocraft)
+    on any image-producing workflow, take the job's final image and run the SAME
+    PhotoCraft print-ready step used by the Print Ready workflow, in the chat the
+    workflow just used. The original final is kept as a separate stage image
+    ('pre_printready') so both are visible; the print-ready PNG becomes the job's
+    final image. On any failure this SOFT-FAILS: the normal result is kept and a
+    warning is recorded, never failing the job.
+
+    Skipped when: the toggle is off; the job already produced a print-ready file
+    (the Print Ready workflow, or a Custom job whose print_ready op already ran —
+    both set printready_summary); the workflow has no single final image."""
+    if not job.get("pr_via_photocraft"):
+        return
+    if job.get("status") not in ("done", "done_with_errors"):
+        return
+    wf = job.get("workflow")
+    if wf not in _PR_POSTSTEP_WORKFLOWS:
+        return
+    if job.get("printready_summary"):
+        # Already print-ready (Print Ready workflow, or Custom print_ready op).
+        return
+    final_path = _job_final_image_path(job)
+    if not final_path:
+        print(f"[printready post] no single final image for {wf}; skipping.")
+        return
+
+    job_id = job["id"]
+    print(f"[printready post] running Print Ready (PhotoCraft) on {final_path}")
+    try:
+        # The workflow's chat should still be open; make sure a composer exists.
+        try:
+            _open_chat_for(page, job)
+        except Exception:
+            pass
+        out_bytes, pr_info = _photocraft_print_ready_step(
+            page, job, final_path, run_id=f"{job_id}_printready_post")
+    except Exception as exc:
+        # SOFT-FAIL: keep the normal result; just warn.
+        warn = f"Print Ready (PhotoCraft) failed: {exc}"
+        print(f"[printready post] {warn}")
+        job["photocraft_warning"] = warn
+        return
+
+    # Keep the original final visible as a separate stage image, then make the
+    # print-ready PNG the job's final image.
+    si = job.setdefault("stage_images", {})
+    prev_final = Path(final_path).name
+    si["pre_printready"] = prev_final
+    pr_name = f"{job_id}_printready.png"
+    (OUTPUT_DIR / pr_name).write_bytes(out_bytes)
+    si["final"] = pr_name
+    job["final_names"] = [pr_name]
+    _mark_uploaded(job, _upload_files(job_id, [pr_name]))
+    job["printready_summary"] = pr_info["summary"]
+    job["printready_target"] = {
+        "width_in": pr_info["width_in"], "height_in": pr_info["height_in"],
+        "dpi": pr_info["dpi"], "width_px": pr_info["to_size"][0],
+        "height_px": pr_info["to_size"][1],
+        "alpha_threshold": int(job.get("pr_alpha_threshold") or 120),
+    }
+    print(f"[printready post] {pr_info['summary']} (kept original as pre_printready)")
+
+
 def _run_job(page: Any, job: dict) -> None:
     """Dispatch to the correct workflow — same mapping the old worker used."""
     wf = job.get("workflow")
@@ -2976,6 +3074,10 @@ def _handle_claimed_job(page: Any, claim: dict, logged_in: bool = True) -> None:
         if not logged_in:
             _wait_for_signin(job_id, page)
         _run_job(page, job)
+        # Shared Print Ready (PhotoCraft) post-step: when the operator ticked the
+        # toggle on ANY image workflow, make the final image print-ready. Runs
+        # only on success, soft-fails (never fails the job).
+        _maybe_run_print_ready_poststep(page, job)
     except _CancelledError:
         print(f"[agent] job {job_id} cancelled by operator")
         job["status"] = "cancelled"

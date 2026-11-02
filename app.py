@@ -458,7 +458,7 @@ class GenerateRequest(BaseModel):
 # Print Ready via PhotoCraft: the Print Ready step uses the PhotoCraft composer
     # tool to resize + make transparent + export. The operator can override the
     # target size, DPI and alpha threshold. Blank height -> keep aspect ratio.
-    pr_via_photocraft: bool = True       # "Print Ready via PhotoCraft" (default ON)
+    pr_via_photocraft: bool = False      # "Print Ready via PhotoCraft" (default OFF; forced ON for the printready workflow)
     pr_width_in: float = 10.75           # target print width in inches
     pr_height_in: float = 0.0            # optional; 0/blank -> auto from aspect ratio
     pr_dpi: int = 300                    # target DPI
@@ -1866,13 +1866,18 @@ def create_job(req: GenerateRequest, request: Request):
         # Print Ready via PhotoCraft: stored on the job, synced to the agent in
         # the full job dict (agent_next_job) and surfaced to the UI by
         # _public_job (non-underscore keys). Only the Print Ready step reads them.
-        "pr_via_photocraft": bool(req.pr_via_photocraft),
+        # The standalone Print Ready workflow is always print-ready via
+        # PhotoCraft (its UI control defaults ON); every other workflow defaults
+        # OFF and only turns it on when the operator ticks the shared switch.
+        "pr_via_photocraft": True if req.workflow == "printready" else bool(req.pr_via_photocraft),
         "pr_width_in": float(req.pr_width_in or 10.75),
         "pr_height_in": float(req.pr_height_in or 0.0),
         "pr_dpi": int(req.pr_dpi or 300),
         "pr_alpha_threshold": int(req.pr_alpha_threshold or 120),
         # Print-ready result summary + target, filled by the agent after verify.
+        # photocraft_warning carries a soft-fail message from the post-step.
         "printready_summary": "", "printready_target": None,
+        "photocraft_warning": "", "photocraft_note": "",
         "stage": 0, "stage_label": "", "awaiting_input": False,
         "selection_prompt": "", "choices": [], "prompts": [],
         "extracted_text": "", "confirmed_text": "", "paused_at": None,
