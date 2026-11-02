@@ -980,18 +980,21 @@ def send_turn(
 
             def _retry_sender(followup_prompt: str) -> None:
                 """Send ONE text-only corrective follow-up in the SAME chat (the
-                PhotoCraft tool is already selected). Waits for the turn to
-                settle so the new reply can be collected."""
+                PhotoCraft tool is already selected) and wait for the turn to
+                FULLY finish exactly like the first turn: stop button appears ->
+                detaches -> quiet period, capped at 180s. The link can render
+                late, so the caller then polls for it; no short fixed settle."""
                 page.click(PROMPT_BOX)
                 _enter_prompt(page, followup_prompt)
                 _submit_prompt(page, run_id=f"{run_id}-retry")
                 try:
                     page.wait_for_selector(STOP_BUTTON, state="attached", timeout=30_000)
+                    _ts("retry: stop button appeared")
                 except Exception:
-                    pass
-                _wait_for_turn_complete(page, quiet_ms=5000, timeout=900_000,
+                    _ts("retry: stop button never appeared (continuing)")
+                _wait_for_turn_complete(page, quiet_ms=5000, timeout=180_000,
                                         label=f"image-turn {run_id}-retry", on_phase=_ts)
-                page.wait_for_timeout(1500)
+                _ts("retry: turn complete")
 
             return _prefer_transparent(
                 _photocraft_collect(page, run_id, input_wh=input_wh,
@@ -2385,16 +2388,19 @@ def _download_photocraft_link(page: Page, href: str, run_id: str) -> bytes:
         dom = "(unparsed)"
     logger.info("[photocraft %s] export link domain=%s href=%r", run_id, dom, href[:200])
 
+    last_status = None  # remembered for the error message
+
     # 1) context.request.get — same cookies, no navigation.
     logger.info("[photocraft %s] download attempt 1: context.request.get", run_id)
     try:
         resp = page.context.request.get(href, timeout=30_000)
+        last_status = getattr(resp, "status", None)
         if resp.ok:
             data = resp.body()
             if data:
                 logger.info("[photocraft %s] attempt 1 OK: %d bytes", run_id, len(data))
                 return data
-        logger.info("[photocraft %s] attempt 1 status=%s", run_id, getattr(resp, "status", "?"))
+        logger.info("[photocraft %s] attempt 1 status=%s", run_id, last_status)
     except Exception as exc:
         logger.info("[photocraft %s] attempt 1 failed (%s)", run_id, exc)
 
@@ -2437,9 +2443,15 @@ def _download_photocraft_link(page: Page, href: str, run_id: str) -> bytes:
 
     # 3) In-page fetch with a hard abort timeout.
     logger.info("[photocraft %s] download attempt 3: in-page fetch (abort 20s)", run_id)
-    data = _fetch_bytes_with_abort(page, href, timeout_ms=20_000)
-    logger.info("[photocraft %s] attempt 3 OK: %d bytes", run_id, len(data))
-    return data
+    try:
+        data = _fetch_bytes_with_abort(page, href, timeout_ms=20_000)
+        logger.info("[photocraft %s] attempt 3 OK: %d bytes", run_id, len(data))
+        return data
+    except Exception as exc:
+        logger.warning("[photocraft %s] attempt 3 failed (%s)", run_id, exc)
+        status_txt = f" (HTTP {last_status})" if last_status is not None else ""
+        raise GenerationTimeoutError(
+            f"PhotoCraft download failed{status_txt}: {href[:200]}") from exc
 
 
 # A link in the reply is treated as a Photocraft export download when its href or
@@ -2583,6 +2595,31 @@ PHOTOCRAFT_REGEN_FOLLOWUP = (
 )
 
 
+def _poll_for_photocraft_result(page: Page, run_id: str, timeout_ms: int = 20_000,
+                                poll_ms: int = 1500):
+    """Poll _find_photocraft_result() for up to `timeout_ms`, returning as soon
+    as a usable candidate appears. The PhotoCraft link can render a few seconds
+    AFTER the turn finishes, so a single scan misses it. Prefers a link; accepts
+    a non-"Generated image" / in-tool preview; keeps polling while the only
+    thing present is a bare "Generated image" (it may be replaced by the link).
+    Returns the found dict or None after the timeout."""
+    import time as _t
+    deadline = _t.monotonic() + timeout_ms / 1000.0
+    last = None
+    while True:
+        found = _find_photocraft_result(page, run_id)
+        if found:
+            last = found
+            if found.get("kind") == "link":
+                return found
+            if found.get("kind") == "image" and not (
+                    found.get("generated") and not found.get("inTool")):
+                return found
+        if _t.monotonic() >= deadline:
+            return last
+        page.wait_for_timeout(poll_ms)
+
+
 def _collect_from_found(page, found, run_id, input_wh):
     """Turn a _find_photocraft_result() dict into image bytes, applying the
     PhotoCraft-mode acceptance rules. Returns [bytes] on success, or None if the
@@ -2633,7 +2670,9 @@ def _photocraft_collect(page: Page, run_id: str, input_wh=None, retry_sender=Non
       * "PhotoCraft did not return a file" — after the corrective retry;
       * "PhotoCraft returned no file" — nothing usable and no retry available."""
     _reset_photocraft_note()
-    found = _find_photocraft_result(page, run_id)
+    # Poll the newest turn for up to 20s — the PhotoCraft link can render a few
+    # seconds after the turn settles, so a single scan can miss it.
+    found = _poll_for_photocraft_result(page, run_id, timeout_ms=20_000)
     result = _collect_from_found(page, found, run_id, input_wh)
     if result is not None:
         return result
@@ -2651,18 +2690,30 @@ def _photocraft_collect(page: Page, run_id: str, input_wh=None, retry_sender=Non
         _diag_event("fallback", QUESTION_INSTEAD_OF_RESULT, step=run_id, detail=preview)
         raise GenerationTimeoutError(QUESTION_INSTEAD_OF_RESULT)
 
-    # Corrective follow-up: tell ChatGPT to use PhotoCraft, not image gen.
+    # Corrective follow-up: tell ChatGPT to use PhotoCraft, not image gen. The
+    # retry_sender waits for the follow-up turn to FULLY finish (stop appear ->
+    # detach -> quiet, 180s cap); the link then often renders a few seconds
+    # late, so we POLL the NEWEST turn for up to 20s before giving up.
     if retry_sender is not None:
+        retry_id = f"{run_id}-retry"
         logger.info("[photocraft %s] sending corrective follow-up and re-collecting", run_id)
         try:
             retry_sender(PHOTOCRAFT_REGEN_FOLLOWUP)
         except Exception as exc:
             logger.warning("[photocraft %s] corrective follow-up send FAILED (%s)", run_id, exc)
-        _dump_photocraft_reply(page, run_id=f"{run_id}-retry")
-        found2 = _find_photocraft_result(page, f"{run_id}-retry")
-        result2 = _collect_from_found(page, found2, f"{run_id}-retry", input_wh)
+        _dump_photocraft_reply(page, run_id=retry_id)
+        found2 = _poll_for_photocraft_result(page, retry_id, timeout_ms=20_000)
+        try:
+            result2 = _collect_from_found(page, found2, retry_id, input_wh)
+        except Exception as exc:
+            # A hard download error (href + HTTP status) — surface it in the job
+            # error rather than the generic "did not return a file".
+            logger.warning("[photocraft %s] retry download FAILED (%s)", run_id, exc)
+            _diag_event("fallback", str(exc), step=run_id)
+            raise
         if result2 is not None:
             return result2
+        _dump_photocraft_reply(page, run_id=f"{retry_id}-final")
         logger.warning("[photocraft %s] PhotoCraft did not return a file (after retry)", run_id)
         _diag_event("fallback", "PhotoCraft did not return a file", step=run_id)
         raise GenerationTimeoutError("PhotoCraft did not return a file")
