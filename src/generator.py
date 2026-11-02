@@ -1078,19 +1078,10 @@ def send_turn(
                 raise GenerationTimeoutError("ChatGPT returned no images")
             return []
 
-        # --- Download each image in-browser via fetch ---
+        # --- Download each image, fastest path first, with per-image timing. ---
         images: list[bytes] = []
         for src in new_srcs:
-            byte_array: list[int] = page.evaluate(
-                """async (url) => {
-                    const resp = await fetch(url, { credentials: 'include' });
-                    if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
-                    const buf = await resp.arrayBuffer();
-                    return Array.from(new Uint8Array(buf));
-                }""",
-                src,
-            )
-            images.append(bytes(byte_array))
+            images.append(_download_generated_image(page, src, run_id))
 
         _tt("c_read", f"downloaded {len(images)} image(s), {sum(len(b) for b in images)} bytes")
         return _prefer_transparent(images)
@@ -2421,15 +2412,54 @@ def _fetch_bytes_with_abort(page: Page, url: str, timeout_ms: int = 20_000) -> b
     return bytes(byte_array)
 
 
+def _download_generated_image(page: Page, src: str, run_id: str) -> bytes:
+    """Read ONE generated image's bytes, preferring the fastest path and never
+    hanging. Tries, with a 60s cap and per-attempt timing logged:
+      1. in-page fetch(src) as a blob (AbortController 60s) — the img is usually
+         already in the page cache, so this is immediate;
+      2. page.context.request.get(src, 60s) — same cookies, bypasses the page.
+    Raises if both fail. A blob: src can only be read in-page (method 1)."""
+    is_blob = src.startswith("blob:")
+    # Method 1: in-page fetch (works for blob: and http(s); usually cached).
+    _t = time.monotonic()
+    try:
+        data = _fetch_bytes_with_abort(page, src, timeout_ms=60_000)
+        logger.info("[image-read %s] in-page fetch OK: %d bytes in %.1fs",
+                    run_id, len(data), time.monotonic() - _t)
+        return data
+    except Exception as exc:
+        logger.info("[image-read %s] in-page fetch failed after %.1fs (%s)",
+                    run_id, time.monotonic() - _t, exc)
+    # Method 2: context.request.get (not possible for blob: URLs).
+    if not is_blob:
+        _t = time.monotonic()
+        try:
+            resp = page.context.request.get(src, timeout=60_000)
+            if resp.ok:
+                data = resp.body()
+                if data:
+                    logger.info("[image-read %s] context.request.get OK: %d bytes in %.1fs",
+                                run_id, len(data), time.monotonic() - _t)
+                    return data
+            logger.info("[image-read %s] context.request.get status=%s in %.1fs",
+                        run_id, getattr(resp, "status", "?"), time.monotonic() - _t)
+        except Exception as exc:
+            logger.info("[image-read %s] context.request.get failed after %.1fs (%s)",
+                        run_id, time.monotonic() - _t, exc)
+    raise GenerationTimeoutError(f"Could not read generated image: {src[:160]}")
+
+
 def _download_photocraft_link(page: Page, href: str, run_id: str) -> bytes:
     """Download a PhotoCraft export link with a HARD timeout on every attempt, so
     collection can never hang. Order:
-      1. page.context.request.get(href, timeout=30s) — same cookies, no UI.
+      1. page.context.request.get(href, timeout=180s) — same cookies, no UI —
+         tried up to 3 times with a short backoff (the export can be a ~14 MB
+         chunked body that needs well over 30s on a slow connection).
       2. click the link; if it opens a NEW TAB (target=_blank / ↗), capture the
          page via context.expect_page and read the image from it, else capture a
          triggered page.expect_download(timeout=20s). Then close the tab.
       3. in-page fetch with a 20s AbortController.
-    Logs the href domain and the start/end of each attempt. Raises if all fail."""
+    Logs the href domain, bytes and elapsed per attempt. Raises if all fail."""
     try:
         from urllib.parse import urlparse
         dom = urlparse(href).netloc or "(relative)"
@@ -2439,19 +2469,34 @@ def _download_photocraft_link(page: Page, href: str, run_id: str) -> bytes:
 
     last_status = None  # remembered for the error message
 
-    # 1) context.request.get — same cookies, no navigation.
-    logger.info("[photocraft %s] download attempt 1: context.request.get", run_id)
-    try:
-        resp = page.context.request.get(href, timeout=30_000)
-        last_status = getattr(resp, "status", None)
-        if resp.ok:
-            data = resp.body()
-            if data:
-                logger.info("[photocraft %s] attempt 1 OK: %d bytes", run_id, len(data))
-                return data
-        logger.info("[photocraft %s] attempt 1 status=%s", run_id, last_status)
-    except Exception as exc:
-        logger.info("[photocraft %s] attempt 1 failed (%s)", run_id, exc)
+    # 1) context.request.get — same cookies, no navigation. The export can be a
+    #    ~14 MB chunked body that needs well over 30s on a slow connection, so
+    #    allow 180s and RETRY the SAME href up to 3 times total with a short
+    #    backoff before falling back to the UI methods. Log bytes + elapsed.
+    for _attempt in range(1, 4):
+        logger.info("[photocraft %s] download attempt 1.%d: context.request.get (timeout 180s)",
+                    run_id, _attempt)
+        _t = time.monotonic()
+        try:
+            resp = page.context.request.get(href, timeout=180_000)
+            last_status = getattr(resp, "status", None)
+            if resp.ok:
+                data = resp.body()
+                dt = time.monotonic() - _t
+                if data:
+                    logger.info("[photocraft %s] attempt 1.%d OK: %d bytes in %.1fs",
+                                run_id, _attempt, len(data), dt)
+                    return data
+                logger.info("[photocraft %s] attempt 1.%d OK but empty body in %.1fs",
+                            run_id, _attempt, dt)
+            else:
+                logger.info("[photocraft %s] attempt 1.%d status=%s in %.1fs",
+                            run_id, _attempt, last_status, time.monotonic() - _t)
+        except Exception as exc:
+            logger.info("[photocraft %s] attempt 1.%d failed after %.1fs (%s)",
+                        run_id, _attempt, time.monotonic() - _t, exc)
+        if _attempt < 3:
+            page.wait_for_timeout(1500 * _attempt)  # short backoff before retry
 
     # 2) Click the link; handle a new tab OR a triggered download.
     logger.info("[photocraft %s] download attempt 2: click link (new-tab / download)", run_id)
@@ -2498,9 +2543,9 @@ def _download_photocraft_link(page: Page, href: str, run_id: str) -> bytes:
         return data
     except Exception as exc:
         logger.warning("[photocraft %s] attempt 3 failed (%s)", run_id, exc)
-        status_txt = f" (HTTP {last_status})" if last_status is not None else ""
+        status_txt = f" HTTP {last_status}" if last_status is not None else ""
         raise GenerationTimeoutError(
-            f"PhotoCraft download failed{status_txt}: {href[:200]}") from exc
+            f"PhotoCraft download failed ({href[:200]}){status_txt}") from exc
 
 
 # A link in the reply is treated as a Photocraft export download when its href or
@@ -2682,14 +2727,14 @@ def _collect_from_found(page, found, run_id, input_wh):
     if found and found.get("kind") == "link":
         href = found.get("href") or ""
         logger.info("[photocraft %s] result=download-link text=%r", run_id, found.get("text"))
-        try:
-            data = _download_photocraft_link(page, href, run_id)
-            _check_photocraft_size(data, input_wh, run_id)
-            return [data]
-        except Exception as exc:
-            logger.warning("[photocraft %s] link download FAILED (%s) — checking preview",
-                           run_id, exc)
-            found = _find_photocraft_result(page, run_id)  # re-scan
+        # A link EXISTS — PhotoCraft did its job and exported a file. If the
+        # download fails we FAIL the step (surfacing the href): we must NOT
+        # re-scan for a preview or trigger the corrective follow-up, because the
+        # follow-up is only for "no link / Generated image" and would waste time
+        # making a second export. The download already retried the same href.
+        data = _download_photocraft_link(page, href, run_id)
+        _check_photocraft_size(data, input_wh, run_id)
+        return [data]
 
     if found and found.get("kind") == "image":
         generated = bool(found.get("generated"))

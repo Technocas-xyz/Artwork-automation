@@ -2412,7 +2412,9 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
               f"{pr_info['to_size']} (centered) to hit the exact target.")
     if pr_info.get("thresholded"):
         print(f"[printready {run_id}] applied alpha threshold {alpha_threshold}: "
-              f"{pr_info['changed_pixels']} pixel(s) changed.")
+              f"{pr_info['changed_pixels']} partial-alpha pixel(s) hard-set "
+              f"({pr_info.get('became_transparent', 0)} -> transparent, "
+              f"{pr_info.get('became_opaque', 0)} -> opaque).")
     print(f"[printready {run_id}] {pr_info['summary']}")
     return out_bytes, pr_info
 

@@ -62,6 +62,39 @@ check("exact target is a no-op", not info3["resized"] and not info3["padded"], i
 out4, info4 = make_print_ready(_png(10, 10, alpha=100), 10, 10, 300, 120)
 check("semi-transparent thresholded", info4["thresholded"] and info4["changed_pixels"] == 100, info4)
 
+
+def _png_alpha_rows(w, h, alphas):
+    """A w x h image where each ROW y gets alpha alphas[y] (len(alphas)==h)."""
+    a = np.zeros((h, w, 4), np.uint8)
+    a[:, :, 0] = 180
+    for y in range(h):
+        a[y, :, 3] = alphas[y]
+    b = io.BytesIO()
+    Image.fromarray(a, "RGBA").save(b, "PNG")
+    return b.getvalue()
+
+
+# Case F: count ONLY pixels strictly between 0 and 255, split by destination.
+# A 10-wide x 4-tall image with NO fully-transparent border (so trimming is a
+# no-op and the target equals the size -> no resize/pad to shift rows):
+#   row0 alpha=10  (partial, <120  -> 0)
+#   row1 alpha=255 (already opaque, untouched -> NOT counted)
+#   row2 alpha=50  (partial, <120  -> 0)
+#   row3 alpha=200 (partial, >=120 -> 255)
+# Partial pixels = rows 0,2,3 = 30; transparent (rows 0,2)=20; opaque (row3)=10.
+# Row1 (already 255) is NOT counted.
+outF, infoF = make_print_ready(_png_alpha_rows(10, 4, [10, 255, 50, 200]), 10, 4, 300, 120)
+check("no trim/resize (target == size, no transparent border)",
+      not infoF["trimmed"] and not infoF["resized"] and not infoF["padded"], infoF)
+check("only strictly-partial pixels counted", infoF["changed_pixels"] == 30, infoF)
+check("became_transparent counted (alpha<threshold)", infoF["became_transparent"] == 20, infoF)
+check("became_opaque counted (alpha>=threshold)", infoF["became_opaque"] == 10, infoF)
+arrF = np.array(Image.open(io.BytesIO(outF)))
+check("partial<thr row0 forced to 0", bool((arrF[0, :, 3] == 0).all()), None)
+check("fully opaque row1 stays 255", bool((arrF[1, :, 3] == 255).all()), None)
+check("partial<thr row2 forced to 0", bool((arrF[2, :, 3] == 0).all()), None)
+check("partial>=thr row3 forced to 255", bool((arrF[3, :, 3] == 255).all()), None)
+
 # Summary text.
 _, info5 = make_print_ready(_png(3225, 3225), 3225, 4030, 300, 120)
 check("summary text",

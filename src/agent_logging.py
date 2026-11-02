@@ -360,7 +360,14 @@ def setup_logging(route_print: bool = True) -> Path:
         root.addHandler(ring)
 
     # A console handler so logging.* still shows on the terminal when running
-    # from source (print() already shows via the real stream).
+    # from source. IMPORTANT: print() output is ALREADY written straight to the
+    # real console by the _LogTee, and the tee ALSO re-emits each line through
+    # the "agent.print" logger (so it reaches the log files). Without a guard,
+    # that re-emitted record would hit this console handler and print the line a
+    # SECOND time — the "every line twice" bug seen after the merge. So this
+    # console handler DROPS records from the "agent.print" logger; those already
+    # reached the console via the tee's direct stream write. Real logging.*
+    # calls (other logger names) still print here exactly once.
     try:
         if not any(isinstance(h, logging.StreamHandler)
                    and not isinstance(h, RotatingFileHandler) for h in root.handlers):
@@ -368,6 +375,7 @@ def setup_logging(route_print: bool = True) -> Path:
             ch.setLevel(logging.INFO)
             ch.setFormatter(logging.Formatter("%(message)s"))
             ch.addFilter(redactor)
+            ch.addFilter(lambda rec: not rec.name.startswith("agent.print"))
             root.addHandler(ch)
     except Exception:
         pass
