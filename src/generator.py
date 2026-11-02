@@ -41,8 +41,9 @@ from config.selectors import (
     ADD_MENU_BUTTON,
     PLUGIN_SEARCH_INPUT,
     MENU_ITEM,
-    PHOTOCRAFT_PILL,
     PHOTOCRAFT_TOOL_NAME,
+    COMPOSER_FORM,
+    POPUP_CONTAINER,
 )
 from src.browser import GenerationTimeoutError, RateLimitError
 from src.postprocess import is_opaque_white_bg
@@ -515,19 +516,100 @@ def send_text_turn(
         raise
 
 
-def _dump_add_menu(page: Page, run_id: str = "") -> None:
-    """DIAGNOSTIC: log the open "+" menu's items (role, label text) and whether a
-    plugin-search input is present, so the PhotoCraft selection can be matched
-    against the REAL DOM. Never raises."""
-    banner = "[photocraft-menu]" + (f" {run_id}" if run_id else "")
+def _composer_form(page: Page):
+    """The composer FORM element handle (never the sidebar). Prefers a <form>,
+    else the nearest form ancestor of the contenteditable prompt box. Returns
+    None if neither is found (page not ready)."""
     try:
-        items = page.evaluate(
-            r"""() => {
-                const roots = Array.from(document.querySelectorAll(
-                    "[role='menu'], [role='listbox'], [role='dialog']"));
-                const root = roots[roots.length - 1] || document.body;
+        el = page.query_selector(COMPOSER_FORM)
+        if el is not None:
+            return el
+    except Exception:
+        pass
+    # Fallback: walk up from the prompt box to its enclosing form.
+    try:
+        box = page.query_selector(PROMPT_BOX)
+        if box is not None:
+            form = box.evaluate_handle("el => el.closest('form') || el.parentElement")
+            return form.as_element()
+    except Exception:
+        pass
+    return None
+
+
+def _open_add_popup(page: Page, run_id: str):
+    """Find the "+" button INSIDE the composer form, wait until it is enabled,
+    click it, and return the popup element handle once a role=menu/listbox/dialog
+    appears. Returns None if the button is missing/disabled or no popup opens."""
+    form = _composer_form(page)
+    if form is None:
+        logger.warning("[photocraft %s] composer form not found", run_id)
+        return None
+    # The "+" button, scoped to the form. Try the aria-labels first, else the
+    # form's leading button.
+    add_btn = None
+    try:
+        add_btn = form.query_selector(ADD_MENU_BUTTON)
+    except Exception:
+        add_btn = None
+    if add_btn is None:
+        try:
+            # Leading button of the composer (the "+" sits at the start).
+            add_btn = form.query_selector("button")
+        except Exception:
+            add_btn = None
+    if add_btn is None:
+        logger.warning("[photocraft %s] '+' button not found in composer form", run_id)
+        return None
+
+    # Wait until it is enabled (it is disabled while an upload is pending).
+    for _ in range(40):  # ~10s
+        try:
+            disabled = add_btn.get_attribute("disabled") is not None or \
+                       add_btn.get_attribute("aria-disabled") == "true"
+        except Exception:
+            disabled = False
+        if not disabled:
+            break
+        page.wait_for_timeout(250)
+    else:
+        logger.warning("[photocraft %s] '+' button stayed disabled", run_id)
+        return None
+
+    try:
+        label = add_btn.get_attribute("aria-label")
+    except Exception:
+        label = None
+    logger.info("[photocraft %s] clicking '+' button (aria-label=%r)", run_id, label)
+    try:
+        add_btn.click()
+    except Exception as exc:
+        logger.warning("[photocraft %s] '+' click failed (%s)", run_id, exc)
+        return None
+
+    # REQUIRE a popup before treating the menu as open.
+    try:
+        page.wait_for_selector(POPUP_CONTAINER, state="visible", timeout=4000)
+    except Exception:
+        logger.warning("[photocraft %s] no popup appeared after clicking '+'", run_id)
+        return None
+    popups = page.query_selector_all(POPUP_CONTAINER)
+    return popups[-1] if popups else None
+
+
+def _dump_popup(popup, page: Page, run_id: str = "") -> None:
+    """DIAGNOSTIC: log items (role + label) of the OPEN popup only, plus whether
+    it has a plugin-search input. Scoped to the popup element, never the page.
+    Never raises."""
+    banner = "[photocraft-menu]" + (f" {run_id}" if run_id else "")
+    if popup is None:
+        logger.info("%s no popup to dump", banner)
+        return
+    try:
+        info = popup.evaluate(
+            r"""(root) => {
                 const nodes = Array.from(root.querySelectorAll(
-                    "[role='menuitem'],[role='option'],button,[role='button'],li"));
+                    "[role='menuitem'],[role='option'],button,[role='button'],li,a"));
                 const seen = new Set(); const out = [];
                 for (const n of nodes) {
                     const t = (n.textContent || "").trim().replace(/\s+/g, " ").slice(0, 60);
@@ -537,35 +619,56 @@ def _dump_add_menu(page: Page, run_id: str = "") -> None:
                 }
                 const search = root.querySelector(
                     "input[placeholder*='plugin' i], input[placeholder*='search' i], input[type='search']");
-                return {count: out.length, items: out.slice(0, 30),
+                return {count: out.length, items: out.slice(0, 40),
                         hasSearch: !!search,
-                        searchPlaceholder: search ? (search.getAttribute('placeholder') || "") : null};
+                        placeholder: search ? (search.getAttribute('placeholder') || "") : null};
             }"""
         ) or {}
         logger.info("%s items=%s hasSearch=%s placeholder=%r", banner,
-                    items.get("count"), items.get("hasSearch"), items.get("searchPlaceholder"))
-        for it in (items.get("items") or []):
+                    info.get("count"), info.get("hasSearch"), info.get("placeholder"))
+        for it in (info.get("items") or []):
             logger.info("%s   [%s] %r", banner, it.get("role"), it.get("text"))
     except Exception as exc:
         logger.info("%s dump FAILED (%s)", banner, exc)
 
 
+def _dump_composer_form(page: Page, run_id: str = "") -> None:
+    """DIAGNOSTIC (on failure): log the composer form's outerHTML (trimmed) so
+    the real "+" button and tool-chip markup are visible. Never raises."""
+    banner = "[photocraft-form]" + (f" {run_id}" if run_id else "")
+    form = _composer_form(page)
+    if form is None:
+        logger.info("%s composer form not found", banner)
+        return
+    try:
+        html = form.evaluate("el => el.outerHTML") or ""
+        logger.info("%s composer form outerHTML (%d chars, trunc 2500):\n%s",
+                    banner, len(html), html[:2500])
+    except Exception as exc:
+        logger.info("%s dump FAILED (%s)", banner, exc)
+
+
 def _photocraft_pill_present(page: Page) -> bool:
-    """True if the composer currently shows the selected PhotoCraft tool pill.
-    Confirmed by visible text so a class/role change does not hide it."""
+    """True ONLY if the COMPOSER FORM shows a chip/pill whose text is exactly the
+    tool name. Scoped to the form so a sidebar/history mention of "PhotoCraft"
+    (e.g. a project name) is never mistaken for a selected-tool pill. The pill is
+    a small control, so we also require it NOT to be the big prompt box."""
+    form = _composer_form(page)
+    if form is None:
+        return False
     try:
-        if page.query_selector(PHOTOCRAFT_PILL) is not None:
-            return True
-    except Exception:
-        pass
-    # Fallback: any small composer control whose text is exactly the tool name,
-    # scoped to the composer form so a thread mention is not mistaken for a pill.
-    try:
-        return bool(page.evaluate(
-            r"""(name) => {
-                const form = document.querySelector("form") || document.body;
-                const els = Array.from(form.querySelectorAll("button,[role='button'],span,div"));
-                return els.some(e => (e.textContent || "").trim() === name);
+        return bool(form.evaluate(
+            r"""(root, name) => {
+                const els = Array.from(root.querySelectorAll(
+                    "button,[role='button'],[class*='pill'],[class*='chip'],[class*='badge'],span,div"));
+                for (const e of els) {
+                    const t = (e.textContent || "").trim();
+                    if (t !== name) continue;
+                    // Exclude the contenteditable prompt box itself.
+                    if (e.getAttribute && e.getAttribute('contenteditable') === 'true') continue;
+                    return true;
+                }
+                return false;
             }""",
             PHOTOCRAFT_TOOL_NAME,
         ))
@@ -573,17 +676,86 @@ def _photocraft_pill_present(page: Page) -> bool:
         return False
 
 
+def _click_exact_menu_item(page: Page, popup, name: str, run_id: str) -> bool:
+    """Within `popup`, scroll and click the item whose FIRST label line is
+    exactly `name`. Never clicks a different plugin. Returns True if clicked."""
+    scope = popup or page
+    # Scroll the popup to the bottom once so lazily-rendered items exist.
+    try:
+        if popup is not None:
+            popup.evaluate("el => { el.scrollTop = el.scrollHeight; }")
+            page.wait_for_timeout(250)
+    except Exception:
+        pass
+    try:
+        items = scope.query_selector_all(MENU_ITEM) if popup is not None \
+            else page.query_selector_all(MENU_ITEM)
+    except Exception:
+        items = []
+    exact = None
+    for it in items:
+        try:
+            txt = (it.inner_text() or "").strip()
+        except Exception:
+            continue
+        first = txt.splitlines()[0].strip() if txt else ""
+        if first == name:
+            exact = it
+            break
+    if exact is None:
+        logger.warning("[photocraft %s] no popup item labelled exactly %r", run_id, name)
+        return False
+    logger.info("[photocraft %s] clicking popup item %r", run_id, name)
+    try:
+        exact.click()
+        return True
+    except Exception as exc:
+        logger.warning("[photocraft %s] popup item click failed (%s)", run_id, exc)
+        return False
+
+
+def _try_at_mention(page: Page, name: str, run_id: str) -> bool:
+    """Second fallback: type "@PhotoCraft" in the composer and pick the
+    suggestion. Logs what suggestion popup appears. Returns True if the pill
+    shows up afterwards."""
+    logger.info("[photocraft %s] trying @%s mention in composer", run_id, name)
+    try:
+        page.click(PROMPT_BOX)
+        page.keyboard.type(f"@{name}")
+        page.wait_for_timeout(800)
+    except Exception as exc:
+        logger.info("[photocraft %s] @mention type failed (%s)", run_id, exc)
+        return False
+    popups = page.query_selector_all(POPUP_CONTAINER)
+    popup = popups[-1] if popups else None
+    _dump_popup(popup, page, run_id=f"{run_id}-atmention")
+    clicked = _click_exact_menu_item(page, popup, name, run_id)
+    if not clicked:
+        # Clear the "@PhotoCraft" text we typed so it does not pollute the prompt.
+        try:
+            for _ in range(len(name) + 1):
+                page.keyboard.press("Backspace")
+        except Exception:
+            pass
+        return False
+    page.wait_for_timeout(500)
+    return _photocraft_pill_present(page)
+
+
 def select_photocraft_tool(page: Page, run_id: str = "photocraft") -> None:
-    """Select the PhotoCraft tool in the ChatGPT composer so the turn actually
-    runs through PhotoCraft (a text request alone makes ChatGPT regenerate the
-    image itself). Mirrors the manual steps:
+    """Select the PhotoCraft tool in the composer BEFORE attaching the image and
+    typing the prompt (a text request alone makes ChatGPT regenerate the image
+    itself; the "+" button is also disabled while an upload is pending, so this
+    must run first). Steps:
 
-        click "+"  ->  type "PhotoCraft" in the plugin search  ->  click the
-        menu item whose label is EXACTLY "PhotoCraft"  ->  confirm the pill.
+        open "+" popup (scoped to the composer form, wait until enabled, require
+        a popup) -> if it has a search box, type "PhotoCraft"; else scroll the
+        popup -> click the item labelled EXACTLY "PhotoCraft" -> confirm the pill
+        inside the composer form. Fallback: "@PhotoCraft" mention.
 
-    Logs the real menu DOM and what was clicked. Raises
-    GenerationTimeoutError("Could not select PhotoCraft in ChatGPT") if the pill
-    is not present afterwards — the caller must NOT silently fall back."""
+    Raises GenerationTimeoutError("Could not select PhotoCraft in ChatGPT") if
+    the pill is not confirmed — the caller must NOT silently fall back. On
+    failure, dumps the composer form outerHTML for diagnosis."""
     name = PHOTOCRAFT_TOOL_NAME
 
     # Already selected from a prior turn in the same chat? Nothing to do.
@@ -591,74 +763,48 @@ def select_photocraft_tool(page: Page, run_id: str = "photocraft") -> None:
         logger.info("[photocraft %s] tool pill already present — skipping selection", run_id)
         return
 
-    # 1) Open the "+" (Add files and more) menu.
-    add_btn = page.query_selector(ADD_MENU_BUTTON)
-    if add_btn is None:
-        add_btn = find_button_by_labels(page, UPLOAD_LABELS, name="add-menu")
-    if add_btn is None:
-        raise GenerationTimeoutError("Could not select PhotoCraft in ChatGPT")
-    add_btn.click()
-    page.wait_for_timeout(500)
-    _dump_add_menu(page, run_id=run_id)
-
-    # 2) Type the tool name into the plugin-search box (if present) to filter.
-    try:
-        search = page.query_selector(PLUGIN_SEARCH_INPUT)
+    # --- Primary path: the "+" popup ---
+    popup = _open_add_popup(page, run_id)
+    if popup is not None:
+        _dump_popup(popup, page, run_id=run_id)
+        # If there is a search box, type to filter; then re-dump.
+        try:
+            search = popup.query_selector(PLUGIN_SEARCH_INPUT)
+        except Exception:
+            search = None
         if search is not None:
-            search.click()
-            search.fill(name)
-            logger.info("[photocraft %s] typed %r into plugin search", run_id, name)
-            page.wait_for_timeout(600)
-            _dump_add_menu(page, run_id=f"{run_id}-filtered")
+            try:
+                search.click()
+                search.fill(name)
+                logger.info("[photocraft %s] typed %r into plugin search", run_id, name)
+                page.wait_for_timeout(600)
+                _dump_popup(popup, page, run_id=f"{run_id}-filtered")
+            except Exception as exc:
+                logger.info("[photocraft %s] plugin-search fill failed (%s)", run_id, exc)
         else:
-            logger.info("[photocraft %s] no plugin-search input found; matching menu directly", run_id)
-    except Exception as exc:
-        logger.info("[photocraft %s] plugin-search fill failed (%s); matching menu directly", run_id, exc)
+            logger.info("[photocraft %s] popup has no search box — scrolling to find %r", run_id, name)
+        _click_exact_menu_item(page, popup, name, run_id)
 
-    # 3) Click the menu item whose VISIBLE LABEL is EXACTLY the tool name. Doing
-    #    the exact-match in code (not CSS) so we never click "Chrome" etc.
-    clicked = False
-    try:
-        items = page.query_selector_all(MENU_ITEM)
-        # Prefer an exact text match; fall back to a startswith if ChatGPT adds a
-        # subtitle line ("PhotoCraft\nPhotoCraft") inside the same item.
-        exact = None
-        startswith = None
-        for it in items:
-            try:
-                txt = (it.inner_text() or "").strip()
-            except Exception:
-                continue
-            first = txt.splitlines()[0].strip() if txt else ""
-            if first == name and exact is None:
-                exact = it
-            elif first.startswith(name) and startswith is None:
-                startswith = it
-        target = exact or startswith
-        if target is not None:
-            logger.info("[photocraft %s] clicking menu item %r", run_id,
-                        (target.inner_text() or "").strip().splitlines()[:1])
-            target.click()
-            clicked = True
-    except Exception as exc:
-        logger.info("[photocraft %s] menu-item click failed (%s)", run_id, exc)
+        # Confirm the pill (only after a real click attempt).
+        for _ in range(12):  # ~3s
+            if _photocraft_pill_present(page):
+                logger.info("[photocraft %s] PhotoCraft pill confirmed in composer", run_id)
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                return
+            page.wait_for_timeout(250)
+        logger.info("[photocraft %s] pill not present after popup path — trying @mention", run_id)
 
-    if not clicked:
-        logger.warning("[photocraft %s] no menu item labelled exactly %r was found", run_id, name)
+    # --- Second fallback: @PhotoCraft mention ---
+    if _try_at_mention(page, name, run_id):
+        logger.info("[photocraft %s] PhotoCraft pill confirmed via @mention", run_id)
+        return
 
-    # 4) Confirm the pill is in the composer.
-    for _ in range(12):  # ~3s
-        if _photocraft_pill_present(page):
-            logger.info("[photocraft %s] PhotoCraft tool pill confirmed in composer", run_id)
-            # Close any lingering menu so the composer is ready for typing.
-            try:
-                page.keyboard.press("Escape")
-            except Exception:
-                pass
-            return
-        page.wait_for_timeout(250)
-
-    logger.warning("[photocraft %s] PhotoCraft pill NOT present after selection", run_id)
+    # --- Failure: dump the composer form and raise (no silent fallback). ---
+    logger.warning("[photocraft %s] PhotoCraft pill NOT present — selection failed", run_id)
+    _dump_composer_form(page, run_id=run_id)
     _diag_event("fallback", "Could not select PhotoCraft in ChatGPT", step=run_id)
     raise GenerationTimeoutError("Could not select PhotoCraft in ChatGPT")
 
@@ -699,6 +845,16 @@ def send_turn(
     logger.info("[image-turn %s] photocraft MCP: %s", run_id,
                 "ON (line appended to prompt)" if _photocraft_on else "off")
     try:
+        # --- Photocraft MCP: SELECT the PhotoCraft composer tool FIRST, before
+        #     attaching the image. The "+" button is DISABLED while an upload is
+        #     pending, so selecting after upload could never open the menu. A
+        #     text request alone also makes ChatGPT regenerate the image itself;
+        #     selecting the tool is what routes the turn through PhotoCraft.
+        #     Order: select tool -> attach -> type -> send. Raises if the tool
+        #     can't be selected (no silent fallback). ---
+        if _photocraft_on:
+            select_photocraft_tool(page, run_id=run_id)
+
         # --- Upload images if provided ---
         if image_paths:
             # Clear any leftover attachment from a prior turn first, so the new
@@ -710,14 +866,6 @@ def send_turn(
         # --- Snapshot AFTER upload so uploaded file ids are already in the DOM ---
         pre_existing_ids = _collect_image_ids(page)
         logger.info("send_turn before-ids: %d ids captured", len(pre_existing_ids))
-
-        # --- Photocraft MCP: SELECT the PhotoCraft composer tool BEFORE typing
-        #     the prompt. A text request alone makes ChatGPT regenerate the image
-        #     itself; selecting the tool is what routes the turn through
-        #     PhotoCraft. Order is: upload (above) -> select tool -> type -> send.
-        #     Raises if the tool can't be selected (no silent fallback). ---
-        if _photocraft_on:
-            select_photocraft_tool(page, run_id=run_id)
 
         # --- Type prompt ---
         page.click(PROMPT_BOX)

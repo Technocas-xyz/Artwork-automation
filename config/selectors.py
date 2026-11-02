@@ -154,35 +154,44 @@ SEND_BUTTON   = ("button[aria-label='Send prompt'], "
 # then plugins with an "@" icon: PhotoCraft, Chrome, ...). Also used to drive the
 # PhotoCraft tool selection (select_photocraft_tool).
 UPLOAD_LABELS = ("Add files and more", "Add photos & files", "Attach files", "Upload files")
+
+# The composer FORM root — every composer-scoped lookup (the "+" button, the
+# tool pill) must be done INSIDE this, never the sidebar or chat history. The
+# live page wraps the composer in a <form>; fall back to the contenteditable's
+# nearest form in code if needed.
+COMPOSER_FORM = "form"
+
+# The "+" button MUST be found inside the composer form (the sidebar also has
+# buttons). aria-label first, then the composer's leading button as a fallback;
+# select_photocraft_tool scopes the query to the form element.
 ADD_MENU_BUTTON = ("button[aria-label='Add files and more'], "
                    "button[aria-label='Add photos & files'], "
                    "button[aria-label*='Add files' i], "
-                   "button[aria-label*='more' i]")
+                   "button[aria-label*='attach' i]")
+
+# A popup opened by the "+" button. We REQUIRE one of these to appear before
+# treating the menu as open (the earlier bug dumped the whole page/sidebar
+# because no popup check gated it).
+POPUP_CONTAINER = "[role='menu'], [role='listbox'], [role='dialog']"
 
 # --- PhotoCraft composer-tool selection -----------------------------------
 # PhotoCraft must be SELECTED in the composer before sending (a text request
-# alone makes ChatGPT regenerate the image itself). The "+" menu has a
-# "Type to search plugins" box at the bottom; typing "PhotoCraft" filters the
-# list, and the menu item labelled exactly "PhotoCraft" selects the tool, which
-# then shows as a pill in the composer. Labels/roles confirmed loosely from the
-# live menu; select_photocraft_tool() logs the real DOM and matches the EXACT
-# "PhotoCraft" label so it never clicks "Chrome" or another plugin.
+# alone makes ChatGPT regenerate the image itself). The "+" menu MAY have a
+# search box ("Type to search plugins"); if so, typing "PhotoCraft" filters the
+# list. Otherwise we scroll the popup and click the item labelled exactly
+# "PhotoCraft". Second fallback: type "@PhotoCraft" in the composer and pick the
+# suggestion. select_photocraft_tool() logs the real popup DOM and matches the
+# EXACT "PhotoCraft" label so it never clicks "Chrome" or another plugin.
 PLUGIN_SEARCH_INPUT = ("input[placeholder*='search plugins' i], "
                        "input[placeholder*='Type to search' i], "
                        "input[placeholder*='plugin' i], "
                        "input[type='search']")
-# Candidate containers for a menu item (role=menuitem / option, or a button/div
-# inside the open menu). The exact-label match is done in code, not CSS.
+# Candidate containers for a popup menu item. The exact-label match is done in
+# code, not CSS.
 MENU_ITEM = ("[role='menuitem'], [role='option'], "
              "[role='menu'] button, [role='menu'] [role='button'], "
-             "[role='menu'] li, [role='dialog'] [role='menuitem']")
-# The selected-tool pill shown in the composer once PhotoCraft is chosen. Match
-# broadly (text + common pill/chip class fragments); confirmed in code by text.
-PHOTOCRAFT_PILL = ("button:has-text('PhotoCraft'), "
-                   "[class*='pill']:has-text('PhotoCraft'), "
-                   "[class*='chip']:has-text('PhotoCraft'), "
-                   "[class*='badge']:has-text('PhotoCraft'), "
-                   "[data-testid*='tool']:has-text('PhotoCraft')")
+             "[role='menu'] li, [role='dialog'] [role='menuitem'], "
+             "[role='listbox'] [role='option']")
 PHOTOCRAFT_TOOL_NAME = "PhotoCraft"
 
 # A single prompt/response TURN. No data-testid exists any more; the live page
