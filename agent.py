@@ -41,7 +41,7 @@ from config.workflows import (
     CUSTOM_BLACK_OUT, CUSTOM_HALF_TONE, CUSTOM_DETECT_OBJECTS, CUSTOM_CHANGE_COLOR,
     CUSTOM_ASPECT_ADVICE, CUSTOM_ASPECT_BASELINE, CUSTOM_ASPECT_REGENERATE,
     IDENTIFY_OBJECTS, IDENTIFY_COLOR_GROUPS, IDENTIFY_REGENERATE,
-    PRINTREADY_REVIEW,
+    PRINTREADY_REVIEW, PRINT_READY_PHOTOCRAFT,
     SIMILARITY_REVIEW,
     OBJECT_SIMILARITY_DETECT,
     COLORWAY_SUGGEST, COLORWAY_MOCKUP, COLORWAY_ADAPT,
@@ -58,7 +58,7 @@ from src.generator import (
 )
 from src.postprocess import (
     is_opaque_white_bg, remove_white_background,
-    black_out, half_tone,
+    black_out, half_tone, make_print_ready,
 )
 # Local annotation for the Artwork Identification workflow. Pillow-only helpers
 # ONLY — colour_groups() needs cv2 (absent in the packaged agent build) and runs
@@ -1651,10 +1651,6 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                 result_images = send_turn(page, prompt=prompt, image_paths=[current_image_path], run_id=f"{job_id}_{op}_{i}")
                 _track_end(job)
                 _rename_chat_once(page, job)
-                # Surface a PhotoCraft "looks regenerated" note to the operator.
-                _note = photocraft_note()
-                if _note:
-                    job["photocraft_note"] = _note
             except Exception as exc:
                 _track_end(job)
                 errors.append(f"Step {i} ({label}): {exc}")
@@ -2214,11 +2210,19 @@ def _printready_measurements_block(report: dict) -> str:
 
 
 def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
-    """UC-8 Print Ready QA. The 13 numeric checks were measured on the SERVER
-    (src.printready, cv2) and arrive on the job as printready_report. Here the
-    agent runs the ONE ChatGPT turn: send the artwork + the measurements and ask
-    for a printer's written judgement (PRINTREADY_REVIEW). Store the assessment
-    and finish. The score/checks are already on the job for the UI."""
+    """Print Ready via PhotoCraft. This is the ONLY step that uses PhotoCraft.
+
+    The agent SELECTS the PhotoCraft composer tool and sends ONE edit turn that
+    asks PhotoCraft to resize the artwork to the operator's target print size at
+    the chosen DPI, make the background transparent with a hard alpha threshold,
+    and export a full-resolution transparent PNG download link. The exported PNG
+    is downloaded, then VERIFIED/corrected deterministically on this side
+    (make_print_ready: resize to the exact target if off by >2px, hard-threshold
+    any semi-transparent alpha, save at the chosen DPI). The server-precomputed
+    13-check report, if present, is left on the job for display.
+
+    PhotoCraft is enabled ONLY for this turn (set_photocraft_mcp True) and reset
+    to False in finally so no other step ever routes through PhotoCraft."""
     job_id = job["id"]
     artwork_file = job.get("artwork_files", [""])[0]
     current_image_path = str(INPUT_DIR / artwork_file)
@@ -2228,24 +2232,49 @@ def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
         job["finished_at"] = time.time()
         return
 
-    # The server measures the 13 checks and stores them under
-    # printready_measurements (canonical) — printready_report is kept as an alias
-    # for older servers. The measurement IS the point of this workflow, so if it
-    # is absent we FAIL with a clear error rather than degrading to a visual-only
-    # review. (The server now also refuses to create such a job, so this is a
-    # belt-and-braces guard for an older server / a lost field.)
-    report = job.get("printready_measurements") or job.get("printready_report")
-    if not report:
-        reason = job.get("printready_error") or (
-            "No server-side print-readiness measurements were attached to the job. "
-            "The local measurement (src/printready.py) did not run on the server.")
-        print(f"[printready] FAILING job — {reason}")
-        job["status"] = "failed"
-        job["error"] = reason
-        job["finished_at"] = time.time()
-        return
-
     job["printready_original_file"] = Path(current_image_path).name
+
+    # --- Resolve the print-size parameters (operator overrides, else defaults). ---
+    width_in = float(job.get("pr_width_in") or 10.75)
+    dpi = int(job.get("pr_dpi") or 300)
+    alpha_threshold = int(job.get("pr_alpha_threshold") or 120)
+    # Height is optional: blank -> keep the artwork's aspect ratio.
+    height_in_req = job.get("pr_height_in")
+
+    width_px = round(width_in * dpi)
+    # Aspect ratio from the source image.
+    try:
+        info = image_info(Path(current_image_path).read_bytes())
+        src_w, src_h = int(info.get("width") or 0), int(info.get("height") or 0)
+    except Exception:
+        src_w = src_h = 0
+    if height_in_req:
+        height_in = float(height_in_req)
+        height_px = round(height_in * dpi)
+    elif src_w and src_h:
+        height_px = round(width_px * src_h / src_w)
+        height_in = round(height_px / dpi, 2)
+    else:
+        # No source dimensions and no explicit height — fall back to square.
+        height_px = width_px
+        height_in = round(width_in, 2)
+
+    print(f"[printready] target {width_in}x{height_in} in @ {dpi} DPI "
+          f"= {width_px}x{height_px} px, alpha_threshold={alpha_threshold} "
+          f"(source {src_w}x{src_h})")
+
+    # --- Build the PhotoCraft edit prompt (Decoinks key, fallback constant). ---
+    template = _tpl(job, "PRINT_READY_PHOTOCRAFT", PRINT_READY_PHOTOCRAFT)
+    fields = dict(width_in=width_in, height_in=height_in, dpi=dpi,
+                  width_px=width_px, height_px=height_px,
+                  alpha_threshold=alpha_threshold)
+    try:
+        prompt = template.format(**fields)
+    except (KeyError, IndexError):
+        prompt = template
+        for k, v in fields.items():
+            prompt = prompt.replace("{" + k + "}", str(v))
+    job.setdefault("prompts", []).append(prompt)
 
     # Open the chat in this workflow's project (falls back to plain chat).
     _track_start(job)
@@ -2253,27 +2282,76 @@ def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
     _track_end(job)
 
     job["stage"] = 1
-    job["stage_label"] = "Getting the printer's assessment"
+    job["stage_label"] = "Making it print-ready with PhotoCraft"
 
-    measurements_block = _printready_measurements_block(report)
-    review_template = _tpl(job, "PRINTREADY_REVIEW", PRINTREADY_REVIEW)
+    # --- Run the PhotoCraft edit turn. Enable PhotoCraft ONLY here. ---
+    set_photocraft_mcp(True)
     try:
-        review_prompt = review_template.format(measurements=measurements_block)
-    except (KeyError, IndexError):
-        review_prompt = review_template.replace("{measurements}", measurements_block)
-    job.setdefault("prompts", []).append(review_prompt)
-    print(f"[printready] review prompt SENT ({len(review_prompt)} chars).")
+        _track_start(job)
+        result_images = send_turn(page, prompt=prompt,
+                                  image_paths=[current_image_path],
+                                  run_id=f"{job_id}_printready")
+        _track_end(job)
+        _rename_chat_once(page, job)
+    except Exception as exc:
+        _track_end(job)
+        print(f"[printready] PhotoCraft turn failed: {exc}")
+        job["status"] = "failed"
+        job["error"] = str(exc)
+        job["finished_at"] = time.time()
+        return
+    finally:
+        # PhotoCraft must never leak into any later step.
+        try:
+            set_photocraft_mcp(False)
+        except Exception:
+            pass
 
-    _track_start(job)
-    assessment = send_text_turn(page, prompt=review_prompt,
-                                image_paths=[current_image_path],
-                                run_id=f"{job_id}_printready")
-    _track_end(job)
-    _rename_chat_once(page, job)
+    # Surface a PhotoCraft "looks regenerated" note, if any.
+    _note = photocraft_note()
+    if _note:
+        job["photocraft_note"] = _note
 
-    assessment = (assessment or "").strip()
-    job["printready_assessment"] = assessment
-    print(f"[printready] assessment stored ({len(assessment)} chars).")
+    if not result_images:
+        job["status"] = "failed"
+        job["error"] = "PhotoCraft returned no file"
+        job["finished_at"] = time.time()
+        return
+
+    # --- Server/agent-side verify: resize to exact target if off by >2px, hard
+    #     alpha threshold, save at the chosen DPI. ---
+    try:
+        out_bytes, pr_info = make_print_ready(
+            result_images[0], target_w=width_px, target_h=height_px,
+            dpi=dpi, alpha_threshold=alpha_threshold)
+    except Exception as exc:
+        print(f"[printready] print-ready verify failed: {exc}")
+        job["status"] = "failed"
+        job["error"] = f"Print-ready verification failed: {exc}"
+        job["finished_at"] = time.time()
+        return
+
+    if pr_info.get("resized"):
+        print(f"[printready] resized {pr_info['from_size']} -> {pr_info['to_size']} "
+              f"(LANCZOS) to hit the target.")
+    if pr_info.get("thresholded"):
+        print(f"[printready] applied alpha threshold {alpha_threshold}: "
+              f"{pr_info['changed_pixels']} pixel(s) changed.")
+    print(f"[printready] {pr_info['summary']}")
+
+    final_name = f"{job_id}_printready.png"
+    (OUTPUT_DIR / final_name).write_bytes(out_bytes)
+    job.setdefault("stage_images", {})["final"] = final_name
+    job["final_names"] = [final_name]
+    _mark_uploaded(job, _upload_files(job_id, [final_name]))
+
+    # Summary for the Results panel.
+    job["printready_summary"] = pr_info["summary"]
+    job["printready_target"] = {
+        "width_in": width_in, "height_in": height_in, "dpi": dpi,
+        "width_px": width_px, "height_px": height_px,
+        "alpha_threshold": alpha_threshold,
+    }
 
     job["status"] = "done"
     job["awaiting_input"] = False
@@ -2809,12 +2887,12 @@ def _handle_claimed_job(page: Any, claim: dict, logged_in: bool = True) -> None:
 
     _current_job_id = job_id
     _current_job = job
-    # Photocraft MCP: when the operator enabled the toggle for this job, every
-    # prompt this job sends to ChatGPT gets the MCP line appended (in ONE place,
-    # generator._enter_prompt). Set it for the job's duration; reset in finally.
-    _use_mcp = bool(job.get("use_photocraft_mcp"))
-    set_photocraft_mcp(_use_mcp)
-    print(f"[photocraft] job {job_id}: Use Photocraft MCP = {_use_mcp}")
+    # PhotoCraft is NO LONGER a whole-job toggle. It is enabled per-step, only
+    # around the Print Ready PhotoCraft turn (see _run_printready_workflow and
+    # the custom runner). Ensure it starts OFF for every job so no other step
+    # (Reconstruct, Remove Background, Halo, Black Out, etc.) ever routes through
+    # PhotoCraft; those always use normal ChatGPT as before.
+    set_photocraft_mcp(False)
     _sync_stop.clear()
     sync_thread = threading.Thread(target=_sync_loop, daemon=True)
     sync_thread.start()

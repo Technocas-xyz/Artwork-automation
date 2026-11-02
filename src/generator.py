@@ -88,9 +88,11 @@ def photocraft_note() -> str:
 
 
 def set_photocraft_mcp(on: bool) -> None:
-    """Enable/disable the Photocraft MCP prompt line for subsequent turns. The
-    agent calls this at job start (from job['use_photocraft_mcp']) and resets it
-    to False when the job ends."""
+    """Enable/disable PhotoCraft for subsequent turns. PhotoCraft is used by ONE
+    step only (Print Ready): the agent calls this with True immediately before
+    the Print Ready edit turn and resets it to False in a finally, so no other
+    step ever routes through PhotoCraft. When True, send_turn selects the
+    PhotoCraft composer tool and collects from the exported download link."""
     global _photocraft_on
     _photocraft_on = bool(on)
 

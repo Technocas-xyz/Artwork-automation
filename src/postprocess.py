@@ -248,3 +248,68 @@ def half_tone(
 
     out = Image.fromarray(out_arr, mode="RGBA")
     return _to_png_bytes(out)
+
+
+def make_print_ready(png_bytes: bytes, target_w: int, target_h: int,
+                     dpi: int = 300, alpha_threshold: int = 120):
+    """Server/agent-side verification of a PhotoCraft print-ready export.
+
+    PhotoCraft is asked to resize to the target and hard-threshold the alpha, but
+    we verify and correct deterministically so the saved file is exactly right:
+
+      1. If the image is not within +/-2 px of (target_w, target_h) in EITHER
+         dimension, resize to the exact target with LANCZOS.
+      2. If ANY pixel has an alpha strictly between 0 and 255, apply the alpha
+         threshold ourselves: alpha < `alpha_threshold` -> 0, else 255 (no
+         semi-transparent fringe). Pixels already at 0 or 255 are untouched.
+      3. Save as PNG with dpi=(dpi, dpi).
+
+    Returns (out_bytes, info) where info is a dict:
+      {resized: bool, from_size: (w,h), to_size: (w,h),
+       thresholded: bool, changed_pixels: int, dpi: int,
+       width_in: float, height_in: float, summary: str}
+    Never raises for a measurement issue — on a hard failure it re-raises so the
+    caller can fail the step with a clear error."""
+    img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    from_w, from_h = img.size
+
+    # 1) Resize to the exact target if off by more than 2 px in either dim.
+    resized = False
+    if abs(from_w - target_w) > 2 or abs(from_h - target_h) > 2:
+        img = img.resize((target_w, target_h), Image.LANCZOS)
+        resized = True
+
+    # 2) Hard alpha threshold if any semi-transparent pixel exists.
+    arr = np.array(img)  # H x W x 4, uint8
+    alpha = arr[:, :, 3]
+    semi = np.logical_and(alpha > 0, alpha < 255)
+    thresholded = False
+    changed_pixels = 0
+    if bool(semi.any()):
+        new_alpha = np.where(alpha < alpha_threshold, 0, 255).astype(np.uint8)
+        changed_pixels = int((new_alpha != alpha).sum())
+        arr[:, :, 3] = new_alpha
+        img = Image.fromarray(arr, mode="RGBA")
+        thresholded = True
+
+    out_w, out_h = img.size
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", dpi=(dpi, dpi))
+    out_bytes = buf.getvalue()
+
+    width_in = round(out_w / dpi, 2) if dpi else 0.0
+    height_in = round(out_h / dpi, 2) if dpi else 0.0
+    summary = (f"Print ready: {out_w} x {out_h} px @ {dpi} DPI "
+               f"= {width_in} x {height_in} in")
+    info = {
+        "resized": resized,
+        "from_size": (from_w, from_h),
+        "to_size": (out_w, out_h),
+        "thresholded": thresholded,
+        "changed_pixels": changed_pixels,
+        "dpi": dpi,
+        "width_in": width_in,
+        "height_in": height_in,
+        "summary": summary,
+    }
+    return out_bytes, info

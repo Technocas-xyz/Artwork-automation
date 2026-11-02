@@ -382,6 +382,18 @@ have them. If the artwork is print ready, say so plainly.
 Plain text, no markdown, no preamble."""
 
 
+# Print Ready via PhotoCraft (Decoinks key AIS.PRINT_READY.PHOTOCRAFT). The
+# agent SELECTS the PhotoCraft composer tool and sends this as the edit prompt.
+# Placeholders are filled with .format(): width_in, height_in, dpi, width_px,
+# height_px, alpha_threshold. The agent computes width_px = round(width_in*dpi)
+# and height_px from the artwork's aspect ratio.
+PRINT_READY_PHOTOCRAFT = """Use PhotoCraft to make this artwork print-ready for DTF:
+- Resize to {width_in} x {height_in} inches at {dpi} DPI ({width_px} x {height_px} px), keep aspect ratio, do not crop the design.
+- Transparent background. Apply alpha threshold {alpha_threshold}: pixels with alpha below it become fully transparent, the rest fully opaque (no semi-transparent fringe).
+- Do not redraw or change the design.
+- Export as a full-resolution transparent PNG download link. Do not ask questions."""
+
+
 # Similarity Check — ChatGPT second opinion. The operator uploads two images;
 # cv2 gives an instant measured score, and (optionally) ChatGPT gives an
 # independent read. BOTH images are sent in one turn: image 1 is the ORIGINAL,

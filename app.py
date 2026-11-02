@@ -455,10 +455,14 @@ class GenerateRequest(BaseModel):
     aspect_dpi: int = 0  # operator-set DPI for Aspect Ratio Enhancement (0 = use file/300)
     halftone_settings: dict = {}  # {lpi, angle, dot} for the local Half Tone op
     blackout_settings: dict = {}  # {threshold} for the local Black Out op
-    # "Use Photocraft MCP": when true, the agent appends one line asking ChatGPT
-    # to do the job with the Photocraft MCP tool (applied at send time only;
-    # managed prompts are unchanged). Default off = behaves exactly as today.
-    use_photocraft_mcp: bool = False
+# Print Ready via PhotoCraft: the Print Ready step uses the PhotoCraft composer
+    # tool to resize + make transparent + export. The operator can override the
+    # target size, DPI and alpha threshold. Blank height -> keep aspect ratio.
+    pr_via_photocraft: bool = True       # "Print Ready via PhotoCraft" (default ON)
+    pr_width_in: float = 10.75           # target print width in inches
+    pr_height_in: float = 0.0            # optional; 0/blank -> auto from aspect ratio
+    pr_dpi: int = 300                    # target DPI
+    pr_alpha_threshold: int = 120        # alpha < this -> transparent, else opaque
     # Pixel Geometry (Before -> Generate -> After) operator inputs. Blank values
     # fall back to the DTF profile defaults in src/pixel_geometry.py; blank
     # optional free-text (garment style/colour, element policies) renders N/A.
@@ -1859,10 +1863,16 @@ def create_job(req: GenerateRequest, request: Request):
         # Attribution: which user created this job (identity only — everyone
         # still sees all jobs). No leading underscore so it survives _public_job.
         "created_by": _created_by, "created_by_name": _created_by_name,
-        # Photocraft MCP toggle: stored on the job, synced to the agent in the
-        # full job dict (agent_next_job) and surfaced to the UI by _public_job
-        # (non-underscore key) so the result + Previous Runs can show the tag.
-        "use_photocraft_mcp": bool(req.use_photocraft_mcp),
+        # Print Ready via PhotoCraft: stored on the job, synced to the agent in
+        # the full job dict (agent_next_job) and surfaced to the UI by
+        # _public_job (non-underscore keys). Only the Print Ready step reads them.
+        "pr_via_photocraft": bool(req.pr_via_photocraft),
+        "pr_width_in": float(req.pr_width_in or 10.75),
+        "pr_height_in": float(req.pr_height_in or 0.0),
+        "pr_dpi": int(req.pr_dpi or 300),
+        "pr_alpha_threshold": int(req.pr_alpha_threshold or 120),
+        # Print-ready result summary + target, filled by the agent after verify.
+        "printready_summary": "", "printready_target": None,
         "stage": 0, "stage_label": "", "awaiting_input": False,
         "selection_prompt": "", "choices": [], "prompts": [],
         "extracted_text": "", "confirmed_text": "", "paused_at": None,
@@ -1983,18 +1993,13 @@ def create_job(req: GenerateRequest, request: Request):
     # and the agent needs no cv2 and no ChatGPT listing turn.
     if req.workflow == "identify" and req.identify_mode == "colour" and req.artwork_files:
         _precompute_identify_colour(jobs[job_id], req.artwork_files[0])
-    # Print Ready QA: measure numerically on the server right away, so the score
-    # and 13 checks are visible the moment the job opens (the agent adds only the
-    # written judgement).
+    # Print Ready: the agent now makes the artwork print-ready via PhotoCraft
+    # (resize + transparent + export). We still measure the 13 checks on the
+    # server for display, but a measurement problem no longer FAILS the job —
+    # the PhotoCraft edit does not depend on it. (Previously this refused the job
+    # when cv2 could not run; that gate is removed.)
     if req.workflow == "printready" and req.artwork_files:
         _precompute_printready(jobs[job_id], req.artwork_files[0])
-        # If the local measurement could not run, FAIL now with a clear reason
-        # rather than queueing a job that would silently become a visual-only
-        # review. The measurement is the point of this workflow.
-        _pr_err = jobs[job_id].get("printready_error")
-        if _pr_err:
-            del jobs[job_id]
-            raise HTTPException(status_code=400, detail=_pr_err)
     # Colorways: extract the dominant colours on the server so the operator sees
     # the swatches immediately and the agent hands them to ChatGPT as data.
     if req.workflow == "colorway" and req.artwork_files:
