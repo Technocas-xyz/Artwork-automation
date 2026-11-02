@@ -44,6 +44,7 @@ from config.selectors import (
     PHOTOCRAFT_TOOL_NAME,
     COMPOSER_FORM,
     POPUP_CONTAINER,
+    ADD_MENU_ANCHOR_TEXTS,
 )
 from src.browser import GenerationTimeoutError, RateLimitError
 from src.postprocess import is_opaque_white_bg
@@ -537,16 +538,63 @@ def _composer_form(page: Page):
     return None
 
 
+def _find_add_menu_container(page: Page, run_id: str):
+    """Return the open "+" dropdown container, detected by TEXT (the dropdown is
+    a Radix popper with no role=menu). Looks for a visible element whose text is
+    one of ADD_MENU_ANCHOR_TEXTS, then takes its nearest scrollable / Radix
+    wrapper ancestor as the container. Returns the element handle or None. Logs
+    which anchor matched."""
+    for anchor in ADD_MENU_ANCHOR_TEXTS:
+        try:
+            loc = page.get_by_text(anchor, exact=False).first
+            if loc.count() == 0:
+                continue
+            if not loc.is_visible(timeout=250):
+                continue
+        except Exception:
+            continue
+        try:
+            handle = loc.element_handle()
+        except Exception:
+            handle = None
+        if handle is None:
+            continue
+        logger.info("[photocraft %s] menu open — matched anchor text %r", run_id, anchor)
+        # Walk up to the nearest Radix wrapper / scrollable / menu container.
+        try:
+            container = handle.evaluate_handle(
+                r"""el => {
+                    let n = el;
+                    for (let i = 0; i < 12 && n; i++) {
+                        if (n.matches && (
+                            n.matches("[data-radix-popper-content-wrapper]") ||
+                            n.matches("[role='menu'],[role='listbox'],[role='dialog']")))
+                            return n;
+                        const st = n.scrollHeight && (n.scrollHeight > n.clientHeight + 4);
+                        const ov = n.ownerDocument && n.ownerDocument.defaultView
+                            ? getComputedStyle(n).overflowY : "";
+                        if (st && (ov === "auto" || ov === "scroll")) return n;
+                        n = n.parentElement;
+                    }
+                    return el.parentElement || el;
+                }""").as_element()
+            return container
+        except Exception:
+            return handle
+    logger.warning("[photocraft %s] no '+' dropdown anchor text found (menu not open)", run_id)
+    return None
+
+
 def _open_add_popup(page: Page, run_id: str):
     """Find the "+" button INSIDE the composer form, wait until it is enabled,
-    click it, and return the popup element handle once a role=menu/listbox/dialog
-    appears. Returns None if the button is missing/disabled or no popup opens."""
+    click it (Radix opens on pointerdown — retry once with a dispatched
+    pointerdown if nothing opens), and return the open dropdown container
+    detected by TEXT. Returns None if the button is missing/disabled or no
+    dropdown opens."""
     form = _composer_form(page)
     if form is None:
         logger.warning("[photocraft %s] composer form not found", run_id)
         return None
-    # The "+" button, scoped to the form. Try the aria-labels first, else the
-    # form's leading button.
     add_btn = None
     try:
         add_btn = form.query_selector(ADD_MENU_BUTTON)
@@ -554,7 +602,6 @@ def _open_add_popup(page: Page, run_id: str):
         add_btn = None
     if add_btn is None:
         try:
-            # Leading button of the composer (the "+" sits at the start).
             add_btn = form.query_selector("button")
         except Exception:
             add_btn = None
@@ -562,7 +609,7 @@ def _open_add_popup(page: Page, run_id: str):
         logger.warning("[photocraft %s] '+' button not found in composer form", run_id)
         return None
 
-    # Wait until it is enabled (it is disabled while an upload is pending).
+    # Wait until it is enabled (disabled while an upload is pending).
     for _ in range(40):  # ~10s
         try:
             disabled = add_btn.get_attribute("disabled") is not None or \
@@ -585,49 +632,35 @@ def _open_add_popup(page: Page, run_id: str):
         add_btn.click()
     except Exception as exc:
         logger.warning("[photocraft %s] '+' click failed (%s)", run_id, exc)
-        return None
 
-    # REQUIRE a popup before treating the menu as open.
+    # 1s settle wait, then detect the dropdown by text.
+    page.wait_for_timeout(1000)
+    container = _find_add_menu_container(page, run_id)
+    if container is not None:
+        return container
+
+    # Retry once with a dispatched pointerdown (Radix opens on pointerdown).
+    logger.info("[photocraft %s] dropdown not open — retrying with pointerdown", run_id)
     try:
-        page.wait_for_selector(POPUP_CONTAINER, state="visible", timeout=4000)
-    except Exception:
-        logger.warning("[photocraft %s] no popup appeared after clicking '+'", run_id)
-        return None
-    popups = page.query_selector_all(POPUP_CONTAINER)
-    return popups[-1] if popups else None
+        add_btn.dispatch_event("pointerdown")
+        add_btn.click()
+    except Exception as exc:
+        logger.info("[photocraft %s] pointerdown retry failed (%s)", run_id, exc)
+    page.wait_for_timeout(1000)
+    return _find_add_menu_container(page, run_id)
 
 
-def _dump_popup(popup, page: Page, run_id: str = "") -> None:
-    """DIAGNOSTIC: log items (role + label) of the OPEN popup only, plus whether
-    it has a plugin-search input. Scoped to the popup element, never the page.
-    Never raises."""
+def _dump_menu_container(container, run_id: str = "") -> None:
+    """DIAGNOSTIC: log the open dropdown container's outerHTML (trimmed to 3000
+    chars) so the real item + search-row markup is visible. Never raises."""
     banner = "[photocraft-menu]" + (f" {run_id}" if run_id else "")
-    if popup is None:
-        logger.info("%s no popup to dump", banner)
+    if container is None:
+        logger.info("%s no menu container to dump", banner)
         return
     try:
-        info = popup.evaluate(
-            r"""(root) => {
-                const nodes = Array.from(root.querySelectorAll(
-                    "[role='menuitem'],[role='option'],button,[role='button'],li,a"));
-                const seen = new Set(); const out = [];
-                for (const n of nodes) {
-                    const t = (n.textContent || "").trim().replace(/\s+/g, " ").slice(0, 60);
-                    if (!t || seen.has(t)) continue;
-                    seen.add(t);
-                    out.push({role: n.getAttribute('role') || n.tagName.toLowerCase(), text: t});
-                }
-                const search = root.querySelector(
-                    "input[placeholder*='plugin' i], input[placeholder*='search' i], input[type='search']");
-                return {count: out.length, items: out.slice(0, 40),
-                        hasSearch: !!search,
-                        placeholder: search ? (search.getAttribute('placeholder') || "") : null};
-            }"""
-        ) or {}
-        logger.info("%s items=%s hasSearch=%s placeholder=%r", banner,
-                    info.get("count"), info.get("hasSearch"), info.get("placeholder"))
-        for it in (info.get("items") or []):
-            logger.info("%s   [%s] %r", banner, it.get("role"), it.get("text"))
+        html = container.evaluate("el => el.outerHTML") or ""
+        logger.info("%s container outerHTML (%d chars, trunc 3000):\n%s",
+                    banner, len(html), html[:3000])
     except Exception as exc:
         logger.info("%s dump FAILED (%s)", banner, exc)
 
@@ -676,60 +709,84 @@ def _photocraft_pill_present(page: Page) -> bool:
         return False
 
 
-def _click_exact_menu_item(page: Page, popup, name: str, run_id: str) -> bool:
-    """Within `popup`, scroll and click the item whose FIRST label line is
-    exactly `name`. Never clicks a different plugin. Returns True if clicked."""
-    scope = popup or page
-    # Scroll the popup to the bottom once so lazily-rendered items exist.
+def _click_exact_item_by_text(page: Page, name: str, run_id: str) -> bool:
+    """Click the visible dropdown item whose text is EXACTLY `name`
+    (get_by_text(name, exact=True).first). Scrolls it into view first, and if
+    clicking fails, presses Enter. Never clicks the "PhotoCraft PhotoCraft"
+    description combo — exact=True matches the label node only. Returns True if a
+    click/Enter was issued."""
     try:
-        if popup is not None:
-            popup.evaluate("el => { el.scrollTop = el.scrollHeight; }")
-            page.wait_for_timeout(250)
-    except Exception:
-        pass
-    try:
-        items = scope.query_selector_all(MENU_ITEM) if popup is not None \
-            else page.query_selector_all(MENU_ITEM)
-    except Exception:
-        items = []
-    exact = None
-    for it in items:
+        item = page.get_by_text(name, exact=True).first
+        if item.count() == 0:
+            logger.warning("[photocraft %s] exact-text item %r not found", run_id, name)
+            return False
         try:
-            txt = (it.inner_text() or "").strip()
+            item.scroll_into_view_if_needed(timeout=2000)
         except Exception:
-            continue
-        first = txt.splitlines()[0].strip() if txt else ""
-        if first == name:
-            exact = it
-            break
-    if exact is None:
-        logger.warning("[photocraft %s] no popup item labelled exactly %r", run_id, name)
-        return False
-    logger.info("[photocraft %s] clicking popup item %r", run_id, name)
-    try:
-        exact.click()
-        return True
+            pass
+        logger.info("[photocraft %s] clicking exact-text item %r", run_id, name)
+        try:
+            item.click(timeout=3000)
+            return True
+        except Exception as exc:
+            logger.info("[photocraft %s] item.click failed (%s) — pressing Enter", run_id, exc)
+            try:
+                item.press("Enter")
+                return True
+            except Exception:
+                return False
     except Exception as exc:
-        logger.warning("[photocraft %s] popup item click failed (%s)", run_id, exc)
+        logger.warning("[photocraft %s] exact-text click failed (%s)", run_id, exc)
         return False
+
+
+def _scroll_and_click_item(page: Page, container, name: str, run_id: str) -> bool:
+    """Fallback for when the item is below the fold: scroll the dropdown
+    container with mouse.wheel in steps (max 10), retrying the exact-text click
+    each step. Returns True once clicked."""
+    # First try with the item possibly already present.
+    if _click_exact_item_by_text(page, name, run_id):
+        return True
+    if container is None:
+        return False
+    # Hover the container so wheel events land on it, then scroll in steps.
+    try:
+        box = container.bounding_box()
+    except Exception:
+        box = None
+    if box:
+        try:
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        except Exception:
+            pass
+    for step in range(10):
+        try:
+            page.mouse.wheel(0, 300)
+        except Exception:
+            pass
+        page.wait_for_timeout(250)
+        if _click_exact_item_by_text(page, name, run_id):
+            logger.info("[photocraft %s] clicked %r after %d scroll step(s)", run_id, name, step + 1)
+            return True
+    logger.warning("[photocraft %s] %r never became clickable after scrolling", run_id, name)
+    return False
 
 
 def _try_at_mention(page: Page, name: str, run_id: str) -> bool:
     """Second fallback: type "@PhotoCraft" in the composer and pick the
-    suggestion. Logs what suggestion popup appears. Returns True if the pill
-    shows up afterwards."""
+    suggestion. Logs the suggestion container. Returns True if the pill shows up
+    afterwards."""
     logger.info("[photocraft %s] trying @%s mention in composer", run_id, name)
     try:
         page.click(PROMPT_BOX)
         page.keyboard.type(f"@{name}")
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(1000)
     except Exception as exc:
         logger.info("[photocraft %s] @mention type failed (%s)", run_id, exc)
         return False
-    popups = page.query_selector_all(POPUP_CONTAINER)
-    popup = popups[-1] if popups else None
-    _dump_popup(popup, page, run_id=f"{run_id}-atmention")
-    clicked = _click_exact_menu_item(page, popup, name, run_id)
+    container = _find_add_menu_container(page, f"{run_id}-atmention")
+    _dump_menu_container(container, run_id=f"{run_id}-atmention")
+    clicked = _click_exact_item_by_text(page, name, run_id)
     if not clicked:
         # Clear the "@PhotoCraft" text we typed so it does not pollute the prompt.
         try:
@@ -763,29 +820,38 @@ def select_photocraft_tool(page: Page, run_id: str = "photocraft") -> None:
         logger.info("[photocraft %s] tool pill already present — skipping selection", run_id)
         return
 
-    # --- Primary path: the "+" popup ---
-    popup = _open_add_popup(page, run_id)
-    if popup is not None:
-        _dump_popup(popup, page, run_id=run_id)
-        # If there is a search box, type to filter; then re-dump.
+    # --- Primary path: the "+" dropdown (Radix popper detected by text) ---
+    container = _open_add_popup(page, run_id)
+    if container is not None:
+        _dump_menu_container(container, run_id=run_id)
+
+        # Preferred: use the "Type to search plugins" row to filter, then click
+        # the exact item. Try the search input first, else click the search row.
+        searched = False
         try:
-            search = popup.query_selector(PLUGIN_SEARCH_INPUT)
-        except Exception:
-            search = None
-        if search is not None:
-            try:
+            search = page.query_selector(PLUGIN_SEARCH_INPUT)
+            if search is not None:
                 search.click()
                 search.fill(name)
-                logger.info("[photocraft %s] typed %r into plugin search", run_id, name)
-                page.wait_for_timeout(600)
-                _dump_popup(popup, page, run_id=f"{run_id}-filtered")
-            except Exception as exc:
-                logger.info("[photocraft %s] plugin-search fill failed (%s)", run_id, exc)
-        else:
-            logger.info("[photocraft %s] popup has no search box — scrolling to find %r", run_id, name)
-        _click_exact_menu_item(page, popup, name, run_id)
+                searched = True
+            else:
+                row = page.get_by_text("Type to search plugins", exact=False).first
+                if row.count() > 0:
+                    row.click()
+                    page.keyboard.type(name)
+                    searched = True
+        except Exception as exc:
+            logger.info("[photocraft %s] plugin-search step failed (%s)", run_id, exc)
+        if searched:
+            logger.info("[photocraft %s] typed %r into plugin search", run_id, name)
+            page.wait_for_timeout(600)
 
-        # Confirm the pill (only after a real click attempt).
+        # Click the item whose text is exactly "PhotoCraft"; if it is below the
+        # fold, scroll the container and retry.
+        if not _click_exact_item_by_text(page, name, run_id):
+            _scroll_and_click_item(page, container, name, run_id)
+
+        # Confirm the pill inside the composer form.
         for _ in range(12):  # ~3s
             if _photocraft_pill_present(page):
                 logger.info("[photocraft %s] PhotoCraft pill confirmed in composer", run_id)

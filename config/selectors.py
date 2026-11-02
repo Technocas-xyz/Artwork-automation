@@ -169,10 +169,18 @@ ADD_MENU_BUTTON = ("button[aria-label='Add files and more'], "
                    "button[aria-label*='Add files' i], "
                    "button[aria-label*='attach' i]")
 
-# A popup opened by the "+" button. We REQUIRE one of these to appear before
-# treating the menu as open (the earlier bug dumped the whole page/sidebar
-# because no popup check gated it).
-POPUP_CONTAINER = "[role='menu'], [role='listbox'], [role='dialog']"
+# A popup opened by the "+" button. ChatGPT's dropdown is a RADIX popper that
+# does NOT carry role=menu/listbox (confirmed live: our role-based wait timed
+# out while the dropdown was clearly open). So we detect "menu open" by TEXT —
+# an item that is always present ("Add photos & files") or the search row
+# ("Type to search plugins") — and take that element's nearest scrollable
+# ancestor / Radix wrapper as the container. These role/wrapper selectors are
+# kept only as container-resolution candidates, NOT as the open-gate.
+POPUP_CONTAINER = ("[data-radix-popper-content-wrapper], "
+                   "[role='menu'], [role='listbox'], [role='dialog']")
+# Text anchors that reliably appear in the open "+" dropdown. Used with
+# get_by_text to detect that the menu opened regardless of role markup.
+ADD_MENU_ANCHOR_TEXTS = ("Add photos & files", "Type to search plugins", "Web search")
 
 # --- PhotoCraft composer-tool selection -----------------------------------
 # PhotoCraft must be SELECTED in the composer before sending (a text request
