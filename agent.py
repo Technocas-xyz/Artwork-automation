@@ -59,7 +59,7 @@ from src.generator import (
 )
 from src.postprocess import (
     is_opaque_white_bg, remove_white_background,
-    black_out, half_tone, make_print_ready,
+    black_out, half_tone, make_print_ready, alpha_bbox_size,
 )
 # Local annotation for the Artwork Identification workflow. Pillow-only helpers
 # ONLY — colour_groups() needs cv2 (absent in the packaged agent build) and runs
@@ -2271,16 +2271,26 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
 
     width_px = round(width_in * dpi)
     # Measure the ACTUAL print_ready input image (the previous step's output for
-    # the custom op, or the uploaded file for the standalone workflow) with PIL
-    # directly — robust even if image_info() can't parse it. The height (when
-    # auto) MUST come from this image's aspect, never a default.
-    src_w = src_h = 0
+    # the custom op, or the uploaded file for the standalone workflow). The auto
+    # height MUST come from the DESIGN'S aspect — i.e. the alpha bounding box
+    # (transparent margins trimmed), not the raw canvas — so the target matches
+    # the design, never a padded square.
+    canvas_w = canvas_h = 0
+    src_w = src_h = 0   # the DESIGN (trimmed) size that drives the aspect
     try:
         from PIL import Image as _PILImage
         with _PILImage.open(input_path) as _im:
-            src_w, src_h = int(_im.width), int(_im.height)
+            canvas_w, canvas_h = int(_im.width), int(_im.height)
+        _data = Path(input_path).read_bytes()
+        _bbox = alpha_bbox_size(_data)
+        if _bbox:
+            src_w, src_h = int(_bbox[0]), int(_bbox[1])
+        else:
+            src_w, src_h = canvas_w, canvas_h
     except Exception as exc:
         print(f"[printready {run_id}] could not measure input {input_path!r}: {exc}")
+    if (src_w, src_h) != (canvas_w, canvas_h):
+        print(f"[printready {run_id}] trimmed {canvas_w}x{canvas_h} -> {src_w}x{src_h}")
     if height_in_req:
         height_in = float(height_in_req)
         height_px = round(height_in * dpi)
@@ -2293,7 +2303,7 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
         height_in = round(width_in, 2)
 
     print(f"[printready {run_id}] target {width_px}x{height_px} px "
-          f"({width_in}x{height_in} in @ {dpi} DPI) from input {src_w}x{src_h}, "
+          f"({width_in}x{height_in} in @ {dpi} DPI) from design {src_w}x{src_h}, "
           f"alpha_threshold={alpha_threshold}")
 
     # Build the PhotoCraft edit prompt (Decoinks key, fallback constant).
@@ -2340,6 +2350,9 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
         result_images[0], target_w=width_px, target_h=height_px,
         dpi=dpi, alpha_threshold=alpha_threshold)
 
+    if pr_info.get("trimmed"):
+        print(f"[printready {run_id}] trimmed {pr_info['orig_size']} -> "
+              f"{pr_info['from_size']} (transparent border removed).")
     if pr_info.get("resized"):
         print(f"[printready {run_id}] fit {pr_info['from_size']} -> "
               f"{pr_info['fitted_size']} (LANCZOS, aspect kept).")

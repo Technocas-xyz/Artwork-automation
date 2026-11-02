@@ -250,6 +250,33 @@ def half_tone(
     return _to_png_bytes(out)
 
 
+def alpha_bbox_size(png_bytes: bytes):
+    """(width, height) of the image's VISIBLE content — the bounding box of all
+    pixels with alpha > 0. Returns the full size if the image is fully opaque or
+    fully transparent, None only if it cannot be read. Used so the print target
+    is sized to the DESIGN, not to a canvas with transparent margins."""
+    try:
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    except Exception:
+        return None
+    alpha = img.getchannel("A")
+    bbox = alpha.getbbox()  # None when fully transparent
+    if bbox is None:
+        return img.size
+    return (bbox[2] - bbox[0], bbox[3] - bbox[1])
+
+
+def _trim_transparent_border(img: "Image.Image"):
+    """Crop `img` (RGBA) to the bounding box of its visible pixels (alpha > 0).
+    Returns (cropped_img, was_trimmed). A fully transparent image is returned
+    unchanged (nothing to crop to)."""
+    alpha = img.getchannel("A")
+    bbox = alpha.getbbox()
+    if bbox is None or bbox == (0, 0, img.width, img.height):
+        return img, False
+    return img.crop(bbox), True
+
+
 def make_print_ready(png_bytes: bytes, target_w: int, target_h: int,
                      dpi: int = 300, alpha_threshold: int = 120):
     """Server/agent-side verification of a PhotoCraft print-ready export.
@@ -277,6 +304,14 @@ def make_print_ready(png_bytes: bytes, target_w: int, target_h: int,
     Never raises for a measurement issue — on a hard failure it re-raises so the
     caller can fail the step with a clear error."""
     img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    orig_w, orig_h = img.size
+
+    # 0) Trim fully transparent borders FIRST. In DTF the print width is the
+    #    DESIGN width — if PhotoCraft returns a canvas with transparent side
+    #    margins, fitting the whole canvas would make the design narrower than
+    #    the requested inches. Cropping to the alpha bounding box makes the
+    #    design itself span the target.
+    img, trimmed = _trim_transparent_border(img)
     from_w, from_h = img.size
 
     # 1) Fit-inside (keep aspect) + transparent pad to the exact target. Never
@@ -323,9 +358,11 @@ def make_print_ready(png_bytes: bytes, target_w: int, target_h: int,
     summary = (f"Print ready: {out_w} x {out_h} px @ {dpi} DPI "
                f"= {width_in} x {height_in} in")
     info = {
+        "trimmed": trimmed,
+        "orig_size": (orig_w, orig_h),
         "resized": resized,
         "padded": padded,
-        "from_size": (from_w, from_h),
+        "from_size": (from_w, from_h),   # the design size after trimming
         "fitted_size": (fit_w, fit_h),
         "to_size": (out_w, out_h),
         "thresholded": thresholded,

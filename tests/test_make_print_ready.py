@@ -68,5 +68,38 @@ check("summary text",
       info5["summary"] == "Print ready: 3225 x 4030 px @ 300 DPI = 10.75 x 13.43 in",
       info5["summary"])
 
+
+def _png_with_design(canvas_w, canvas_h, design_w, design_h):
+    """A fully transparent canvas with an opaque design centered in it."""
+    a = np.zeros((canvas_h, canvas_w, 4), np.uint8)
+    x0 = (canvas_w - design_w) // 2
+    y0 = (canvas_h - design_h) // 2
+    a[y0:y0 + design_h, x0:x0 + design_w, 0] = 180
+    a[y0:y0 + design_h, x0:x0 + design_w, 3] = 255
+    b = io.BytesIO()
+    Image.fromarray(a, "RGBA").save(b, "PNG")
+    return b.getvalue()
+
+
+# Case E (the DTF reason): PhotoCraft returns a 3225x3225 canvas holding a
+# 2580x3225 design with transparent side margins. The print width is the DESIGN
+# width, so make_print_ready must TRIM the transparent sides first, then fit the
+# 2580x3225 design to a 3225-wide target. Expected output:
+#   3225 x round(3225*3225/2580) px, and the design spans the FULL width.
+design_w, design_h = 2580, 3225
+tw = 3225
+th = round(tw * design_h / design_w)   # round(3225*3225/2580) = 4031
+canvas = _png_with_design(3225, 3225, design_w, design_h)
+outE, infoE = make_print_ready(canvas, tw, th, 300, 120)
+check("trimmed the transparent border", infoE["trimmed"] and infoE["from_size"] == (2580, 3225), infoE)
+check("output sized to the trimmed design aspect", infoE["to_size"] == (tw, th), infoE)
+arrE = np.array(Image.open(io.BytesIO(outE)))
+# The design now spans the full width: the left and right edge columns have
+# opaque pixels somewhere (no transparent side margin left).
+left_opaque = bool((arrE[:, 0, 3] > 0).any())
+right_opaque = bool((arrE[:, -1, 3] > 0).any())
+check("design spans the full target width (no side margin)", left_opaque and right_opaque,
+      (left_opaque, right_opaque))
+
 print("\nRESULT:", "ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}")
 sys.exit(1 if FAILS else 0)
