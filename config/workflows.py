@@ -393,6 +393,22 @@ PRINT_READY_PHOTOCRAFT = """Use PhotoCraft to make this artwork print-ready for 
 - Do not redraw or change the design.
 - Export as a full-resolution transparent PNG download link. Do not ask questions."""
 
+# The ONE line appended (as the LAST line) to every prompt a PhotoCraft turn
+# sends — it tells ChatGPT to run the edit through PhotoCraft and export a
+# transparent PNG link (Decoinks key AIS.PHOTOCRAFT.LINE). No placeholders.
+PHOTOCRAFT_LINE = (
+    "Use PhotoCraft for this edit and export the result as a full-resolution "
+    "transparent PNG download link. Do not ask me any questions."
+)
+
+# The corrective follow-up sent when ChatGPT ignores the tool and returns a
+# normal generated image instead of a PhotoCraft export (Decoinks key
+# AIS.PHOTOCRAFT.FOLLOWUP). No placeholders.
+PHOTOCRAFT_FOLLOWUP = (
+    "Do not generate a new image. Use PhotoCraft to edit the uploaded image "
+    "and give me the transparent PNG download link."
+)
+
 
 # Similarity Check — ChatGPT second opinion. The operator uploads two images;
 # cv2 gives an instant measured score, and (optionally) ChatGPT gives an

@@ -64,10 +64,34 @@ _photocraft_on = False
 # Ready step sets this (upscaling to a large print target is expected there);
 # other PhotoCraft uses leave it False so the regen flag still fires.
 _photocraft_skip_regen = False
+
+# The PhotoCraft prompt texts come from Decoinks Prompt Management, resolved by
+# the agent at job time (AIS.PHOTOCRAFT.LINE / AIS.PHOTOCRAFT.FOLLOWUP) and
+# injected via set_photocraft_prompts(). These module-level values are only the
+# built-in FALLBACK used when the agent has not injected managed text (e.g. a
+# direct generator unit test, or Decoinks unreachable AND no fallback passed).
+# They mirror config/workflows.PHOTOCRAFT_LINE / PHOTOCRAFT_FOLLOWUP.
 PHOTOCRAFT_LINE = (
     "Use PhotoCraft for this edit and export the result as a full-resolution "
     "transparent PNG download link. Do not ask me any questions."
 )
+PHOTOCRAFT_FOLLOWUP = (
+    "Do not generate a new image. Use PhotoCraft to edit the uploaded image "
+    "and give me the transparent PNG download link."
+)
+_photocraft_line = PHOTOCRAFT_LINE
+_photocraft_followup = PHOTOCRAFT_FOLLOWUP
+
+
+def set_photocraft_prompts(line: str | None, followup: str | None) -> None:
+    """Inject the Decoinks-resolved PhotoCraft LINE and FOLLOWUP for subsequent
+    turns. The agent calls this at the start of the Print Ready step with the
+    text it resolved via _tpl (managed Decoinks text, else the built-in
+    fallback). Empty/None falls back to the module constant so a turn never
+    sends an empty line."""
+    global _photocraft_line, _photocraft_followup
+    _photocraft_line = (line or "").strip() or PHOTOCRAFT_LINE
+    _photocraft_followup = (followup or "").strip() or PHOTOCRAFT_FOLLOWUP
 
 
 def set_photocraft_skip_regen_check(skip: bool) -> None:
@@ -113,14 +137,16 @@ def photocraft_enabled() -> bool:
 
 
 def _apply_photocraft(prompt: str) -> str:
-    """Append the Photocraft MCP line as the LAST line of the prompt when the
-    toggle is on; otherwise return the prompt unchanged. Idempotent — never adds
-    the line twice if it is already the last line."""
+    """Append the PhotoCraft line (Decoinks AIS.PHOTOCRAFT.LINE, injected by the
+    agent via set_photocraft_prompts; else the built-in fallback) as the LAST
+    line of the prompt when the toggle is on; otherwise return the prompt
+    unchanged. Idempotent — never adds the line twice if it is already last."""
+    line = _photocraft_line or PHOTOCRAFT_LINE
     if not _photocraft_on or not prompt:
         return prompt
-    if prompt.rstrip().endswith(PHOTOCRAFT_LINE):
+    if prompt.rstrip().endswith(line):
         return prompt
-    return prompt.rstrip() + "\n\n" + PHOTOCRAFT_LINE
+    return prompt.rstrip() + "\n\n" + line
 
 
 # Message raised when a turn that was supposed to produce an image instead
@@ -2688,12 +2714,6 @@ def _check_photocraft_size(data: bytes, input_wh, run_id: str) -> None:
         _set_photocraft_note(PHOTOCRAFT_REGEN_NOTE)
 
 
-PHOTOCRAFT_REGEN_FOLLOWUP = (
-    "Do not generate a new image. Use PhotoCraft to edit the uploaded image "
-    "and give me the transparent PNG download link."
-)
-
-
 def _poll_for_photocraft_result(page: Page, run_id: str, timeout_ms: int = 20_000,
                                 poll_ms: int = 1500):
     """Poll _find_photocraft_result() for up to `timeout_ms`, returning as soon
@@ -2797,7 +2817,7 @@ def _photocraft_collect(page: Page, run_id: str, input_wh=None, retry_sender=Non
         retry_id = f"{run_id}-retry"
         logger.info("[photocraft %s] sending corrective follow-up and re-collecting", run_id)
         try:
-            retry_sender(PHOTOCRAFT_REGEN_FOLLOWUP)
+            retry_sender(_photocraft_followup or PHOTOCRAFT_FOLLOWUP)
         except Exception as exc:
             logger.warning("[photocraft %s] corrective follow-up send FAILED (%s)", run_id, exc)
         _dump_photocraft_reply(page, run_id=retry_id)

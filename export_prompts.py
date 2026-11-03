@@ -56,6 +56,14 @@ CATALOGUE: dict[str, tuple[str, int, str]] = {
     # ChatGPT turn that gives the printer's written judgement of the artwork.
     "PRINTREADY_REVIEW": ("printready", 1, "Printer's assessment of a DTF artwork, given local measurements"),
 
+    # --- Print Ready via PhotoCraft ---
+    # The agent selects the PhotoCraft composer tool and sends PRINT_READY_PHOTOCRAFT
+    # to resize + make transparent + export. PHOTOCRAFT_LINE is appended to every
+    # PhotoCraft prompt; PHOTOCRAFT_FOLLOWUP is the corrective re-ask.
+    "PRINT_READY_PHOTOCRAFT": ("printready", 1, "PhotoCraft: resize to the print size, transparent, export a PNG link"),
+    "PHOTOCRAFT_LINE": ("printready", 1, "Line appended to every PhotoCraft prompt (use PhotoCraft, export PNG link)"),
+    "PHOTOCRAFT_FOLLOWUP": ("printready", 1, "Corrective re-ask when ChatGPT ignored the PhotoCraft tool"),
+
     # --- Colorways (UC-6) ---
     # Dominant colours are extracted locally; ChatGPT recommends garment colours,
     # then mocks up the artwork per chosen colour, then adapts it per colour.
