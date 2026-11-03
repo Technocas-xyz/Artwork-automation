@@ -42,6 +42,7 @@ from config.workflows import (
     CUSTOM_ASPECT_ADVICE, CUSTOM_ASPECT_BASELINE, CUSTOM_ASPECT_REGENERATE,
     IDENTIFY_OBJECTS, IDENTIFY_COLOR_GROUPS, IDENTIFY_REGENERATE,
     PRINTREADY_REVIEW, PRINT_READY_PHOTOCRAFT,
+    PHOTOCRAFT_LINE, PHOTOCRAFT_FOLLOWUP,
     SIMILARITY_REVIEW,
     OBJECT_SIMILARITY_DETECT,
     COLORWAY_SUGGEST, COLORWAY_MOCKUP, COLORWAY_ADAPT,
@@ -55,7 +56,7 @@ from src.generator import (
     generate, open_chat, rename_chat, send_turn, send_text_turn,
     get_last_text_reply, get_boxes, extract_artwork_images,
     check_project_urls, dump_page_controls, set_photocraft_mcp, photocraft_note,
-    set_photocraft_skip_regen_check,
+    set_photocraft_skip_regen_check, set_photocraft_prompts,
 )
 from src.postprocess import (
     is_opaque_white_bg, remove_white_background,
@@ -869,6 +870,20 @@ def _tpl(job: dict[str, Any], name: str, default: str) -> str:
     created while Decoinks was unreachable, simply runs on the built-in text.
     """
     return (job.get("managed_prompts") or {}).get(name) or default
+
+
+def _tpl_logged(job: dict[str, Any], name: str, key: str, default: str) -> str:
+    """Like _tpl, but LOG whether the live Decoinks text or the built-in
+    fallback was used — for the PhotoCraft prompts the boss wants auditable:
+        [prompt] AIS.PHOTOCRAFT.LINE source=decoinks|fallback
+    `key` is the Decoinks key (for the log); `name` is the template name the
+    server put in managed_prompts."""
+    managed = (job.get("managed_prompts") or {}).get(name)
+    if managed:
+        print(f"[prompt] {key} source=decoinks")
+        return managed
+    print(f"[prompt] {key} source=fallback")
+    return default
 
 
 def _run_text_replace(page: Any, job: dict[str, Any], run_dir, run_number: int) -> None:
@@ -2357,8 +2372,15 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
           f"({width_in}x{height_in} in @ {dpi} DPI) from design {src_w}x{src_h}, "
           f"alpha_threshold={alpha_threshold}")
 
-    # Build the PhotoCraft edit prompt (Decoinks key, fallback constant).
-    template = _tpl(job, "PRINT_READY_PHOTOCRAFT", PRINT_READY_PHOTOCRAFT)
+    # Build the PhotoCraft edit prompt (Decoinks key, fallback constant) — all
+    # three PhotoCraft prompts come from Prompt Management, logged by source.
+    template = _tpl_logged(job, "PRINT_READY_PHOTOCRAFT", "AIS.PRINT_READY.PHOTOCRAFT",
+                           PRINT_READY_PHOTOCRAFT)
+    # Resolve the appended LINE and the corrective FOLLOWUP from Decoinks too and
+    # inject them into the generator so this turn uses the managed text.
+    _pc_line = _tpl_logged(job, "PHOTOCRAFT_LINE", "AIS.PHOTOCRAFT.LINE", PHOTOCRAFT_LINE)
+    _pc_follow = _tpl_logged(job, "PHOTOCRAFT_FOLLOWUP", "AIS.PHOTOCRAFT.FOLLOWUP", PHOTOCRAFT_FOLLOWUP)
+    set_photocraft_prompts(_pc_line, _pc_follow)
     fields = dict(width_in=width_in, height_in=height_in, dpi=dpi,
                   width_px=width_px, height_px=height_px,
                   alpha_threshold=alpha_threshold)
@@ -2384,6 +2406,7 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
         try:
             set_photocraft_mcp(False)
             set_photocraft_skip_regen_check(False)
+            set_photocraft_prompts(None, None)  # reset to built-in fallbacks
         except Exception:
             pass
 

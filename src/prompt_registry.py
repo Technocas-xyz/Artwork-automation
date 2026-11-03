@@ -80,6 +80,11 @@ PROMPT_KEYS: dict[str, str] = {
     # Print Ready via PhotoCraft: the agent selects the PhotoCraft tool and sends
     # this edit prompt to produce a print-ready transparent PNG.
     "PRINT_READY_PHOTOCRAFT": "AIS.PRINT_READY.PHOTOCRAFT",
+    # The one line appended (as the LAST line) to EVERY prompt a PhotoCraft turn
+    # sends, and the corrective follow-up when ChatGPT ignores the tool. Both are
+    # resolved from Decoinks at job time like every other prompt.
+    "PHOTOCRAFT_LINE": "AIS.PHOTOCRAFT.LINE",
+    "PHOTOCRAFT_FOLLOWUP": "AIS.PHOTOCRAFT.FOLLOWUP",
     # Similarity Check: cv2 gives the instant measured score; this is the one
     # ChatGPT second-opinion turn (both images in, text review out).
     "SIMILARITY_REVIEW": "AIS.SIMILARITY.REVIEW",
@@ -436,6 +441,18 @@ class PromptRegistry:
 registry = PromptRegistry()
 
 
+# Workflows that can run a PhotoCraft turn — the standalone Print Ready
+# workflow, the Custom print_ready op, and the shared "Print Ready via
+# PhotoCraft" post-step on any single-design image workflow. For these, the
+# PhotoCraft LINE (appended to every PhotoCraft prompt) and the corrective
+# FOLLOWUP must travel on the job's managed_prompts so the agent resolves them
+# from Decoinks exactly like every other prompt. The text-only reviews
+# (similarity/objectsim) never run PhotoCraft, so they do not carry them.
+_PHOTOCRAFT_PROMPTS = ["PHOTOCRAFT_LINE", "PHOTOCRAFT_FOLLOWUP"]
+_PHOTOCRAFT_WORKFLOWS = ("text", "artwork", "custom", "identify", "geometry",
+                         "mockup", "colorway", "printready")
+
+
 def prompt_names_for_job(workflow: str, custom_operations: list[str] | None = None,
                          options: list[str] | None = None,
                          text_mode: str | None = None) -> list[str]:
@@ -445,7 +462,7 @@ def prompt_names_for_job(workflow: str, custom_operations: list[str] | None = No
             if op.startswith(DYNAMIC_OP_PREFIX):
                 names.append(dynamic_name(op))
             names.extend(CUSTOM_OPERATION_PROMPTS.get(op, []))
-        return names
+        return _with_photocraft(workflow, names)
     if not workflow and options:
         # The edit-options job: the base block, then one block per chosen option.
         return ["BASE_INSTRUCTION"] + [option_template_name(o) for o in options
@@ -453,8 +470,16 @@ def prompt_names_for_job(workflow: str, custom_operations: list[str] | None = No
     if workflow == "text" and text_mode:
         # Narrow to the prompts this input mode actually runs; unknown modes fall
         # back to the full text superset so nothing is dropped.
-        return list(TEXT_MODE_PROMPTS.get(text_mode, WORKFLOW_PROMPTS["text"]))
-    return list(WORKFLOW_PROMPTS.get(workflow, []))
+        return _with_photocraft(workflow, list(TEXT_MODE_PROMPTS.get(text_mode, WORKFLOW_PROMPTS["text"])))
+    return _with_photocraft(workflow, list(WORKFLOW_PROMPTS.get(workflow, [])))
+
+
+def _with_photocraft(workflow: str, names: list[str]) -> list[str]:
+    """Append the PhotoCraft LINE + FOLLOWUP for workflows that can run a
+    PhotoCraft turn, so their managed_prompts carry the live Decoinks text."""
+    if workflow in _PHOTOCRAFT_WORKFLOWS:
+        return names + [n for n in _PHOTOCRAFT_PROMPTS if n not in names]
+    return names
 
 
 def report_runs(runs: list[dict[str, Any]]) -> None:

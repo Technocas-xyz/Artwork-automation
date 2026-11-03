@@ -1,8 +1,8 @@
 {
-  "exported_at": "2026-09-29T12:49:00.965746+00:00",
+  "exported_at": "2026-11-03T13:54:48.979350+00:00",
   "project": "artwork-automation",
   "note": "Each row is one prompt at version 1. Only the active version of a prompt should be fetched at runtime. Rows with active=false are retired - kept for history, not for production.",
-  "count": 32,
+  "count": 38,
   "prompts": [
     {
       "key": "artwork_regenerate",
@@ -64,7 +64,7 @@
       "workflow": "custom",
       "step": 0,
       "purpose": "Aspect Ratio Enhancement",
-      "template": "This artwork is currently {width} x {height} pixels, an aspect ratio of {ratio}, which prints at {inches_w} x {inches_h} inches at {dpi} DPI.\n\nRecommend the best aspect ratio for printing this design on garments. Consider standard DTF transfer sizes and common placements: full front, left chest, back, sleeve. Take into account the shape of the design itself - a wide design suits a different placement from a tall one.\n\nReply with 2 to 4 recommendations. For each one give the ratio, the print size in inches, the placement it suits, and one short sentence on why.\n\nPlain text, no markdown, no preamble.",
+      "template": "This artwork is currently {width} x {height} pixels, an aspect ratio of {ratio}, which prints at {inches_w} x {inches_h} inches at {dpi} DPI.\n\nRecommend aspect ratios for printing this design on garments. Give one recommendation per common placement, and use the ratio that placement is normally printed at - NOT the design's current ratio. Padding will add transparent space to reach the ratio, so it is fine to recommend a taller or wider ratio than the design has now. For example a square design still prints a portrait ratio on the full front or full back.\n\nCover these placements, each on its own line:\n- Left Chest: a small near-square area, about 3:3 to 4:4\n- Full Front: a tall portrait area, about 4:5 or 3:4\n- Full Back: a tall portrait area, about 4:5 or 3:4\n- Sleeve: a narrow tall strip, about 1:3 or 1:4\n\nReply with exactly 4 lines, one per placement, each in EXACTLY this format:\n\nRatio: W:H | Size: W x H in | Placement: NAME | one short reason\n\nUse whole-number ratios (e.g. 4:5). Give the print size in inches for that placement. Plain text, no markdown, no preamble, no extra lines.",
       "placeholders": [
         "dpi",
         "height",
@@ -169,7 +169,7 @@
       "workflow": "custom",
       "step": 7,
       "purpose": "Recommend target aspect ratios for this design",
-      "template": "This artwork is currently {width} x {height} pixels, an aspect ratio of {ratio}, which prints at {inches_w} x {inches_h} inches at {dpi} DPI.\n\nRecommend the best aspect ratio for printing this design on garments. Consider standard DTF transfer sizes and common placements: full front, left chest, back, sleeve. Take into account the shape of the design itself - a wide design suits a different placement from a tall one.\n\nReply with 2 to 4 recommendations. For each one give the ratio, the print size in inches, the placement it suits, and one short sentence on why.\n\nPlain text, no markdown, no preamble.",
+      "template": "This artwork is currently {width} x {height} pixels, an aspect ratio of {ratio}, which prints at {inches_w} x {inches_h} inches at {dpi} DPI.\n\nRecommend aspect ratios for printing this design on garments. Give one recommendation per common placement, and use the ratio that placement is normally printed at - NOT the design's current ratio. Padding will add transparent space to reach the ratio, so it is fine to recommend a taller or wider ratio than the design has now. For example a square design still prints a portrait ratio on the full front or full back.\n\nCover these placements, each on its own line:\n- Left Chest: a small near-square area, about 3:3 to 4:4\n- Full Front: a tall portrait area, about 4:5 or 3:4\n- Full Back: a tall portrait area, about 4:5 or 3:4\n- Sleeve: a narrow tall strip, about 1:3 or 1:4\n\nReply with exactly 4 lines, one per placement, each in EXACTLY this format:\n\nRatio: W:H | Size: W x H in | Placement: NAME | one short reason\n\nUse whole-number ratios (e.g. 4:5). Give the print size in inches for that placement. Plain text, no markdown, no preamble, no extra lines.",
       "placeholders": [
         "dpi",
         "height",
@@ -188,7 +188,7 @@
       "workflow": "custom",
       "step": 7,
       "purpose": "Clean baseline at the current ratio, for comparison",
-      "template": "Regenerate this artwork as a clean, print-ready version at its current proportions.\n\nRequirements:\n- Keep the design identical - same layout, letterforms, colours and illustration style\n- Preserve all text exactly, including accented characters and numbers\n- Remove the background entirely - transparent PNG\n- Do not change the aspect ratio or recompose the design\n- Clean sharp edges, no gradients, no thin fragile strokes\n- The design only, centred with even margins",
+      "template": "Regenerate this artwork as a clean, print-ready version at its current proportions.\n\nRequirements:\n- Keep the design identical - same layout, letterforms, colours and illustration style\n- Preserve all text exactly, including accented characters and numbers\n- Remove the background entirely - transparent PNG\n- Do not change the aspect ratio or recompose the design\n- Clean sharp edges, no gradients, no thin fragile strokes\n- The design only, centred with even margins\n\nCreate the new image with image generation and show it directly in this chat. Do not use Python or any code tool, do not pad or resize the old image, and do not return a file attachment or download link - I need the generated image itself.",
       "placeholders": [],
       "version": 1,
       "active": true,
@@ -200,12 +200,30 @@
       "workflow": "custom",
       "step": 7,
       "purpose": "Regenerate the design at the chosen ratio",
-      "template": "Working from the cleaned, background-free version you just produced, regenerate that same artwork at an aspect ratio of {ratio}, which is {inches_w} x {inches_h} inches at {dpi} DPI.\n\nRequirements:\n- Keep the design identical to the cleaned version - same layout, letterforms, colours and illustration style\n- Preserve all text exactly, including accented characters and numbers\n- Recompose to fit the new proportions without stretching or distorting anything\n- Transparent background, PNG\n- The design only, centred with even margins\n- Clean sharp edges suitable for DTF garment printing",
+      "template": "Working from the cleaned, background-free version you just produced, regenerate that same artwork at an aspect ratio of {ratio}, which is {inches_w} x {inches_h} inches at {dpi} DPI.\n\nRequirements:\n- Keep the design identical to the cleaned version - same layout, letterforms, colours and illustration style\n- Preserve all text exactly, including accented characters and numbers\n- Recompose to fit the new proportions without stretching or distorting anything\n- Transparent background, PNG\n- The design only, centred with even margins\n- Clean sharp edges suitable for DTF garment printing\n\nCreate the new image with image generation and show it directly in this chat. Do not use Python or any code tool, do not pad or resize the old image, and do not return a file attachment or download link - I need the generated image itself.",
       "placeholders": [
         "dpi",
         "inches_h",
         "inches_w",
         "ratio"
+      ],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "geometry_generate",
+      "constant": "GEOMETRY_GENERATE",
+      "workflow": "geometry",
+      "step": 1,
+      "purpose": "Recreate a DTF artwork at target geometry, given local source measurements",
+      "template": "Recreate this artwork for DTF printing. Measurements from the file (do not re-estimate them): {before_json}. Output: {target_width_px} x {target_height_px} px, transparent background PNG, keep the content bounding box proportions and position (aspect policy {aspect_ratio_policy}), mode {reconstruction_mode}: no crop, no stretch, no repositioning, keep all text exactly, preserve white and black elements as specified. Plain image only.",
+      "placeholders": [
+        "aspect_ratio_policy",
+        "before_json",
+        "reconstruction_mode",
+        "target_height_px",
+        "target_width_px"
       ],
       "version": 1,
       "active": true,
@@ -310,6 +328,49 @@
       "template": "Generate design number {n} from the collage as a single final artwork.\n\nRequirements:\n- That design only, nothing else in the frame\n- Reproduce it as accurately as possible, preserving all text, letterforms, colours and illustration detail\n- Transparent background, PNG\n- No numbering, no border, no background colour\n- Centred with even margins",
       "placeholders": [
         "n"
+      ],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "photocraft_followup",
+      "constant": "PHOTOCRAFT_FOLLOWUP",
+      "workflow": "printready",
+      "step": 1,
+      "purpose": "Corrective re-ask when ChatGPT ignored the PhotoCraft tool",
+      "template": "Do not generate a new image. Use PhotoCraft to edit the uploaded image and give me the transparent PNG download link.",
+      "placeholders": [],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "photocraft_line",
+      "constant": "PHOTOCRAFT_LINE",
+      "workflow": "printready",
+      "step": 1,
+      "purpose": "Line appended to every PhotoCraft prompt (use PhotoCraft, export PNG link)",
+      "template": "Use PhotoCraft for this edit and export the result as a full-resolution transparent PNG download link. Do not ask me any questions.",
+      "placeholders": [],
+      "version": 1,
+      "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "print_ready_photocraft",
+      "constant": "PRINT_READY_PHOTOCRAFT",
+      "workflow": "printready",
+      "step": 1,
+      "purpose": "PhotoCraft: resize to the print size, transparent, export a PNG link",
+      "template": "Use PhotoCraft to make this artwork print-ready for DTF:\n- Resize to {width_in} x {height_in} inches at {dpi} DPI ({width_px} x {height_px} px), keep aspect ratio, do not crop the design.\n- Transparent background. Apply alpha threshold {alpha_threshold}: pixels with alpha below it become fully transparent, the rest fully opaque (no semi-transparent fringe).\n- Do not redraw or change the design.\n- Export as a full-resolution transparent PNG download link. Do not ask questions.",
+      "placeholders": [
+        "alpha_threshold",
+        "dpi",
+        "height_in",
+        "height_px",
+        "width_in",
+        "width_px"
       ],
       "version": 1,
       "active": true,
@@ -440,6 +501,30 @@
       ],
       "version": 1,
       "active": true,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "object_similarity_detect",
+      "constant": "OBJECT_SIMILARITY_DETECT",
+      "workflow": "uncatalogued",
+      "step": 0,
+      "purpose": "NOT CATALOGUED - assign a workflow before import",
+      "template": "You are given TWO images. A labelled 10x10 grid has been drawn over BOTH of them to help you describe where things are. Columns are lettered A to J from left to right; rows are numbered 1 to 10 from top to bottom, so the top-left cell is A1 and the bottom-right cell is J10. The grid is only a reference overlay — ignore it as part of the artwork.\n\nImage 1 is the ORIGINAL artwork. Image 2 is a GENERATED version of it. They are meant to be the same artwork.\n\nList the main objects and elements across the two images — the things a person would actually want to compare: text blocks, people, characters, logos, main shapes, and distinct background elements. List whole, meaningful elements (a lion is one item called \"Lion\", never its mane or paws separately). Aim for roughly 5 to 15 items.\n\nUse the SAME name for an object in both images, so each object can be paired. For every object give the grid cells it mainly sits in, SEPARATELY for each image. If an object is not present in one of the images, use the string \"missing\" for that image's cells instead of a cell list.\n\nReply with ONLY a JSON array and nothing else — no prose, no explanation, no markdown code fences. Each element is an object with: \"id\" (1-based integer), \"name\" (short label), \"type\" (one of: text, person, character, logo, shape, background, other), \"cells_image1\" (array of cell strings, or \"missing\"), and \"cells_image2\" (array of cell strings, or \"missing\"). Exactly this shape:\n\n[\n  {{\"id\": 1, \"name\": \"Team name text\", \"type\": \"text\", \"cells_image1\": [\"C8\", \"D8\", \"E8\"], \"cells_image2\": [\"C8\", \"D8\", \"E8\"]}},\n  {{\"id\": 2, \"name\": \"Lion\", \"type\": \"character\", \"cells_image1\": [\"D4\", \"E5\"], \"cells_image2\": \"missing\"}}\n]\n\nOutput the JSON array only.",
+      "placeholders": [],
+      "version": 1,
+      "active": false,
+      "source": "config/workflows.py"
+    },
+    {
+      "key": "similarity_review",
+      "constant": "SIMILARITY_REVIEW",
+      "workflow": "uncatalogued",
+      "step": 0,
+      "purpose": "NOT CATALOGUED - assign a workflow before import",
+      "template": "Image 1 is the ORIGINAL artwork. Image 2 is a GENERATED version of it. Compare them as a print designer checking a client's artwork.\n\nReply in exactly this format, plain text, no markdown:\n\nVerdict: SAME / MINOR DIFFERENCES / MAJOR DIFFERENCES\n\nScore: a number 0-100 for how faithfully image 2 reproduces image 1\n\nText: identical / changed - list any wording, spelling, letter or number differences\n\nMissing: anything in image 1 that is missing in image 2, or none\n\nAdded: anything in image 2 that is not in image 1, or none\n\nColours: same / changed - say what changed\n\nShapes and layout: same / changed - say what changed\n\nSummary: one sentence\n\nThen a print-readiness (QA) opinion for EACH of the checks below, judged by eye from the images only. Do NOT give any numbers or measurements (those are measured separately) - give only a status and a short visual reason. Status is one of PASS, WARN, FAIL, or N/A if you cannot judge it from the image. Give a line for BOTH images, in exactly this format (keep the check id spelled exactly as shown):\n\nQA dpi: image1 PASS|WARN|FAIL|N/A - short reason; image2 PASS|WARN|FAIL|N/A - short reason\nQA transparency: image1 ... ; image2 ...\nQA semi_alpha: image1 ... ; image2 ...\nQA halo: image1 ... ; image2 ...\nQA soft_edges: image1 ... ; image2 ...\nQA colours: image1 ... ; image2 ...\nQA black: image1 ... ; image2 ...\nQA min_stroke: image1 ... ; image2 ...\nQA min_feature: image1 ... ; image2 ...\nQA gradients: image1 ... ; image2 ...\nQA margins: image1 ... ; image2 ...\nQA aspect: image1 ... ; image2 ...\nQA print_size: image1 ... ; image2 ...\n\nCheck meanings: dpi = looks high enough resolution / sharp; transparency = has a clean transparent background (not a solid colour); semi_alpha = free of faint semi-transparent pixels; halo = no pale fringe ringing the edges; soft_edges = edges are crisp, not blurry; colours = a sensible, limited number of distinct colours; black = blacks look solid, not washed out; min_stroke = thinnest lines look thick enough to print; min_feature = smallest text/detail looks large enough to print; gradients = no large smooth gradients that could band; margins = artwork is not jammed against the edge; aspect = the overall proportions look right; print_size = the artwork would suit a normal DTF transfer size. Answer N/A for anything you genuinely cannot tell from the image.",
+      "placeholders": [],
+      "version": 1,
+      "active": false,
       "source": "config/workflows.py"
     }
   ]
