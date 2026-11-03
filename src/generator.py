@@ -211,6 +211,155 @@ def _diag_event(fn: str, *args, **kw) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-turn generated-image response cache
+# ---------------------------------------------------------------------------
+# The browser already downloads every generated image when it renders it in the
+# page, so re-fetching the same bytes at collection time (the old path) cost
+# 38–70s per image on a slow link. We hook page.on("response") ONCE per page and
+# keep the bytes of every image response from ChatGPT's own image hosts in a
+# small per-turn dict keyed by URL. _download_generated_image checks this cache
+# first (0.0s, no network) and only falls back to the in-page fetch on a miss.
+#
+# The cache is reset at the start of every image turn so it never grows without
+# bound and never serves a prior turn's image for a new one. Each cache entry is
+# (bytes, width, height) — the pixel size lets the collector reject a cached
+# thumbnail in favour of the full-resolution fetch.
+
+# URL fragments that identify a ChatGPT-hosted generated image response. Kept in
+# step with GENERATED_IMG_HOSTS / the generated-image selector.
+_IMG_RESP_URL_MARKERS = (
+    "backend-api/estuary/content",
+    "backend-api/content",
+    "/backend-api/files/",
+    "oaiusercontent.com",
+)
+# Hard cap on a single cached body so a stray huge response can never blow up
+# memory (generated PNGs are well under this).
+_IMG_RESP_MAX_BYTES = 40 * 1024 * 1024
+
+
+def _looks_like_image_response(url: str, content_type: str) -> bool:
+    """True if a network response is a ChatGPT generated-image body worth caching
+    — its URL matches a known image host fragment AND (when available) the
+    content-type is an image. The content-type check is best-effort: estuary
+    links sometimes omit it, so a URL-marker match alone is enough."""
+    u = (url or "")
+    if not any(m in u for m in _IMG_RESP_URL_MARKERS):
+        return False
+    ct = (content_type or "").lower()
+    if ct and not ct.startswith("image/"):
+        return False
+    return True
+
+
+def _png_or_img_size(data: bytes) -> tuple[int, int]:
+    """Best-effort pixel (width, height) of an image byte string, 0x0 if unknown.
+    Reads PNG/JPEG/WEBP headers without a decode so it is cheap and never raises;
+    used only to compare a cached body against the <img>'s natural size to catch
+    a thumbnail. Falls back to Pillow if the header parse does not recognise it."""
+    try:
+        if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+            w = int.from_bytes(data[16:20], "big")
+            h = int.from_bytes(data[20:24], "big")
+            return w, h
+    except Exception:
+        pass
+    # JPEG / WEBP / anything else: let Pillow read just the header.
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as im:
+            return int(im.width), int(im.height)
+    except Exception:
+        return 0, 0
+
+
+def _install_image_response_cache(page: Page) -> dict:
+    """Attach a page.on("response") listener (ONCE per page) that stores the
+    bytes of ChatGPT generated-image responses in a per-turn dict hung off the
+    page object, and return that dict. Idempotent: a second call reuses the dict
+    already installed on the page. The dict maps url -> (bytes, w, h)."""
+    cache = getattr(page, "_img_resp_cache", None)
+    if cache is not None and getattr(page, "_img_resp_installed", False):
+        return cache
+    cache = {}
+
+    def _on_response(resp):
+        try:
+            url = resp.url
+            ct = ""
+            try:
+                ct = resp.headers.get("content-type", "")
+            except Exception:
+                ct = ""
+            if not _looks_like_image_response(url, ct):
+                return
+            if url in cache:
+                return  # already captured this turn
+            body = resp.body()
+            if not body or len(body) > _IMG_RESP_MAX_BYTES:
+                return
+            w, h = _png_or_img_size(body)
+            cache[url] = (body, w, h)
+            logger.info("[image-cache] captured %d bytes (%dx%d) from %s",
+                        len(body), w, h, url[:120])
+        except Exception:
+            # A response-body read can fail (body already consumed / request
+            # aborted). Caching is an optimisation only — never let it break a turn.
+            pass
+
+    try:
+        page.on("response", _on_response)
+        page._img_resp_cache = cache          # type: ignore[attr-defined]
+        page._img_resp_installed = True       # type: ignore[attr-defined]
+    except Exception as exc:
+        logger.info("[image-cache] could not install response listener (%s)", exc)
+        page._img_resp_cache = cache          # type: ignore[attr-defined]
+    return cache
+
+
+def _reset_image_response_cache(page: Page) -> None:
+    """Clear the per-turn generated-image byte cache so a new image turn starts
+    empty (never serves a prior turn's image, never grows unbounded). Installs
+    the listener if it is not present yet."""
+    cache = _install_image_response_cache(page)
+    try:
+        cache.clear()
+    except Exception:
+        pass
+
+
+def _cached_image_bytes(page: Page, src: str, run_id: str,
+                        want_w: int = 0, want_h: int = 0) -> bytes | None:
+    """Return cached bytes for a generated image `src` if the response listener
+    captured them this turn, else None. When want_w/want_h (the <img>'s natural
+    size) are given, a cached body whose pixel size is clearly SMALLER than the
+    rendered image is treated as a thumbnail and rejected (returns None) so the
+    caller falls back to the full-resolution in-page fetch.
+
+    A blob: src never appears as a network URL, so it is always a cache miss."""
+    cache = getattr(page, "_img_resp_cache", None)
+    if not cache or not src or src.startswith("blob:"):
+        return None
+    entry = cache.get(src)
+    if entry is None:
+        return None
+    data, cw, ch = entry
+    if not data:
+        return None
+    # Thumbnail guard: if we know the rendered natural size and the cached body
+    # is meaningfully smaller in BOTH dimensions, it is a lower-res variant —
+    # prefer the real fetch. A 1px rounding slack avoids false rejects.
+    if want_w and want_h and cw and ch:
+        if cw + 1 < want_w and ch + 1 < want_h:
+            logger.info("[image-read %s] response-cache hit is a thumbnail "
+                        "(%dx%d < rendered %dx%d) — falling back to fetch",
+                        run_id, cw, ch, want_w, want_h)
+            return None
+    return data
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -988,6 +1137,12 @@ def send_turn(
         pre_existing_ids = _collect_image_ids(page)
         logger.info("send_turn before-ids: %d ids captured", len(pre_existing_ids))
 
+        # --- Start the per-turn generated-image byte cache empty. The response
+        #     listener (installed once) now captures the bytes the browser
+        #     downloads when it renders this turn's image, so collection reads
+        #     them from memory instead of re-fetching (38–70s -> ~0s). ---
+        _reset_image_response_cache(page)
+
         # --- Type prompt ---
         page.click(PROMPT_BOX)
         _enter_prompt(page, prompt)
@@ -1100,6 +1255,56 @@ def send_turn(
                 _diag_event("fallback", QUESTION_INSTEAD_OF_RESULT,
                             step=run_id, detail=preview)
                 raise GenerationTimeoutError(QUESTION_INSTEAD_OF_RESULT)
+
+            # Text-only reply (GPT acknowledged/narrated the request but rendered
+            # no image, e.g. "I'm generating colour variation #2 …") and it is
+            # NOT a question. The image sometimes lands a little after the turn
+            # settles, and a single nudge usually unblocks a reply that stopped
+            # at the narration. So: wait a short extra window for a late image,
+            # then send ONE nudge in the SAME chat and collect again; fail
+            # clearly if there is still nothing. Only attempt the nudge ONCE.
+            if reply:
+                new_srcs = _wait_for_new_image(page, pre_existing_ids, run_id,
+                                               timeout_ms=20_000, on_phase=_img_phase)
+                if not new_srcs:
+                    logger.warning("[image-turn %s] text-only reply, nudging", run_id)
+                    _diag_event("retry", "text-only reply — nudging for image",
+                                step=run_id)
+                    try:
+                        page.click(PROMPT_BOX)
+                        _enter_prompt(page, "Please generate the image now.")
+                        _submit_prompt(page, run_id=f"{run_id}-nudge")
+                        try:
+                            page.wait_for_selector(STOP_BUTTON, state="attached",
+                                                   timeout=30_000)
+                        except Exception:
+                            pass
+                        _wait_for_turn_complete(
+                            page, quiet_ms=5000, timeout=180_000,
+                            label=f"image-turn {run_id}-nudge", on_phase=_ts)
+                        new_srcs = _wait_for_new_image(
+                            page, pre_existing_ids, run_id,
+                            timeout_ms=180_000, on_phase=_img_phase)
+                    except (GenerationTimeoutError, RateLimitError):
+                        raise
+                    except Exception as exc:
+                        logger.warning("[image-turn %s] nudge failed (%s)", run_id, exc)
+                        new_srcs = []
+                if new_srcs:
+                    logger.info("send_turn after-nudge: %d new images", len(new_srcs))
+                    images: list[bytes] = []
+                    for src in new_srcs:
+                        wh = _img_natural_size(page, src)
+                        images.append(_download_generated_image(page, src, run_id,
+                                                                want_wh=wh))
+                    _tt("c_read", f"downloaded {len(images)} image(s) after nudge, "
+                        f"{sum(len(b) for b in images)} bytes")
+                    return _prefer_transparent(images)
+                # Still no image after the nudge — fail with a clear message.
+                raise GenerationTimeoutError(
+                    "ChatGPT replied with text but produced no image, even after "
+                    "a nudge to generate it")
+
             if require_images:
                 raise GenerationTimeoutError("ChatGPT returned no images")
             return []
@@ -1107,7 +1312,8 @@ def send_turn(
         # --- Download each image, fastest path first, with per-image timing. ---
         images: list[bytes] = []
         for src in new_srcs:
-            images.append(_download_generated_image(page, src, run_id))
+            wh = _img_natural_size(page, src)
+            images.append(_download_generated_image(page, src, run_id, want_wh=wh))
 
         _tt("c_read", f"downloaded {len(images)} image(s), {sum(len(b) for b in images)} bytes")
         return _prefer_transparent(images)
@@ -2438,14 +2644,48 @@ def _fetch_bytes_with_abort(page: Page, url: str, timeout_ms: int = 20_000) -> b
     return bytes(byte_array)
 
 
-def _download_generated_image(page: Page, src: str, run_id: str) -> bytes:
+def _img_natural_size(page: Page, src: str) -> tuple[int, int]:
+    """Return the rendered (naturalWidth, naturalHeight) of the <img> whose src
+    matches `src`, or (0, 0) if not found. Used only to let the response-cache
+    thumbnail guard compare a cached body against the real on-page resolution.
+    Never raises."""
+    try:
+        wh = page.evaluate(
+            """(src) => {
+                const img = Array.from(document.images).find(i => i.src === src);
+                if (!img) return [0, 0];
+                return [img.naturalWidth || 0, img.naturalHeight || 0];
+            }""",
+            src,
+        )
+        if isinstance(wh, (list, tuple)) and len(wh) == 2:
+            return int(wh[0] or 0), int(wh[1] or 0)
+    except Exception:
+        pass
+    return 0, 0
+
+
+def _download_generated_image(page: Page, src: str, run_id: str,
+                              want_wh: tuple[int, int] | None = None) -> bytes:
     """Read ONE generated image's bytes, preferring the fastest path and never
     hanging. Tries, with a 60s cap and per-attempt timing logged:
+      0. per-turn response cache — bytes the browser already downloaded when it
+         rendered the image (page.on("response")); instant, no network. Skipped
+         for a blob: src (never a network URL) and when the cached body looks
+         like a thumbnail vs the rendered natural size (want_wh);
       1. in-page fetch(src) as a blob (AbortController 60s) — the img is usually
          already in the page cache, so this is immediate;
       2. page.context.request.get(src, 60s) — same cookies, bypasses the page.
     Raises if both fail. A blob: src can only be read in-page (method 1)."""
     is_blob = src.startswith("blob:")
+    want_w, want_h = want_wh or (0, 0)
+    # Method 0: per-turn response cache (the browser already fetched these bytes).
+    _t = time.monotonic()
+    cached = _cached_image_bytes(page, src, run_id, want_w=want_w, want_h=want_h)
+    if cached is not None:
+        logger.info("[image-read %s] from response cache: %d bytes in %.1fs",
+                    run_id, len(cached), time.monotonic() - _t)
+        return cached
     # Method 1: in-page fetch (works for blob: and http(s); usually cached).
     _t = time.monotonic()
     try:
