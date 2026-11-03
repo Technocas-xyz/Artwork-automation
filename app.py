@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSON
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from config.agent_version import AGENT_CODE_VERSION
 from config.job_options import JOB_OPTIONS, PARAMETERISED_OPTIONS
@@ -1129,6 +1130,7 @@ def _precompute_similarity(job: dict) -> None:
     if not orig or not gen:
         job["similarity_cv2_error"] = "Two images are required for a comparison."
         return
+    _t0 = time.monotonic()
     try:
         op = INPUT_DIR / Path(orig).name
         gp = INPUT_DIR / Path(gen).name
@@ -1136,8 +1138,9 @@ def _precompute_similarity(job: dict) -> None:
             job["similarity_cv2_error"] = "One or both images were not found on the server."
             return
         job["similarity_cv2"] = _compare_two_images(op.read_bytes(), gp.read_bytes())
+        print(f"[sim] job {job.get('id')} precompute took {time.monotonic() - _t0:.2f}s")
     except Exception as exc:
-        print(f"[similarity] precompute failed: {exc}")
+        print(f"[similarity] precompute failed after {time.monotonic() - _t0:.2f}s: {exc}")
         job["similarity_cv2_error"] = "The measured comparison could not be completed."
 
 
@@ -1248,6 +1251,7 @@ def _precompute_objectsim(job: dict) -> None:
     if not orig or not gen:
         job["objectsim_cv2_error"] = "Two images are required for a comparison."
         return
+    _t0 = time.monotonic()
     try:
         op = INPUT_DIR / Path(orig).name
         gp = INPUT_DIR / Path(gen).name
@@ -1271,8 +1275,10 @@ def _precompute_objectsim(job: dict) -> None:
                 job["objectsim_bg_removed"] = True
         except Exception as exc:
             print(f"[objectsim] whole-image no-bg compare failed (non-fatal): {exc}")
+        print(f"[sim] job {job.get('id')} precompute took {time.monotonic() - _t0:.2f}s")
     except Exception as exc:
-        print(f"[objectsim] whole-image precompute failed: {exc}")
+        print(f"[objectsim] whole-image precompute failed after "
+              f"{time.monotonic() - _t0:.2f}s: {exc}")
         job["objectsim_cv2_error"] = "The measured comparison could not be completed."
 
 
@@ -1481,6 +1487,7 @@ def _compute_objectsim_objects(job: dict) -> None:
 
     # Sample each FULL image's flat border background once; crops are cleaned
     # against the colour of the image they came from before comparing.
+    _t0 = time.monotonic()
     bg_o = _sample_border_colour(orig_bytes)
     bg_g = _sample_border_colour(gen_bytes)
     job["objectsim_bg_removed"] = bool(bg_o or bg_g)
@@ -1566,7 +1573,8 @@ def _compute_objectsim_objects(job: dict) -> None:
     job["objectsim_objects_error"] = ""
     job["_objectsim_detect_done"] = detect
     n_paired = sum(1 for r in results if r["status"] == "paired")
-    print(f"[objectsim] computed {len(results)} object(s) from detect JSON "
+    print(f"[sim] job {job.get('id')} recompute took {time.monotonic() - _t0:.2f}s — "
+          f"{len(results)} object(s) from detect JSON "
           f"({n_paired} paired; background_removed={job['objectsim_bg_removed']}).")
 
 
@@ -3741,10 +3749,17 @@ async def agent_result(job_id: str, request: Request):
             saved.append(dest.name)
     job["last_progress_at"] = time.time()
     _heartbeat(job.get("claimed_by"))
-    _recompute_aspect_similarity(job)
-    _recompute_replace_similarity(job)
-    _recompute_colorway_similarity(job)
-    _recompute_geometry_after(job, saved_names=saved)
+
+    # These recompute helpers are synchronous cv2/numpy (similarity, geometry
+    # measure). This is an `async def` endpoint, so running them inline would
+    # block the event loop; offload to the threadpool. Each is already guarded to
+    # run its heavy work only once per job, so this is cheap on later uploads.
+    def _recompute_all() -> None:
+        _recompute_aspect_similarity(job)
+        _recompute_replace_similarity(job)
+        _recompute_colorway_similarity(job)
+        _recompute_geometry_after(job, saved_names=saved)
+    await run_in_threadpool(_recompute_all)
     return {"ok": True, "saved": saved}
 
 
@@ -4588,17 +4603,53 @@ nc_watcher.start()
 _SIM_MAX_BYTES = 25 * 1024 * 1024   # 25 MB per image
 
 
+# The cv2 feature extraction (Canny + findContours + colour stats) scales with
+# pixel count. A full ~3000px compare takes many seconds on the VPS and holds a
+# threadpool worker the whole time; downscaling the longest side to this before
+# the compare makes it fast while keeping the measured scores effectively the
+# same (the compare is already scale-insensitive — margins/bbox are normalised
+# and the edge/phash axes resize internally).
+_COMPARE_MAX_PX = 1024
+
+
+def _downscale_for_compare(image_bytes: bytes, max_px: int = _COMPARE_MAX_PX) -> bytes:
+    """Return a copy of the image with its longest side <= max_px (LANCZOS), or
+    the original bytes unchanged if it is already small enough / on any error.
+    Used ONLY for the cv2 compare — the real dimensions are reported separately
+    from the untouched bytes, so this never changes what the operator sees as
+    the image size."""
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(image_bytes)) as im:
+            w, h = im.size
+            longest = max(w, h)
+            if longest <= max_px:
+                return image_bytes
+            scale = max_px / float(longest)
+            new_size = (max(1, round(w * scale)), max(1, round(h * scale)))
+            im = im.convert("RGBA").resize(new_size, Image.LANCZOS)
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            return buf.getvalue()
+    except Exception as exc:
+        print(f"[sim] downscale failed, comparing at full size: {exc}")
+        return image_bytes
+
+
 def _compare_two_images(orig_bytes: bytes, gen_bytes: bytes) -> dict:
     """Core cv2 comparison shared by the instant endpoint and the job precompute.
 
     Pads the ORIGINAL to the GENERATED image's ratio (like-for-like) when the
-    ratios differ, then runs src.compare.similarity. Returns the result dict:
-    {similarity, padded, padding_note, original_dims, generated_dims}. Raises
-    ValueError with a clean message on any decode/compare failure so callers can
-    turn it into a 400/503 or a stored error — never a raw 500."""
+    ratios differ, DOWNSCALES both to <= _COMPARE_MAX_PX so the cv2 work is fast,
+    then runs src.compare.similarity. Returns the result dict:
+    {similarity, padded, padding_note, original_dims, generated_dims}. The
+    reported dims are the REAL (pre-downscale) sizes. Raises ValueError with a
+    clean message on any decode/compare failure so callers can turn it into a
+    400/503 or a stored error — never a raw 500."""
     from src.compare import similarity
     from src.aspect import fit_to_ratio
 
+    t0 = time.monotonic()
     ow, oh = _png_size(orig_bytes)
     gw, gh = _png_size(gen_bytes)
     if not (ow and oh):
@@ -4616,11 +4667,17 @@ def _compare_two_images(orig_bytes: bytes, gen_bytes: bytes) -> dict:
             print(f"[similarity] padding failed, comparing as-is: {exc}")
             compare_orig, padded = orig_bytes, False
 
+    # Downscale both to <= _COMPARE_MAX_PX before the heavy cv2 feature pass.
+    compare_orig = _downscale_for_compare(compare_orig)
+    compare_gen = _downscale_for_compare(gen_bytes)
+
     try:
-        sim = similarity(compare_orig, gen_bytes)
+        sim = similarity(compare_orig, compare_gen)
     except Exception as exc:
         raise ValueError(f"comparison failed: {exc}")
 
+    print(f"[sim] compare took {time.monotonic() - t0:.2f}s "
+          f"(orig {ow}x{oh}, gen {gw}x{gh}, max_px={_COMPARE_MAX_PX})")
     return {
         "similarity": sim,
         "padded": padded,
@@ -4669,13 +4726,18 @@ async def similarity_check(original: UploadFile = File(...),
 
     orig_bytes = _read_valid(original, "Original")
     gen_bytes = _read_valid(generated, "Generated")
+    # This is an `async def` endpoint, so the cv2/numpy/PIL work (which is
+    # synchronous and CPU-heavy) MUST NOT run inline — that blocks the single
+    # event-loop thread and freezes every other request (the agent's
+    # /api/agent/next-job was timing out at 30s for exactly this reason). Offload
+    # the whole compute to the threadpool so the loop stays responsive.
     # QA measurements are independent of the cv2 compare: run them first so they
     # can be attached whether or not the compare succeeds. Each is a report dict
     # or {"error": ...}; neither can break the other result.
-    qa_original = _qa_measure_bytes(orig_bytes)
-    qa_generated = _qa_measure_bytes(gen_bytes)
+    qa_original = await run_in_threadpool(_qa_measure_bytes, orig_bytes)
+    qa_generated = await run_in_threadpool(_qa_measure_bytes, gen_bytes)
     try:
-        result = _compare_two_images(orig_bytes, gen_bytes)
+        result = await run_in_threadpool(_compare_two_images, orig_bytes, gen_bytes)
         result["qa_original"] = qa_original
         result["qa_generated"] = qa_generated
         return result
