@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import mimetypes
 import os
 import re
@@ -1569,7 +1570,10 @@ def _compute_objectsim_objects(job: dict) -> None:
         row["qa_generated"] = _qa_measure_bytes(crop2)
         results.append(row)
 
-    job["objectsim_objects"] = results
+    # Sanitise at the store point too (defence-in-depth with the response net):
+    # each object carries qa_original/qa_generated + similarity dicts that could
+    # hold a non-finite metric; never persist a NaN/inf on the job.
+    job["objectsim_objects"] = _json_safe(results)
     job["objectsim_objects_error"] = ""
     job["_objectsim_detect_done"] = detect
     n_paired = sum(1 for r in results if r["status"] == "paired")
@@ -2496,6 +2500,37 @@ def _output_ready(filename: str) -> bool:
         return False
 
 
+def _json_safe(obj):
+    """Recursively replace any non-JSON-compliant float (NaN / +/-inf, including
+    numpy float NaN/inf) with None, so a single bad measurement can never make a
+    whole response non-serialisable ("Out of range float values are not JSON
+    compliant: nan"). Handles dicts, lists/tuples, Python floats and numpy
+    scalar floats/ints; everything else passes through unchanged. Never raises."""
+    # Fast path for the common JSON-native scalar types.
+    if obj is None or isinstance(obj, (str, bool, int)):
+        return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    # numpy scalar (float32/float64/int*) or anything with .item(): coerce to a
+    # Python scalar and re-check finiteness. Guarded so a weird type can't crash.
+    try:
+        import numpy as _np
+        if isinstance(obj, _np.floating):
+            f = float(obj)
+            return f if math.isfinite(f) else None
+        if isinstance(obj, _np.integer):
+            return int(obj)
+        if isinstance(obj, _np.ndarray):
+            return [_json_safe(v) for v in obj.tolist()]
+    except Exception:
+        pass
+    return obj
+
+
 def _public_job(job: dict) -> dict:
     """The job as the UI should see it: internal fields stripped, and — crucially
     — no image filename exposed until the file is actually on disk.
@@ -2534,12 +2569,25 @@ def _public_job(job: dict) -> dict:
     if isinstance(steps, list):
         safe["custom_steps_done"] = [s for s in steps if not s.get("file") or _output_ready(s.get("file"))]
 
-    return safe
+    # Final net: never return a non-finite float (NaN/inf) — it breaks the whole
+    # JSON response. Any QA/similarity metric that slipped through becomes null.
+    return _json_safe(safe)
 
 
 @app.get("/api/jobs")
 def list_jobs():
-    return sorted([_public_job(j) for j in jobs.values()], key=lambda j: j["created_at"], reverse=True)
+    # One bad job must never take down the whole list. _public_job already
+    # sanitises non-finite floats; if a job STILL fails to build/serialise for
+    # any reason, skip just that one and keep serving the rest.
+    out = []
+    for j in jobs.values():
+        try:
+            pj = _public_job(j)
+            json.dumps(pj, allow_nan=False)   # prove it is serialisable
+            out.append(pj)
+        except Exception as exc:
+            print(f"[jobs] skipping job {j.get('id')!r} — not serialisable: {exc}")
+    return sorted(out, key=lambda j: j.get("created_at", 0), reverse=True)
 
 
 @app.get("/api/jobs/{job_id}/logs")
@@ -2667,7 +2715,7 @@ def serve_geometry_master(job_id: str):
     )
     fname = f"{(job.get('geometry_artwork_id') or job_id)}_geometry.json"
     return JSONResponse(
-        content=master,
+        content=_json_safe(master),
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
@@ -3659,7 +3707,7 @@ def agent_next_job(request: Request, agent_id: str, logged_in: bool = False, cod
         v = job.get(key)
         if v:
             input_files.append(v)
-    return {"job": {k: v for k, v in job.items()}, "input_files": sorted(set(input_files))}
+    return {"job": _json_safe({k: v for k, v in job.items()}), "input_files": sorted(set(input_files))}
 
 
 @app.post("/api/agent/job/{job_id}/progress")
@@ -4678,14 +4726,16 @@ def _compare_two_images(orig_bytes: bytes, gen_bytes: bytes) -> dict:
 
     print(f"[sim] compare took {time.monotonic() - t0:.2f}s "
           f"(orig {ow}x{oh}, gen {gw}x{gh}, max_px={_COMPARE_MAX_PX})")
-    return {
+    # Sanitise the similarity metrics at the source so a non-finite axis value
+    # (e.g. a ratio over an empty crop) never gets persisted on the job.
+    return _json_safe({
         "similarity": sim,
         "padded": padded,
         "padding_note": ("Original padded to the generated image's ratio for comparison."
                          if padded else ""),
         "original_dims": {"w": ow, "h": oh},
         "generated_dims": {"w": gw, "h": gh},
-    }
+    })
 
 
 def _qa_measure_bytes(image_bytes: bytes) -> dict:
@@ -4696,7 +4746,7 @@ def _qa_measure_bytes(image_bytes: bytes) -> dict:
     image must not break the cv2 or ChatGPT results."""
     try:
         from src.printready import measure_print_ready
-        return measure_print_ready(image_bytes, file_size_bytes=len(image_bytes))
+        return _json_safe(measure_print_ready(image_bytes, file_size_bytes=len(image_bytes)))
     except Exception as exc:
         print(f"[similarity-check] QA measurement failed: {exc}")
         return {"error": f"QA measurement failed: {exc}"}

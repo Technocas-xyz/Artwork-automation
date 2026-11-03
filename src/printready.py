@@ -156,6 +156,24 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
     n_content = int(content.sum())
 
     def add(cid, label, value, value_str, unit, threshold_str, status, weight, detail=""):
+        # A measurement over an empty / fully transparent crop can yield NaN or
+        # inf (mean/percentile/ratio over zero visible pixels). A non-finite
+        # value is not JSON-compliant and crashes the whole /api/jobs response,
+        # so NEVER store one: fold it to value=None, status "na" (not scored),
+        # value_str "n/a", and note why. This is the source-level guard; the
+        # recursive sanitiser on the API responses is the belt-and-braces net.
+        try:
+            if value is not None and isinstance(value, (int, float)) and not math.isfinite(float(value)):
+                value = None
+                value_str = "n/a"
+                status = "na"
+                weight = 0
+                detail = (detail + " " if detail else "") + "(not measurable on this crop)"
+        except Exception:
+            value = None
+            value_str = "n/a"
+            status = "na"
+            weight = 0
         checks.append({"id": cid, "label": label, "value": value, "value_str": value_str,
                        "unit": unit, "threshold_str": threshold_str, "status": status,
                        "weight": weight, "detail": detail})
