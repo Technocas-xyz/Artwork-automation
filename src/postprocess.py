@@ -338,12 +338,22 @@ def make_print_ready(png_bytes: bytes, target_w: int, target_h: int,
     # 2) Hard alpha threshold if any semi-transparent pixel exists.
     arr = np.array(img)  # H x W x 4, uint8
     alpha = arr[:, :, 3]
+    # ONLY pixels whose alpha is STRICTLY between 0 and 255 are affected by the
+    # threshold — a pixel already at 0 or 255 is left exactly as it is. Count
+    # those partial-alpha pixels, and split them by where they end up so the log
+    # is interpretable (how many became fully transparent vs fully opaque).
     semi = np.logical_and(alpha > 0, alpha < 255)
     thresholded = False
-    changed_pixels = 0
+    changed_pixels = 0          # == partial-alpha pixels that were rewritten
+    became_transparent = 0      # partial alpha < threshold -> 0
+    became_opaque = 0           # partial alpha >= threshold -> 255
     if bool(semi.any()):
-        new_alpha = np.where(alpha < alpha_threshold, 0, 255).astype(np.uint8)
-        changed_pixels = int((new_alpha != alpha).sum())
+        partial = alpha[semi]
+        became_transparent = int((partial < alpha_threshold).sum())
+        became_opaque = int((partial >= alpha_threshold).sum())
+        changed_pixels = became_transparent + became_opaque
+        new_alpha = alpha.copy()
+        new_alpha[semi] = np.where(partial < alpha_threshold, 0, 255).astype(np.uint8)
         arr[:, :, 3] = new_alpha
         img = Image.fromarray(arr, mode="RGBA")
         thresholded = True
@@ -367,6 +377,8 @@ def make_print_ready(png_bytes: bytes, target_w: int, target_h: int,
         "to_size": (out_w, out_h),
         "thresholded": thresholded,
         "changed_pixels": changed_pixels,
+        "became_transparent": became_transparent,
+        "became_opaque": became_opaque,
         "dpi": dpi,
         "width_in": width_in,
         "height_in": height_in,

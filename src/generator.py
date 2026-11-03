@@ -437,6 +437,12 @@ def send_text_turn(
     def _ts(msg: str) -> None:
         logger.info("[text-turn %s] %s  t=+%.1fs", run_id, msg, time.monotonic() - t0)
 
+    # Machine-parseable per-phase timing, RELATIVE TO SUBMIT (t0 is just before
+    # submit for a text turn), so a live run yields the a->f table.
+    def _tt(phase: str, extra: str = "") -> None:
+        logger.info("TURN-TIMING run=%s kind=text phase=%s t=+%.2fs%s",
+                    run_id, phase, time.monotonic() - t0, (" " + extra) if extra else "")
+
     logger.info("[text-turn %s] photocraft MCP: %s", run_id,
                 "ON (line appended to prompt)" if _photocraft_on else "off")
     try:
@@ -493,13 +499,23 @@ def send_text_turn(
         # 300s ceiling: a Thinking/Reasoning model can spend a minute+ reasoning
         # before the answer streams, and _is_thinking keeps the turn "active"
         # throughout, so the old 120s could trip during a long reasoning phase.
-        _wait_for_turn_complete(page, quiet_ms=1500, timeout=300_000, label=f"text-turn {run_id}", on_phase=_ts, text_only=True)
+        # Quiet window trimmed 1500 -> 800ms: still > the flicker guard's 2-poll
+        # (~1s at 500ms) detection so a single post-answer button flicker never
+        # ends the turn early, and the Thinking / 60s-stale handling inside
+        # _wait_for_turn_complete is unchanged — we only pass a shorter window.
+        _wait_for_turn_complete(page, quiet_ms=800, timeout=300_000, label=f"text-turn {run_id}", on_phase=_ts, text_only=True)
+        # a_finished + b_detected: for a text turn, ChatGPT finishing == the stop
+        # button gone + quiet period done (that is what _wait_for_turn_complete
+        # returns on). Reading the reply is the very next step.
+        _tt("a_finished", "stop gone + quiet elapsed")
+        _tt("b_detected")
 
         # Return the text reply. Pass the sent prompt so the reader can reject a
         # read that came back equal to it (i.e. the user turn, not the reply), and
         # the prior DilRenderer count so it only accepts a NEW reply container.
         reply = (get_last_text_reply(page, sent_prompt=prompt, prior_dil_count=prior_dil) or "").strip()
         _ts(f"reply read ({len(reply)} chars)")
+        _tt("c_read", f"{len(reply)} chars")
         # EMPTY REPLY = ERROR. An empty read means the page layout changed or the
         # turn was not actually finished — storing "" silently gave the UI empty
         # results with no error. Retry the read ONCE (give the reply a moment to
@@ -957,6 +973,13 @@ def send_turn(
         def _ts(msg: str) -> None:
             logger.info("[image-turn %s] %s  t=+%.1fs", run_id, msg, time.monotonic() - t0)
 
+        # Machine-parseable per-phase timing, RELATIVE TO SUBMIT, so a live run
+        # yields the a->f table. phase is one of: a_finished, b_detected,
+        # c_read, d_uploaded, e_synced (e is logged by _sync_job, f by the UI).
+        def _tt(phase: str, extra: str = "") -> None:
+            logger.info("TURN-TIMING run=%s kind=image phase=%s t=+%.2fs%s",
+                        run_id, phase, time.monotonic() - t0, (" " + extra) if extra else "")
+
         # --- Confirm the new turn started (stop control appears). ---
         try:
             page.wait_for_selector(STOP_BUTTON, state="attached", timeout=60_000)
@@ -1016,7 +1039,15 @@ def send_turn(
         # --- Now WAIT for the actual generated image. It appears 30–120s after
         #     the stop button detaches, so this poll is what really gates
         #     collection (the old code collected here and always found 0). ---
-        new_srcs = _wait_for_new_image(page, pre_existing_ids, run_id, timeout_ms=180_000)
+        # on_phase reports a_finished (first fully-loaded candidate seen) and
+        # b_detected (confirmed stable + collected) against the submit t0.
+        def _img_phase(ph):
+            if ph == "a_finished":
+                _tt("a_finished", "image first visible/complete")
+            elif ph == "b_detected":
+                _tt("b_detected", "image confirmed stable")
+        new_srcs = _wait_for_new_image(page, pre_existing_ids, run_id,
+                                       timeout_ms=180_000, on_phase=_img_phase)
         logger.info("send_turn after-collection: %d new images", len(new_srcs))
 
         if not new_srcs:
@@ -1047,20 +1078,12 @@ def send_turn(
                 raise GenerationTimeoutError("ChatGPT returned no images")
             return []
 
-        # --- Download each image in-browser via fetch ---
+        # --- Download each image, fastest path first, with per-image timing. ---
         images: list[bytes] = []
         for src in new_srcs:
-            byte_array: list[int] = page.evaluate(
-                """async (url) => {
-                    const resp = await fetch(url, { credentials: 'include' });
-                    if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
-                    const buf = await resp.arrayBuffer();
-                    return Array.from(new Uint8Array(buf));
-                }""",
-                src,
-            )
-            images.append(bytes(byte_array))
+            images.append(_download_generated_image(page, src, run_id))
 
+        _tt("c_read", f"downloaded {len(images)} image(s), {sum(len(b) for b in images)} bytes")
         return _prefer_transparent(images)
 
     except (GenerationTimeoutError, RateLimitError):
@@ -1892,7 +1915,11 @@ def get_last_text_reply(page: Page, sent_prompt: str | None = None,
     # unchanged for 3 consecutive reads (~1.5s) AND no streaming indicator is
     # showing. Capped at the same 20s deadline. Short replies stabilise instantly.
     if text:
-        STABLE_NEEDED = 3
+        # One short confirming check (~0.5s): accept once the reply is unchanged
+        # on 2 consecutive reads (was 3 ~= 1.5s). The streaming-indicator reset
+        # below still protects against reading mid-stream, so a growing reply
+        # resets the window — we never accept a partial reply.
+        STABLE_NEEDED = 2
         stable_reads = 1          # the read above counts as the first
         last = text
         while stable_reads < STABLE_NEEDED and time.time() < deadline:
@@ -2385,15 +2412,54 @@ def _fetch_bytes_with_abort(page: Page, url: str, timeout_ms: int = 20_000) -> b
     return bytes(byte_array)
 
 
+def _download_generated_image(page: Page, src: str, run_id: str) -> bytes:
+    """Read ONE generated image's bytes, preferring the fastest path and never
+    hanging. Tries, with a 60s cap and per-attempt timing logged:
+      1. in-page fetch(src) as a blob (AbortController 60s) — the img is usually
+         already in the page cache, so this is immediate;
+      2. page.context.request.get(src, 60s) — same cookies, bypasses the page.
+    Raises if both fail. A blob: src can only be read in-page (method 1)."""
+    is_blob = src.startswith("blob:")
+    # Method 1: in-page fetch (works for blob: and http(s); usually cached).
+    _t = time.monotonic()
+    try:
+        data = _fetch_bytes_with_abort(page, src, timeout_ms=60_000)
+        logger.info("[image-read %s] in-page fetch OK: %d bytes in %.1fs",
+                    run_id, len(data), time.monotonic() - _t)
+        return data
+    except Exception as exc:
+        logger.info("[image-read %s] in-page fetch failed after %.1fs (%s)",
+                    run_id, time.monotonic() - _t, exc)
+    # Method 2: context.request.get (not possible for blob: URLs).
+    if not is_blob:
+        _t = time.monotonic()
+        try:
+            resp = page.context.request.get(src, timeout=60_000)
+            if resp.ok:
+                data = resp.body()
+                if data:
+                    logger.info("[image-read %s] context.request.get OK: %d bytes in %.1fs",
+                                run_id, len(data), time.monotonic() - _t)
+                    return data
+            logger.info("[image-read %s] context.request.get status=%s in %.1fs",
+                        run_id, getattr(resp, "status", "?"), time.monotonic() - _t)
+        except Exception as exc:
+            logger.info("[image-read %s] context.request.get failed after %.1fs (%s)",
+                        run_id, time.monotonic() - _t, exc)
+    raise GenerationTimeoutError(f"Could not read generated image: {src[:160]}")
+
+
 def _download_photocraft_link(page: Page, href: str, run_id: str) -> bytes:
     """Download a PhotoCraft export link with a HARD timeout on every attempt, so
     collection can never hang. Order:
-      1. page.context.request.get(href, timeout=30s) — same cookies, no UI.
+      1. page.context.request.get(href, timeout=180s) — same cookies, no UI —
+         tried up to 3 times with a short backoff (the export can be a ~14 MB
+         chunked body that needs well over 30s on a slow connection).
       2. click the link; if it opens a NEW TAB (target=_blank / ↗), capture the
          page via context.expect_page and read the image from it, else capture a
          triggered page.expect_download(timeout=20s). Then close the tab.
       3. in-page fetch with a 20s AbortController.
-    Logs the href domain and the start/end of each attempt. Raises if all fail."""
+    Logs the href domain, bytes and elapsed per attempt. Raises if all fail."""
     try:
         from urllib.parse import urlparse
         dom = urlparse(href).netloc or "(relative)"
@@ -2403,19 +2469,34 @@ def _download_photocraft_link(page: Page, href: str, run_id: str) -> bytes:
 
     last_status = None  # remembered for the error message
 
-    # 1) context.request.get — same cookies, no navigation.
-    logger.info("[photocraft %s] download attempt 1: context.request.get", run_id)
-    try:
-        resp = page.context.request.get(href, timeout=30_000)
-        last_status = getattr(resp, "status", None)
-        if resp.ok:
-            data = resp.body()
-            if data:
-                logger.info("[photocraft %s] attempt 1 OK: %d bytes", run_id, len(data))
-                return data
-        logger.info("[photocraft %s] attempt 1 status=%s", run_id, last_status)
-    except Exception as exc:
-        logger.info("[photocraft %s] attempt 1 failed (%s)", run_id, exc)
+    # 1) context.request.get — same cookies, no navigation. The export can be a
+    #    ~14 MB chunked body that needs well over 30s on a slow connection, so
+    #    allow 180s and RETRY the SAME href up to 3 times total with a short
+    #    backoff before falling back to the UI methods. Log bytes + elapsed.
+    for _attempt in range(1, 4):
+        logger.info("[photocraft %s] download attempt 1.%d: context.request.get (timeout 180s)",
+                    run_id, _attempt)
+        _t = time.monotonic()
+        try:
+            resp = page.context.request.get(href, timeout=180_000)
+            last_status = getattr(resp, "status", None)
+            if resp.ok:
+                data = resp.body()
+                dt = time.monotonic() - _t
+                if data:
+                    logger.info("[photocraft %s] attempt 1.%d OK: %d bytes in %.1fs",
+                                run_id, _attempt, len(data), dt)
+                    return data
+                logger.info("[photocraft %s] attempt 1.%d OK but empty body in %.1fs",
+                            run_id, _attempt, dt)
+            else:
+                logger.info("[photocraft %s] attempt 1.%d status=%s in %.1fs",
+                            run_id, _attempt, last_status, time.monotonic() - _t)
+        except Exception as exc:
+            logger.info("[photocraft %s] attempt 1.%d failed after %.1fs (%s)",
+                        run_id, _attempt, time.monotonic() - _t, exc)
+        if _attempt < 3:
+            page.wait_for_timeout(1500 * _attempt)  # short backoff before retry
 
     # 2) Click the link; handle a new tab OR a triggered download.
     logger.info("[photocraft %s] download attempt 2: click link (new-tab / download)", run_id)
@@ -2462,9 +2543,9 @@ def _download_photocraft_link(page: Page, href: str, run_id: str) -> bytes:
         return data
     except Exception as exc:
         logger.warning("[photocraft %s] attempt 3 failed (%s)", run_id, exc)
-        status_txt = f" (HTTP {last_status})" if last_status is not None else ""
+        status_txt = f" HTTP {last_status}" if last_status is not None else ""
         raise GenerationTimeoutError(
-            f"PhotoCraft download failed{status_txt}: {href[:200]}") from exc
+            f"PhotoCraft download failed ({href[:200]}){status_txt}") from exc
 
 
 # A link in the reply is treated as a Photocraft export download when its href or
@@ -2646,14 +2727,14 @@ def _collect_from_found(page, found, run_id, input_wh):
     if found and found.get("kind") == "link":
         href = found.get("href") or ""
         logger.info("[photocraft %s] result=download-link text=%r", run_id, found.get("text"))
-        try:
-            data = _download_photocraft_link(page, href, run_id)
-            _check_photocraft_size(data, input_wh, run_id)
-            return [data]
-        except Exception as exc:
-            logger.warning("[photocraft %s] link download FAILED (%s) — checking preview",
-                           run_id, exc)
-            found = _find_photocraft_result(page, run_id)  # re-scan
+        # A link EXISTS — PhotoCraft did its job and exported a file. If the
+        # download fails we FAIL the step (surfacing the href): we must NOT
+        # re-scan for a preview or trigger the corrective follow-up, because the
+        # follow-up is only for "no link / Generated image" and would waste time
+        # making a second export. The download already retried the same href.
+        data = _download_photocraft_link(page, href, run_id)
+        _check_photocraft_size(data, input_wh, run_id)
+        return [data]
 
     if found and found.get("kind") == "image":
         generated = bool(found.get("generated"))
@@ -2857,25 +2938,42 @@ def _is_user_attachment(src: str, alt: str) -> bool:
 
 
 def _wait_for_new_image(page: Page, exclude_ids: set[str], run_id: str,
-                        timeout_ms: int = 180_000, poll_ms: int = 2000) -> list[str]:
-    """Poll until a NEW generated image appears that is not in `exclude_ids` and
-    is not a user attachment/avatar, is fully loaded (complete && naturalWidth>0,
-    >= 256px), and whose src has stopped changing for 2 consecutive polls. Then
+                        timeout_ms: int = 180_000, poll_ms: int = 400,
+                        on_phase=None) -> list[str]:
+    """Poll until a NEW generated image is present and DEMONSTRABLY FINISHED, then
     collect and return the new srcs (scoped to the last turn, page-wide fallback).
+
+    "Finished" guard (replaces the old fixed 5s quiet period — ChatGPT renders
+    images progressively, so a partial image can momentarily look complete):
+      * the image is loaded (complete && naturalWidth>0) and >= 256px, AND
+      * its SRC *and* its NATURAL SIZE are identical on 2 consecutive checks
+        ~`poll_ms` apart (default ~400ms), AND
+      * the STOP button is gone (the turn is no longer streaming).
+    Only when all three hold do we return it — never a partial image.
 
     Image generation can take 30–120s AFTER the stop button detaches, so this is
     what actually gates collection. Returns [] on timeout. Never raises."""
     t0 = time.monotonic()
     deadline = time.monotonic() + timeout_ms / 1000.0
     MIN_DIM = 256
-    stable_src = None
+    stable_key = None     # (src, nw, nh) that has to repeat to count as finished
     stable_polls = 0
+    _reported_a = False
+
+    def _phase(ph):
+        if on_phase:
+            try:
+                on_phase(ph)
+            except Exception:
+                pass
+
     while time.monotonic() < deadline:
         try:
             cands = page.evaluate(_NEW_IMAGE_PROBE_JS, GENERATED_IMG) or []
         except Exception:
             cands = []
-        # Keep only real, loaded, large-enough, NEW candidates.
+        # Keep only real, loaded, large-enough, NEW candidates (full dicts so we
+        # can compare natural size, not just src).
         valid = []
         for c in cands:
             src, alt = c.get("src", ""), c.get("alt", "")
@@ -2886,23 +2984,37 @@ def _wait_for_new_image(page: Page, exclude_ids: set[str], run_id: str,
             ident = _image_identity(src, alt)
             if not ident or ident in exclude_ids:
                 continue
-            valid.append(src)
+            valid.append(c)
         if valid:
-            # Require the newest src to stay put for 2 polls (image finished
-            # streaming and its blob URL is not being swapped).
+            # a_finished: the FIRST time a fully-loaded generated image is seen
+            # (ChatGPT has finished rendering it) — reported once, before the
+            # stability confirmation below.
+            if not _reported_a:
+                _reported_a = True
+                _phase("a_finished")
+            # FINISHED guard: the newest candidate's src AND natural size must be
+            # identical on 2 consecutive checks (image stopped growing / its blob
+            # URL is not being swapped), AND the stop button must be gone.
             newest = valid[-1]
-            if newest == stable_src:
+            key = (newest.get("src", ""), newest.get("nw", 0), newest.get("nh", 0))
+            if key == stable_key:
                 stable_polls += 1
             else:
-                stable_src, stable_polls = newest, 1
-            if stable_polls >= 2:
+                stable_key, stable_polls = key, 1
+            stop_gone = False
+            try:
+                stop_gone = page.query_selector(STOP_BUTTON) is None
+            except Exception:
+                stop_gone = True
+            if stable_polls >= 2 and stop_gone:
                 elapsed = time.monotonic() - t0
                 # Collect via the normal path so dedup/scoping stay identical.
                 srcs = _collect_last_turn_images(page, exclude_ids)
                 if not srcs:
-                    srcs = valid  # last-turn scope missed it; use the validated set
-                logger.info("[%s] image turn finished after %.0fs, %d new image(s)",
-                            run_id, elapsed, len(srcs))
+                    srcs = [c.get("src", "") for c in valid if c.get("src")]  # last-turn scope missed it
+                logger.info("[%s] image turn finished after %.1fs (src+size stable x2, stop gone), "
+                            "%d new image(s)", run_id, elapsed, len(srcs))
+                _phase("b_detected")
                 return srcs
         time.sleep(poll_ms / 1000.0)
     logger.warning("[%s] no new generated image after %.0fs.",
