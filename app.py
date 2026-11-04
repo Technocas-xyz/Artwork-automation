@@ -460,9 +460,9 @@ class GenerateRequest(BaseModel):
 # Print Ready via PhotoCraft: the Print Ready step uses the PhotoCraft composer
     # tool to resize + make transparent + export. The operator can override the
     # target size, DPI and alpha threshold. Blank height -> keep aspect ratio.
-    # "Print Ready via PhotoCraft". None = the field was not sent (the Print Ready
-    # workflow then defaults it ON, every other workflow OFF). An explicit False is
-    # always honoured.
+    # "Print Ready via PhotoCraft". None = the field was not sent, treated as OFF
+    # for every workflow (Print Ready QA only assesses, it never edits). An
+    # explicit value is always honoured.
     pr_via_photocraft: bool | None = None
     pr_width_in: float = 10.75           # target print width in inches
     pr_height_in: float = 0.0            # optional; 0/blank -> auto from aspect ratio
@@ -1881,10 +1881,9 @@ def create_job(req: GenerateRequest, request: Request):
         # Print Ready via PhotoCraft: stored on the job, synced to the agent in
         # the full job dict (agent_next_job) and surfaced to the UI by
         # _public_job (non-underscore keys). Only the Print Ready step reads them.
-        # The standalone Print Ready workflow is always print-ready via
-        # PhotoCraft (its UI control defaults ON); every other workflow defaults
-        # OFF and only turns it on when the operator ticks the shared switch.
-        "pr_via_photocraft": (True if req.pr_via_photocraft is None else bool(req.pr_via_photocraft)) if req.workflow == "printready" else bool(req.pr_via_photocraft),
+        # Missing -> OFF for every workflow, including Print Ready QA (assess
+        # only). It turns on only when the operator ticks the shared switch.
+        "pr_via_photocraft": bool(req.pr_via_photocraft),   # missing -> False, everywhere
         "pr_width_in": float(req.pr_width_in or 10.75),
         "pr_height_in": float(req.pr_height_in or 0.0),
         "pr_dpi": int(req.pr_dpi or 300),

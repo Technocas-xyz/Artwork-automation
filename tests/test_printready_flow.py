@@ -1,7 +1,7 @@
 """Print Ready: PhotoCraft must run only when ticked.
 
-Server: an explicit pr_via_photocraft=False is never overridden (missing -> True
-for the printready workflow only).
+Server: a missing pr_via_photocraft is False for every workflow (Print Ready QA
+only assesses); explicit values are never overridden.
 Agent: OFF -> QA text turn only, nothing PhotoCraft logged, assessment stored.
        ON  -> QA text turn FIRST, then the PhotoCraft step; assessment + PNG.
 Run:  python tests/test_printready_flow.py
@@ -70,7 +70,7 @@ def make_job(req) -> dict | None:
 
 
 try:
-    for label, rq, want in (("missing -> True", req_missing, True),
+    for label, rq, want in (("missing -> False", req_missing, False),
                             ("explicit False stays False", req_false, False),
                             ("explicit True stays True", req_true, True)):
         rq = rq.model_copy(update={"artwork_files": [src.name]})

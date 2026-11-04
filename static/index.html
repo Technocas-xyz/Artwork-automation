@@ -1549,13 +1549,13 @@ function upPrintReady(file){
 }
 function renderPrintReadyCol2(){
   var html='<div class="col-title">Print Ready</div>';
-  html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">PhotoCraft resizes the artwork to your print size at the chosen DPI, makes the background transparent with a hard alpha cutoff, and exports a print-ready PNG.</p>';
-  html+=_printReadyControlsHtml(true);  // Print Ready workflow: default ON
-  html+='<button class="gen-btn" id="prGenBtn" disabled>Make print ready</button>';
+  // QA only: measures the artwork and writes an assessment. It never edits the
+  // image, so there is no PhotoCraft switch or print-size input on this page.
+  html+='<p style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Measures the artwork against print-readiness checks and gives a written assessment. The image is not changed.</p>';
+  html+='<button class="gen-btn" id="prGenBtn" disabled>Check print readiness</button>';
   html+='<div class="blocker-msg" id="prBlkMsg"></div>';
   col2.innerHTML=html;
   wireClientSlot(updPrintReadyBtn);
-  _wirePrintReady();
   $("prGenBtn").onclick=submitPrintReadyJob;
   updPrintReadyBtn();
 }
@@ -1571,8 +1571,8 @@ function submitPrintReadyJob(){
     client:jobClient.trim(),
     text:"",text_image:"",mockup_image:"",files:[],options:[],params:{},custom_note:"",
     template_turn1:"",template_extract:"",template_regen:"",custom_operations:[],custom_prompts:{},
-    extract_mode:"auto",grid_cols:4,grid_rows:2};
-  var _pr=_printReadyBody();for(var _k in _pr){body[_k]=_pr[_k];}
+    extract_mode:"auto",grid_cols:4,grid_rows:2,
+    pr_via_photocraft:false};   // QA page never edits: always OFF
   $("prGenBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){onJobCreated(d)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("prGenBtn").disabled=false});
 }
