@@ -460,7 +460,10 @@ class GenerateRequest(BaseModel):
 # Print Ready via PhotoCraft: the Print Ready step uses the PhotoCraft composer
     # tool to resize + make transparent + export. The operator can override the
     # target size, DPI and alpha threshold. Blank height -> keep aspect ratio.
-    pr_via_photocraft: bool = False      # "Print Ready via PhotoCraft" (default OFF; forced ON for the printready workflow)
+    # "Print Ready via PhotoCraft". None = the field was not sent (the Print Ready
+    # workflow then defaults it ON, every other workflow OFF). An explicit False is
+    # always honoured.
+    pr_via_photocraft: bool | None = None
     pr_width_in: float = 10.75           # target print width in inches
     pr_height_in: float = 0.0            # optional; 0/blank -> auto from aspect ratio
     pr_dpi: int = 300                    # target DPI
@@ -1881,7 +1884,7 @@ def create_job(req: GenerateRequest, request: Request):
         # The standalone Print Ready workflow is always print-ready via
         # PhotoCraft (its UI control defaults ON); every other workflow defaults
         # OFF and only turns it on when the operator ticks the shared switch.
-        "pr_via_photocraft": True if req.workflow == "printready" else bool(req.pr_via_photocraft),
+        "pr_via_photocraft": (True if req.pr_via_photocraft is None else bool(req.pr_via_photocraft)) if req.workflow == "printready" else bool(req.pr_via_photocraft),
         "pr_width_in": float(req.pr_width_in or 10.75),
         "pr_height_in": float(req.pr_height_in or 0.0),
         "pr_dpi": int(req.pr_dpi or 300),
@@ -2010,13 +2013,18 @@ def create_job(req: GenerateRequest, request: Request):
     # and the agent needs no cv2 and no ChatGPT listing turn.
     if req.workflow == "identify" and req.identify_mode == "colour" and req.artwork_files:
         _precompute_identify_colour(jobs[job_id], req.artwork_files[0])
-    # Print Ready: the agent now makes the artwork print-ready via PhotoCraft
-    # (resize + transparent + export). We still measure the 13 checks on the
-    # server for display, but a measurement problem no longer FAILS the job —
-    # the PhotoCraft edit does not depend on it. (Previously this refused the job
-    # when cv2 could not run; that gate is removed.)
+    # Print Ready QA: measure the 13 checks on the server. The QA review turn is
+    # built from them, so when PhotoCraft is OFF (QA is the whole job) a failed
+    # measurement REFUSES the job with the reason, as before 1.19.0. When
+    # PhotoCraft is ON the PhotoCraft edit does not depend on the measurements,
+    # so a measurement problem stays soft (the agent skips the QA turn).
     if req.workflow == "printready" and req.artwork_files:
         _precompute_printready(jobs[job_id], req.artwork_files[0])
+        _pr_job = jobs[job_id]
+        if not _pr_job.get("pr_via_photocraft") and not _pr_job.get("printready_measurements"):
+            _pr_err = _pr_job.get("printready_error") or "Print-readiness measurement failed."
+            del jobs[job_id]
+            raise HTTPException(status_code=400, detail=_pr_err)
     # Colorways: extract the dominant colours on the server so the operator sees
     # the swatches immediately and the agent hands them to ChatGPT as data.
     if req.workflow == "colorway" and req.artwork_files:

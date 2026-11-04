@@ -1001,8 +1001,7 @@ function render(job){
     clr();var activeT=job.active_time?Math.round(job.active_time):0;
     var doneMsg=job.status==="done_with_errors"?'Done with some errors ('+fmt(activeT)+' processing time)':'All done! ('+fmt(activeT)+' processing time)';
     var doneClass=job.status==="done_with_errors"?"awaiting":"done";
-    var usedPc=((job.workflow==="printready")&&(job.pr_via_photocraft||job.printready_summary))
-               ||job.printready_summary;
+    var usedPc=!!job.printready_summary;   // PhotoCraft actually ran
     var mcpHdr=usedPc?' '+_photocraftTagHtml():'';
     var mcpNote=job.photocraft_note?'<div style="margin-top:6px;padding:6px 10px;border-radius:8px;background:#fffbeb;color:#92400e;border:1px solid #fde68a;font-size:.78rem">\u26a0 '+esc(job.photocraft_note)+'</div>':'';
     var prSummary=job.printready_summary?'<div style="margin-top:6px;padding:6px 10px;border-radius:8px;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;font-size:.8rem;font-weight:600">'+esc(job.printready_summary)+'</div>':'';
@@ -1594,24 +1593,34 @@ function renderPrintReadyResults(job){
   var rep=job.printready_report;
   var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+' \u2014 Print Ready</div>';
 
-  // Print-ready PNG produced by PhotoCraft (the primary output of this step).
-  var si=job.stage_images||{};
-  var finalName=si.final||((job.final_names||[])[0]);
-  if(finalName){
-    var url="/api/output/"+encodeURIComponent(finalName);
-    html+='<div class="stage-result"><h3>Print-ready PNG</h3>';
-    html+='<a href="'+url+'" target="_blank"><img src="'+url+'" class="transparent-bg"></a>';
-    html+='<a class="dl-btn" href="'+url+'" download="'+esc(job.task_id||"print_ready")+'_print_ready.png">Download print-ready PNG</a>';
-    html+='</div>';
+  // Printer's written assessment (QA turn). Always shown when present.
+  function assessmentHtml(){
+    if(!job.printready_assessment)return "";
+    return '<div class="col-title">Printer\u2019s assessment</div>'
+      +'<div style="border:1px solid var(--border);border-radius:8px;padding:12px;white-space:pre-wrap;font-size:.85rem;margin-bottom:16px">'+esc(job.printready_assessment)+'</div>';
   }
-  if(job.printready_summary){
-    html+='<div style="margin:4px 0 14px;padding:8px 12px;border-radius:8px;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;font-size:.82rem;font-weight:600">'+esc(job.printready_summary)+'</div>';
+  // Print-ready PNG card: only when the PhotoCraft step actually produced one.
+  function pngHtml(){
+    var out="";
+    var si=job.stage_images||{};
+    var finalName=si.final||((job.final_names||[])[0]);
+    if(finalName){
+      var url="/api/output/"+encodeURIComponent(finalName);
+      out+='<div class="stage-result"><h3>Print-ready PNG '+_photocraftTagHtml()+'</h3>';
+      out+='<a href="'+url+'" target="_blank"><img src="'+url+'" class="transparent-bg"></a>';
+      out+='<a class="dl-btn" href="'+url+'" download="'+esc(job.task_id||"print_ready")+'_print_ready.png">Download print-ready PNG</a>';
+      out+='</div>';
+    }
+    if(job.printready_summary){
+      out+='<div style="margin:4px 0 14px;padding:8px 12px;border-radius:8px;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;font-size:.82rem;font-weight:600">'+esc(job.printready_summary)+'</div>';
+    }
+    return out;
   }
 
-  // The 13-check measurement report, if the server could measure it, is shown
-  // below as supplementary context (it no longer gates this workflow).
+  // QA report + assessment first; the print-ready PNG card (PhotoCraft) follows
+  // only when that step ran.
   if(!rep){
-    return html;
+    return html+assessmentHtml()+pngHtml();
   }
   var band=rep.band, score=rep.score, col=_prBandColour(band);
   // Prominent score with colour band.
@@ -1640,12 +1649,8 @@ function renderPrintReadyResults(job){
     html+='</tr>';
   }
   html+='</tbody></table>';
-  // Printer's written assessment, only if one exists (legacy jobs). The current
-  // Print Ready step does not run a written-assessment turn.
-  if(job.printready_assessment){
-    html+='<div class="col-title">Printer\u2019s assessment</div>';
-    html+='<div style="border:1px solid var(--border);border-radius:8px;padding:12px;white-space:pre-wrap;font-size:.85rem">'+esc(job.printready_assessment)+'</div>';
-  }
+  html+=assessmentHtml();
+  html+=pngHtml();
   return html;
 }
 // Build + download a plain-text report the operator can send.
@@ -4772,7 +4777,7 @@ function renderHist(){
     var det=stageThumbs(job,si);
     var div=document.createElement("div");div.className="history-item";
     var byTag=job.created_by_name?' <span style="color:var(--muted)">· by '+esc(job.created_by_name)+'</span>':'';
-    var mcpTag=(((job.workflow==="printready")&&(job.pr_via_photocraft||job.printready_summary))||job.printready_summary)?' '+_photocraftTagHtml():'';
+    var mcpTag=job.printready_summary?' '+_photocraftTagHtml():'';
     div.innerHTML='<span class="hi-label">'+st+'</span> \u2014 '+esc(job.client)+' / '+esc(job.task_id)+' \u2014 '+desc+byTag+mcpTag+'<div class="history-detail" id="'+did+'">'+det+'</div>';
     div.onclick=function(){$(did).classList.toggle("open")};
     historyList.appendChild(div);
