@@ -243,8 +243,19 @@ def _content_mask(img: Image.Image) -> np.ndarray:
     ], dtype=np.int16)
     bg = np.median(corners, axis=0)
     dist = np.sqrt(((rgb - bg) ** 2).sum(axis=2))
-    # Pixels far from the background colour are content.
-    mask = (dist > 40).astype(np.uint8) * 255
+    # Background = pixels close to the corner colour that are CONNECTED to the
+    # image border. A same-coloured region fully enclosed by the artwork (e.g. a
+    # white star on a white canvas) is part of the design, not background.
+    near_bg = (dist <= 40).astype(np.uint8)
+    n, labels = cv2.connectedComponents(near_bg, connectivity=4)
+    if n > 1:
+        border_labels = np.unique(np.concatenate(
+            [labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]]))
+        border_labels = border_labels[border_labels > 0]
+        is_bg = np.isin(labels, border_labels)
+    else:
+        is_bg = np.zeros((h, w), dtype=bool)
+    mask = (~is_bg).astype(np.uint8) * 255
     return mask
 
 
@@ -317,54 +328,117 @@ def _bg_word(has_alpha: bool) -> str:
     return "transparent" if has_alpha else "opaque"
 
 
-def _edge_iou(orig_bytes: bytes, gen_bytes: bytes, size: int = 256) -> float:
-    """Compare two edge maps by IoU on a shared, aspect-preserving canvas.
+_NEUTRAL_GREY = 128      # background every image is flattened onto before comparing
+_COMPARE_LONG_SIDE = 512  # common working size (long side) for edges / detail
+_EDGE_TOL_PX = 3          # an edge counts as matched if within this many px
+_PAD = 6                  # grey border so a silhouette on the bbox edge still yields an edge
 
-    Both edge maps are cropped to their content bounding box, then resized
-    PRESERVING ASPECT RATIO and centred (letterboxed) onto a common square
-    canvas. Squashing differently-shaped content directly to a square distorts
-    each differently and makes the edges stop lining up. IoU (not absdiff) is
-    used so a one-pixel offset does not destroy the score, and a 1px dilation is
-    applied so near-miss edges still overlap.
-    """
-    def _edges_cropped(b: bytes) -> np.ndarray:
-        img = Image.open(io.BytesIO(b)).convert("RGBA")
-        mask = _content_mask(img)
-        arr = np.array(img)
-        gray = cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2GRAY)
-        e = cv2.Canny(gray, 80, 200)
-        e = e & ((mask > 0).astype(np.uint8) * 255)  # edges within content only
-        # Crop to the content bounding box (based on the mask).
-        ys, xs = np.where(mask > 0)
-        if ys.size and xs.size:
-            y0, y1 = int(ys.min()), int(ys.max())
-            x0, x1 = int(xs.min()), int(xs.max())
-            e = e[y0:y1 + 1, x0:x1 + 1]
-        return e
 
-    def _fit_letterbox(e: np.ndarray, size: int) -> np.ndarray:
-        """Resize preserving aspect ratio onto a size x size canvas, centred."""
-        h, w = e.shape[:2]
-        if h == 0 or w == 0:
-            return np.zeros((size, size), dtype=np.uint8)
-        scale = min(size / w, size / h)
-        nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
-        resized = cv2.resize(e, (nw, nh), interpolation=cv2.INTER_NEAREST)
-        canvas = np.zeros((size, size), dtype=np.uint8)
-        ox, oy = (size - nw) // 2, (size - nh) // 2
-        canvas[oy:oy + nh, ox:ox + nw] = resized
-        # Dilate ~1px so a small offset still counts as overlap.
-        return cv2.dilate(canvas, np.ones((3, 3), np.uint8), iterations=1)
+def _neutral_gray(img_bytes: bytes, long_side: int = _COMPARE_LONG_SIDE):
+    """Background-independent grayscale view of an image.
 
-    ea = _fit_letterbox(_edges_cropped(orig_bytes), size) > 0
-    eb = _fit_letterbox(_edges_cropped(gen_bytes), size) > 0
-    inter = int((ea & eb).sum())
-    union = int((ea | eb).sum())
-    print(f"[edge_iou] baseline_edges={int(ea.sum())} result_edges={int(eb.sum())} "
-          f"intersection={inter} union={union} iou={inter/union if union else 1.0:.3f}")
-    if union == 0:
+    1. Find the CONTENT mask (alpha for transparent images, corner-colour
+       distance for opaque ones).
+    2. Flatten onto one neutral grey: transparent pixels are composited on it
+       and, for opaque images, every non-content pixel is REPLACED by it. So art
+       on black, on white, or on transparent all become the same picture.
+    3. Crop to the content bbox, resize the IMAGE (area when shrinking, Lanczos
+       when enlarging; aspect kept) to `long_side`, then add a small grey pad.
+
+    Returns (gray uint8, mask bool) of identical shape. Resizing the image first
+    and detecting edges AFTERWARDS keeps thin lines alive (resizing an edge map
+    with NEAREST aliases them away)."""
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+    mask = _content_mask(img) > 0
+    arr = np.array(img).astype(np.float32)
+    a = arr[:, :, 3:4] / 255.0
+    rgb = arr[:, :, :3] * a + _NEUTRAL_GREY * (1.0 - a)
+    rgb[~mask] = _NEUTRAL_GREY
+    gray = cv2.cvtColor(np.clip(rgb, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+
+    ys, xs = np.where(mask)
+    if ys.size:
+        y0, y1, x0, x1 = int(ys.min()), int(ys.max()) + 1, int(xs.min()), int(xs.max()) + 1
+        gray, mask = gray[y0:y1, x0:x1], mask[y0:y1, x0:x1]
+
+    h, w = gray.shape[:2]
+    scale = long_side / float(max(h, w))
+    nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LANCZOS4
+    gray = cv2.resize(gray, (nw, nh), interpolation=interp)
+    mask = cv2.resize(mask.astype(np.uint8), (nw, nh), interpolation=cv2.INTER_NEAREST) > 0
+
+    gray = cv2.copyMakeBorder(gray, _PAD, _PAD, _PAD, _PAD, cv2.BORDER_CONSTANT,
+                              value=_NEUTRAL_GREY)
+    mask = cv2.copyMakeBorder(mask.astype(np.uint8), _PAD, _PAD, _PAD, _PAD,
+                              cv2.BORDER_CONSTANT, value=0) > 0
+    return gray, mask
+
+
+def _fit_to(gray: np.ndarray, mask: np.ndarray, shape: tuple):
+    """Resize (aspect kept) and centre `gray`/`mask` onto a canvas of `shape`
+    (h, w), padding with the neutral grey, so two images share one frame."""
+    th, tw = shape
+    h, w = gray.shape[:2]
+    if (h, w) == (th, tw):
+        return gray, mask
+    s = min(tw / w, th / h)
+    nw, nh = max(1, int(round(w * s))), max(1, int(round(h * s)))
+    interp = cv2.INTER_AREA if s < 1.0 else cv2.INTER_LANCZOS4
+    g = cv2.resize(gray, (nw, nh), interpolation=interp)
+    m = cv2.resize(mask.astype(np.uint8), (nw, nh), interpolation=cv2.INTER_NEAREST)
+    cg = np.full((th, tw), _NEUTRAL_GREY, dtype=np.uint8)
+    cm = np.zeros((th, tw), dtype=np.uint8)
+    oy, ox = (th - nh) // 2, (tw - nw) // 2
+    cg[oy:oy + nh, ox:ox + nw] = g
+    cm[oy:oy + nh, ox:ox + nw] = m
+    return cg, cm > 0
+
+
+def _prep_pair(orig_bytes: bytes, gen_bytes: bytes):
+    """(gray_a, mask_a, gray_b, mask_b) on one common frame (A's size)."""
+    ga, ma = _neutral_gray(orig_bytes)
+    gb, mb = _neutral_gray(gen_bytes)
+    gb, mb = _fit_to(gb, mb, ga.shape[:2])
+    return ga, ma, gb, mb
+
+
+def _canny(gray: np.ndarray) -> np.ndarray:
+    """Canny on a lightly smoothed image (suppresses JPEG ringing / noise)."""
+    return cv2.Canny(cv2.GaussianBlur(gray, (3, 3), 0), 40, 110) > 0
+
+
+def _edge_f1_arrays(ga: np.ndarray, gb: np.ndarray) -> float:
+    """Edge agreement as an F1 (precision/recall) score with a pixel tolerance.
+
+    precision = share of A's edge pixels within _EDGE_TOL_PX of a B edge,
+    recall    = share of B's edge pixels within _EDGE_TOL_PX of an A edge.
+    A chamfer / distance-transform match, so a 1-3px shift, softness or a small
+    resize does not destroy the score the way strict pixel IoU does."""
+    ea, eb = _canny(ga), _canny(gb)
+    na, nb = int(ea.sum()), int(eb.sum())
+    if na == 0 and nb == 0:
         return 1.0
-    return inter / union
+    if na == 0 or nb == 0:
+        return 0.0
+    # distanceTransform measures distance to the nearest ZERO pixel, so feed it
+    # the inverse of the edge map.
+    dist_to_b = cv2.distanceTransform((~eb).astype(np.uint8), cv2.DIST_L2, 3)
+    dist_to_a = cv2.distanceTransform((~ea).astype(np.uint8), cv2.DIST_L2, 3)
+    precision = float((dist_to_b[ea] <= _EDGE_TOL_PX).sum()) / na
+    recall = float((dist_to_a[eb] <= _EDGE_TOL_PX).sum()) / nb
+    f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+    print(f"[edge_f1] edges_a={na} edges_b={nb} precision={precision:.3f} "
+          f"recall={recall:.3f} f1={f1:.3f}")
+    return f1
+
+
+def _edge_iou(orig_bytes: bytes, gen_bytes: bytes, size: int = 256) -> float:
+    """Edge similarity 0..1 (name kept for callers). Now an F1 over Canny edges
+    detected AFTER both images are background-neutralised, content-cropped and
+    resized (as images) to a common ~512px size; see _edge_f1_arrays."""
+    ga, _ma, gb, _mb = _prep_pair(orig_bytes, gen_bytes)
+    return _edge_f1_arrays(ga, gb)
 
 
 def _colour_axis(orig_feat: dict, gen_feat: dict) -> int:
@@ -385,25 +459,59 @@ def _colour_axis(orig_feat: dict, gen_feat: dict) -> int:
     return int(round(max(0.0, min(1.0, score)) * 100))
 
 
+def _ssim(a: np.ndarray, b: np.ndarray, region: np.ndarray | None = None) -> float:
+    """Mean SSIM of two same-size uint8 grayscale images (Gaussian 11x11, sigma
+    1.5), averaged over `region` when given (so shared flat background does not
+    inflate it). Clamped to 0..1."""
+    a = a.astype(np.float64)
+    b = b.astype(np.float64)
+    c1, c2 = (0.01 * 255) ** 2, (0.03 * 255) ** 2
+
+    def g(x):
+        return cv2.GaussianBlur(x, (11, 11), 1.5)
+
+    mu_a, mu_b = g(a), g(b)
+    saa = g(a * a) - mu_a * mu_a
+    sbb = g(b * b) - mu_b * mu_b
+    sab = g(a * b) - mu_a * mu_b
+    ssim_map = ((2 * mu_a * mu_b + c1) * (2 * sab + c2)) / (
+        (mu_a ** 2 + mu_b ** 2 + c1) * (saa + sbb + c2))
+    if region is not None and region.any():
+        val = float(ssim_map[region].mean())
+    else:
+        val = float(ssim_map.mean())
+    return max(0.0, min(1.0, val))
+
+
 def _detail_axis(orig_bytes: bytes, gen_bytes: bytes) -> int:
-    """Detail similarity via phash on content cropped and composited on grey."""
-    MID_GREY = (128, 128, 128)
-    orig = Image.open(io.BytesIO(orig_bytes)).convert("RGBA")
-    gen = Image.open(io.BytesIO(gen_bytes)).convert("RGBA")
-    om, gm = _content_mask(orig), _content_mask(gen)
+    """Detail similarity: the better of pHash(16x16) and SSIM, both computed on
+    the background-neutralised, content-cropped, same-size grayscale images.
+    pHash catches structure; SSIM tolerates the normal softness of a GPT
+    regeneration. Taking the max means softness is not punished."""
+    ga, ma, gb, mb = _prep_pair(orig_bytes, gen_bytes)
+    return _detail_from_arrays(ga, ma, gb, mb)
 
-    def _prep(img: Image.Image, mask: np.ndarray) -> Image.Image:
-        ys, xs = np.where(mask > 0)
-        if ys.size and xs.size:
-            img = img.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
-        bg = Image.new("RGBA", img.size, MID_GREY + (255,))
-        return Image.alpha_composite(bg, img.convert("RGBA")).convert("RGB")
 
+def _detail_from_arrays(ga, ma, gb, mb) -> int:
     hash_size = 16
-    b1 = _phash_bits(_prep(orig, om), hash_size=hash_size)
-    b2 = _phash_bits(_prep(gen, gm), hash_size=hash_size)
-    bits = hash_size * hash_size
-    return int(round((1 - _phash_distance(b1, b2) / bits) * 100))
+    b1 = _phash_bits(Image.fromarray(ga), hash_size=hash_size)
+    b2 = _phash_bits(Image.fromarray(gb), hash_size=hash_size)
+    phash_pct = (1 - _phash_distance(b1, b2) / (hash_size * hash_size)) * 100
+    # Region = union of both contents, grown a little so the silhouette counts.
+    region = cv2.dilate((ma | mb).astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+    ssim_pct = _ssim(ga, gb, region) * 100
+    print(f"[detail] phash={phash_pct:.1f} ssim={ssim_pct:.1f}")
+    return int(round(max(phash_pct, ssim_pct)))
+
+
+def _bbox_aspect(feat: dict) -> float:
+    """Aspect (w/h) of the CONTENT bounding box, not the canvas: the canvas
+    changes between original and regeneration while the artwork does not."""
+    bb = feat.get("bbox") or {}
+    bw, bh = bb.get("w", 0), bb.get("h", 0)
+    if bw > 0 and bh > 0:
+        return bw / bh
+    return feat.get("aspect_ratio", 0.0)
 
 
 def compare_features(orig_feat: dict, gen_feat: dict, orig_bytes: bytes, gen_bytes: bytes) -> dict:
@@ -419,14 +527,17 @@ def compare_features(orig_feat: dict, gen_feat: dict, orig_bytes: bytes, gen_byt
     """
     # Shape reuses the geometry already in the feature dicts.
     shape_pct = _shape_similarity(
-        {"aspect": orig_feat["aspect_ratio"], "fill": orig_feat["_fill"],
+        {"aspect": _bbox_aspect(orig_feat), "fill": orig_feat["_fill"],
          "cx": orig_feat["_cx"], "cy": orig_feat["_cy"], "n_contours": orig_feat["n_contours"]},
-        {"aspect": gen_feat["aspect_ratio"], "fill": gen_feat["_fill"],
+        {"aspect": _bbox_aspect(gen_feat), "fill": gen_feat["_fill"],
          "cx": gen_feat["_cx"], "cy": gen_feat["_cy"], "n_contours": gen_feat["n_contours"]},
     )
-    edges_pct = int(round(_edge_iou(orig_bytes, gen_bytes) * 100))
+    # Edges and Detail share one background-neutral, content-cropped, common-size
+    # view of the two images.
+    ga, ma, gb, mb = _prep_pair(orig_bytes, gen_bytes)
+    edges_pct = int(round(_edge_f1_arrays(ga, gb) * 100))
     colour_pct = _colour_axis(orig_feat, gen_feat)
-    detail_pct = _detail_axis(orig_bytes, gen_bytes)
+    detail_pct = _detail_from_arrays(ga, ma, gb, mb)
 
     # Background note (information, not a warning).
     oa, ga = orig_feat["has_alpha"], gen_feat["has_alpha"]
