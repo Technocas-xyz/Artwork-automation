@@ -80,7 +80,10 @@ THRESHOLDS: dict[str, dict[str, Any]] = {
     "quantise_colours": 32,      # k for the colour-count quantisation
     "semi_alpha_low": 10,        # alpha in [low, high] counts as semi-transparent
     "semi_alpha_high": 245,
-    "edge_soft_band": (30, 120), # gradient-magnitude band counted as a "soft" edge
+    "edge_soft_band": (30, 120), # legacy (unused): old gradient band for "soft" edges
+    "edge_alpha_lo": 10,         # alpha <= this = fully clear (edge transition start)
+    "edge_alpha_hi": 245,        # alpha >= this = fully opaque (edge transition end)
+    "edge_soft_px": 3.0,         # silhouette transition wider than this = soft
     "default_dpi": 300,          # assumed when the file carries no DPI metadata
     "black_min_lum": 80,         # luminance below this counts as a "dark" pixel
     "black_min_share_pct": 2.0,  # <2% dark content -> pure-black check is n/a
@@ -195,6 +198,11 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
         except Exception:
             dpi = 0.0
     dpi_known = dpi > 1
+    if dpi_known:
+        # PNG stores DPI as pixels-per-metre (300 DPI -> 11811 ppm), which reads
+        # back as 299.9994. Round before ANY comparison or display so a file saved
+        # at exactly 300 DPI is not warned against a 300 DPI threshold.
+        dpi = float(round(dpi))
     if not dpi_known:
         dpi = float(T["default_dpi"])
 
@@ -264,12 +272,13 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
 
     # 5. EDGE SHARPNESS: fraction of soft edges -----------------------------
     try:
-        soft_pct = _measure_soft_edges(lum, T["edge_soft_band"], content)
+        soft_pct = _measure_soft_edges(arr, has_alpha, content)
         raw["soft_edge_pct"] = round(soft_pct, 1)
         st = _status_high_bad(soft_pct, T["soft_edge_pct"]["warn"], T["soft_edge_pct"]["fail"])
         add("soft_edges", "Edge sharpness", round(soft_pct, 1), f"{soft_pct:.1f}% soft", "%",
             f"warn >{T['soft_edge_pct']['warn']}%, fail >{T['soft_edge_pct']['fail']}%", st,
-            T["soft_edge_pct"]["weight"], "soft edges feather in the transfer")
+            T["soft_edge_pct"]["weight"],
+            "% of the silhouette edge whose alpha transition is wider than ~3px")
     except Exception as exc:
         logger.info("printready: soft-edge measure failed (%s)", exc)
         add("soft_edges", "Edge sharpness", 0.0, "could not measure", "%", "-", "warn",
@@ -473,21 +482,65 @@ def _grad_mag(lum: np.ndarray) -> np.ndarray:
     return np.sqrt(gx * gx + gy * gy)
 
 
-def _measure_soft_edges(lum: np.ndarray, band: tuple, content: np.ndarray | None = None) -> float:
-    """% of EDGE pixels (over CONTENT pixels only) whose gradient magnitude
-    falls in the 'soft' band - gradual transitions rather than hard cuts.
-    Measured on a copy resized to a fixed ~1024 long side."""
-    if content is None:
-        content = np.ones(lum.shape, dtype=bool)
-    l2, c2 = _analysis_copy(lum, content, THRESHOLDS["analysis_long_side"])
-    mag = _grad_mag(l2)
-    lo, hi = band
-    edges = (mag > lo) & c2        # any real edge, inside the content
-    n_edges = int(edges.sum())
-    if n_edges == 0:
+def _pseudo_alpha(arr: np.ndarray, content: np.ndarray) -> np.ndarray:
+    """Alpha-like 0..255 map for an OPAQUE image: colour distance from the
+    border background colour, normalised by the typical distance inside the
+    artwork. Lets the same transition-width maths run on images without alpha."""
+    rgb = arr[:, :, :3].astype(np.float32)
+    border = np.concatenate([rgb[0, :, :], rgb[-1, :, :], rgb[:, 0, :], rgb[:, -1, :]])
+    bg = np.median(border, axis=0)
+    dist = np.linalg.norm(rgb - bg, axis=2)
+    ref = float(np.median(dist[content])) if content.any() else 0.0
+    return np.clip(dist / max(ref, 1.0), 0.0, 1.0) * 255.0
+
+
+def _measure_soft_edges(arr: np.ndarray, has_alpha: bool,
+                        content: np.ndarray | None = None) -> float:
+    """% of the SILHOUETTE edge that is soft (feathered).
+
+    Interior shading, texture and brush strokes are NOT edges and are ignored.
+    Only the content boundary counts: the alpha = 50% contour (for opaque images,
+    a pseudo-alpha from the distance to the background colour). At each boundary
+    pixel the transition width is the distance to the nearest fully-clear pixel
+    plus the distance to the nearest fully-opaque pixel (the two meet at the
+    edge, so this is the width measured perpendicular to it), minus 1. Done at a
+    fixed ~1024 long side so resolution does not matter.
+
+    crisp = width <= 2px (a normal anti-aliased edge is ~1px); soft = width > 3px.
+    Returns the soft share of the boundary, 0..100 (0 if there is no edge)."""
+    import cv2
+    T = THRESHOLDS
+    if has_alpha:
+        a = arr[:, :, 3].astype(np.float32)
+    else:
+        if content is None:
+            content, _ = _content_mask(arr)
+        a = _pseudo_alpha(arr, content)
+    h, w = a.shape
+    s = T["analysis_long_side"] / float(max(h, w))
+    if abs(s - 1.0) > 1e-3:
+        a = cv2.resize(a, (max(1, int(round(w * s))), max(1, int(round(h * s)))),
+                       interpolation=cv2.INTER_AREA if s < 1.0 else cv2.INTER_CUBIC)
+    lo, hi = T["edge_alpha_lo"], T["edge_alpha_hi"]
+
+    inside = a >= 128
+    if not inside.any():
         return 0.0
-    soft = edges & (mag < hi)      # present but not crisp
-    return float(soft.sum()) / float(n_edges) * 100.0
+    eroded = cv2.erode(inside.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3)))
+    boundary = inside & (eroded == 0)
+    if not boundary.any():
+        return 0.0
+    # Distance to the nearest fully-clear / fully-opaque pixel.
+    d_clear = cv2.distanceTransform((a > lo).astype(np.uint8), cv2.DIST_L2, 5)
+    d_opaque = cv2.distanceTransform((a < hi).astype(np.uint8), cv2.DIST_L2, 5)
+    width = d_clear + d_opaque - 1.0
+    # Boundary pixels with no opaque core anywhere near (hairlines thinner than a
+    # pixel) say nothing about feathering; the stroke check covers those.
+    usable = boundary & (d_opaque <= 16.0)
+    n = int(usable.sum())
+    if n == 0:
+        return 0.0
+    return float((width[usable] > T["edge_soft_px"]).sum()) / n * 100.0
 
 
 def _measure_colours(im: Image.Image, content: np.ndarray, k: int):

@@ -135,5 +135,66 @@ speck[300:303, 300:303] = True    # 3px speck (<0.5mm) must be ignored
 check("sub-0.5mm speck ignored for stroke", 10 <= _measure_min_stroke(speck, 300) <= 14,
       f"{_measure_min_stroke(speck, 300):.1f}px")
 
+# --- DPI: a PNG saved at 300 DPI reads back as 299.9994 and must pass -------
+buf = io.BytesIO()
+art.save(buf, "PNG", dpi=(300, 300))
+rep_dpi = measure_print_ready(buf.getvalue())          # no override: read from the file
+cd = by_id(rep_dpi)["dpi"]
+check("PNG saved at 300 DPI -> DPI pass", cd["status"] == "pass", cd["value_str"])
+check("DPI value is the rounded 300", cd["value"] == 300.0 and cd["value_str"].startswith("300 DPI"),
+      cd["value_str"])
+buf = io.BytesIO()
+art.save(buf, "PNG", dpi=(299, 299))
+check("299 DPI still warns", by_id(measure_print_ready(buf.getvalue()))["dpi"]["status"] == "warn")
+
+
+# --- Edge sharpness: silhouette alpha transition, not interior texture ------
+def lettering(size: int = 1024) -> Image.Image:
+    """Brush-lettering-like strokes (curves, thick/thin) with heavy interior
+    shading, anti-aliased, on a transparent canvas."""
+    s = size * 4
+    k = s / 1024.0
+    im = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    for i, x in enumerate(range(120, 900, 170)):
+        d.arc([int(x * k), int(220 * k), int((x + 150) * k), int(520 * k)], 20, 330,
+              fill=(40 + i * 15, 20, 90, 255), width=int(46 * k))
+        d.line([int((x + 20) * k), int(560 * k), int((x + 120) * k), int(860 * k)],
+               fill=(20, 60 + i * 20, 120, 255), width=int(38 * k))
+    # Busy interior texture / shading INSIDE the strokes must not count as soft.
+    rng = np.random.default_rng(3)
+    tex = (rng.random((s, s)) * 90).astype(np.uint8)
+    a = np.asarray(im).copy()
+    solid = a[:, :, 3] == 255
+    for c in range(3):
+        ch = a[:, :, c].astype(np.int16)
+        ch[solid] = np.clip(ch[solid] + tex[solid] - 45, 0, 255)
+        a[:, :, c] = ch.astype(np.uint8)
+    return Image.fromarray(a, "RGBA").resize((size, size), Image.BOX)
+
+
+def feathered(im: Image.Image, px: float) -> Image.Image:
+    """Same art with an inward linear alpha ramp of `px` pixels at its edge."""
+    import cv2
+    a = np.asarray(im).copy()
+    solid = (a[:, :, 3] > 127).astype(np.uint8)
+    dist = cv2.distanceTransform(solid, cv2.DIST_L2, 5)
+    a[:, :, 3] = (np.clip(dist / px, 0, 1) * 255).astype(np.uint8)
+    return Image.fromarray(a, "RGBA")
+
+
+text = lettering(1024)
+c = by_id(measure_print_ready(png(text), dpi_override=300))["soft_edges"]
+check("clean anti-aliased lettering (busy interior) -> edge sharpness pass",
+      c["status"] == "pass" and c["value"] < 20, c["value_str"])
+c = by_id(measure_print_ready(png(lettering(3225)), dpi_override=300))["soft_edges"]
+check("same lettering at 3225px -> pass", c["status"] == "pass", c["value_str"])
+c = by_id(measure_print_ready(png(feathered(text, 6)), dpi_override=300))["soft_edges"]
+check("6px feathered edge -> edge sharpness fail", c["status"] == "fail", c["value_str"])
+c = by_id(measure_print_ready(png(feathered(text, 1.5)), dpi_override=300))["soft_edges"]
+check("1.5px ramp (normal anti-alias) -> pass", c["status"] == "pass", c["value_str"])
+c = by_id(measure_print_ready(png(art), dpi_override=300))["soft_edges"]
+check("clean art -> pass", c["status"] == "pass", c["value_str"])
+
 print("RESULT: " + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"))
 sys.exit(1 if FAILS else 0)
