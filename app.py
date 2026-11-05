@@ -27,7 +27,15 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
+import base64 as _base64
+import binascii
+import ipaddress
+import socket
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import Request as _UrlRequest, urlopen, build_opener, HTTPRedirectHandler
+from urllib.error import URLError
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -205,7 +213,37 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return RedirectResponse("/login", status_code=302)
 
 
+class QACorsMiddleware(BaseHTTPMiddleware):
+    """Scoped CORS for the public QA API ONLY (/api/v1/qa/*). Origins come from
+    QA_API_CORS_ORIGINS (empty = disabled, no CORS headers emitted). It answers
+    the preflight OPTIONS and adds the allow-origin header to actual responses,
+    exposing only GET/POST/OPTIONS and the X-API-Key header. The rest of the app
+    gets no CORS headers from here."""
+    async def dispatch(self, request: Request, call_next):
+        origins = QA_API_CORS_ORIGINS
+        path = request.url.path
+        origin = request.headers.get("origin", "")
+        scoped = path.startswith("/api/v1/qa/")
+        allow = scoped and bool(origins) and origin in origins
+
+        if scoped and request.method == "OPTIONS" and allow:
+            resp = Response(status_code=204)
+        else:
+            resp = await call_next(request)
+        if allow:
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Vary"] = "Origin"
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            resp.headers["Access-Control-Allow-Headers"] = "X-API-Key, Content-Type"
+            resp.headers["Access-Control-Max-Age"] = "600"
+        return resp
+
+
+# Order matters: the LAST added middleware runs FIRST. CORS must run before
+# Auth so an OPTIONS preflight (which carries no API key) is answered here and
+# never reaches the per-endpoint key check.
 app.add_middleware(AuthMiddleware)
+app.add_middleware(QACorsMiddleware)
 
 # Seed the admin account from .env on first run so nobody is locked out during
 # the move to multi-user login. Idempotent once any user exists.
@@ -4745,7 +4783,7 @@ def _compare_two_images(orig_bytes: bytes, gen_bytes: bytes) -> dict:
     })
 
 
-def _qa_measure_bytes(image_bytes: bytes) -> dict:
+def _qa_measure_bytes(image_bytes: bytes, dpi_override: float | None = None) -> dict:
     """Run the SAME Print Ready QA measurement used by the Print Ready QA
     workflow on one image's bytes. Returns the measure_print_ready() report dict
     ({checks, score, band, summary, measurements}) on success, or
@@ -4753,7 +4791,8 @@ def _qa_measure_bytes(image_bytes: bytes) -> dict:
     image must not break the cv2 or ChatGPT results."""
     try:
         from src.printready import measure_print_ready
-        return _json_safe(measure_print_ready(image_bytes, file_size_bytes=len(image_bytes)))
+        return _json_safe(measure_print_ready(
+            image_bytes, dpi_override=dpi_override or None, file_size_bytes=len(image_bytes)))
     except Exception as exc:
         print(f"[similarity-check] QA measurement failed: {exc}")
         return {"error": f"QA measurement failed: {exc}"}
@@ -4806,6 +4845,370 @@ async def similarity_check(original: UploadFile = File(...),
         detail = msg if code == 400 else "The comparison could not be completed. Please try again."
         print(f"[similarity-check] {msg}")
         raise HTTPException(status_code=code, detail=detail)
+
+
+# ===========================================================================
+# Public JSON API v1 — Print Ready QA
+#
+# A key-authenticated HTTP API over the SAME Print Ready QA measurement the UI
+# uses (_qa_measure_bytes -> src.printready.measure_print_ready). It does not
+# touch the operator cookie session; it is listed in auth.PUBLIC_PREFIXES so the
+# cookie middleware lets it through, and each endpoint checks X-API-Key itself.
+# ===========================================================================
+
+# Comma-separated keys from the environment. Whitespace and blank entries are
+# ignored. No keys configured -> the API is effectively closed (every call 401s).
+QA_API_KEYS = {k.strip() for k in os.environ.get("QA_API_KEYS", "").split(",") if k.strip()}
+QA_MAX_BYTES = 25 * 1024 * 1024          # 25 MB upload cap
+QA_MAX_SIDE = 12_000                     # pixels per side
+QA_RATE_PER_MIN = int(os.environ.get("QA_API_RATE_PER_MIN", "60") or 60)
+# image_url fetching is DISABLED by default (an attacker-supplied URL is an SSRF
+# vector). Set QA_API_ALLOW_URL=true to enable it; even then every hop is
+# resolved and private/loopback/link-local/metadata targets are refused.
+QA_API_ALLOW_URL = (os.environ.get("QA_API_ALLOW_URL", "") or "").strip().lower() in ("1", "true", "yes", "on")
+QA_URL_TIMEOUT = 10.0                    # seconds per connect/read on image_url
+QA_URL_MAX_REDIRECTS = 3
+# Origins allowed to call /api/v1/qa/* from a browser (CORS). Empty = disabled.
+QA_API_CORS_ORIGINS = [o.strip() for o in os.environ.get("QA_API_CORS_ORIGINS", "").split(",") if o.strip()]
+
+# Per-key sliding-window (60s) call timestamps for rate limiting.
+_qa_rate: dict[str, deque] = {}
+_qa_rate_lock = threading.Lock()
+
+
+def _qa_check_key(x_api_key: str | None) -> str:
+    """Validate the X-API-Key header against QA_API_KEYS and apply a simple
+    per-key rate limit. Returns the key on success; raises 401 for a missing or
+    unknown key, 429 when the key is over QA_RATE_PER_MIN calls in the last 60s."""
+    key = (x_api_key or "").strip()
+    if not key or key not in QA_API_KEYS:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key (header 'X-API-Key').")
+    now = time.monotonic()
+    with _qa_rate_lock:
+        dq = _qa_rate.setdefault(key, deque())
+        while dq and now - dq[0] > 60.0:
+            dq.popleft()
+        if len(dq) >= QA_RATE_PER_MIN:
+            raise HTTPException(status_code=429,
+                detail=f"Rate limit exceeded ({QA_RATE_PER_MIN} requests/minute).")
+        dq.append(now)
+    return key
+
+
+class QAPrintReadyJSON(BaseModel):
+    """JSON body alternative to a multipart file upload for POST
+    /api/v1/qa/print-ready. Provide exactly one image source."""
+    image_url: str | None = None
+    image_base64: str | None = None
+    dpi: float | None = None
+    assessment: bool = False
+
+
+def _qa_ip_is_blocked(ip: str) -> bool:
+    """True if an IP must not be fetched: loopback, private (RFC1918/ULA),
+    link-local (incl. 169.254.x and the cloud metadata address 169.254.169.254),
+    multicast, reserved/unspecified. Anything that is not a normal public
+    address is refused."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return (addr.is_private or addr.is_loopback or addr.is_link_local
+            or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
+
+
+def _qa_resolve_public(host: str) -> None:
+    """Resolve `host` and raise 400 if ANY resolved address is a blocked
+    (internal) target. Resolving here and blocking every A/AAAA record stops a
+    hostname that points at an internal IP (DNS-rebinding-style SSRF)."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        raise HTTPException(status_code=400, detail=f"Could not resolve image_url host {host!r}.")
+    for info in infos:
+        ip = info[4][0]
+        if _qa_ip_is_blocked(ip):
+            raise HTTPException(status_code=400,
+                detail="image_url resolves to a private or internal address, which is not allowed.")
+
+
+class _QANoRedirect(HTTPRedirectHandler):
+    """A urllib redirect handler that never auto-follows, so _qa_fetch_url can
+    re-validate each redirect target's host itself (auto-follow would let a
+    redirect to an internal address bypass the SSRF check)."""
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def _qa_url_opener():
+    return build_opener(_QANoRedirect)
+
+
+def _qa_fetch_url(url: str) -> bytes:
+    """Fetch image bytes from an http(s) URL, guarding against SSRF.
+
+    * Disabled unless QA_API_ALLOW_URL is set.
+    * http/https only.
+    * The host of EVERY hop (initial + each redirect) is resolved and refused if
+      it maps to a loopback/private/link-local/metadata address.
+    * Redirects are followed manually (up to QA_URL_MAX_REDIRECTS) so a redirect
+      to a blocked host cannot slip through urllib's auto-follow.
+    * 10s timeout and the 25 MB cap enforced while streaming.
+    Raises 400 with a clear message on any problem."""
+    if not QA_API_ALLOW_URL:
+        raise HTTPException(status_code=400,
+            detail="Fetching image_url is disabled on this server. Send the image as 'file' or 'image_base64'.")
+    current = (url or "").strip()
+    for _hop in range(QA_URL_MAX_REDIRECTS + 1):
+        parts = urlsplit(current)
+        if parts.scheme not in ("http", "https"):
+            raise HTTPException(status_code=400, detail="image_url must be an http(s) URL.")
+        host = parts.hostname
+        if not host:
+            raise HTTPException(status_code=400, detail="image_url has no host.")
+        _qa_resolve_public(host)
+        try:
+            req = _UrlRequest(current, headers={"User-Agent": "artwork-qa/1.0"},
+                              method="GET")
+            resp = _qa_url_opener().open(req, timeout=QA_URL_TIMEOUT)  # noqa: S310 (scheme + host checked)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # A 3xx with our no-redirect handler surfaces as HTTPError (has .headers).
+            loc = getattr(exc, "headers", None)
+            code = getattr(exc, "code", None)
+            if code and 300 <= code < 400 and loc is not None:
+                nxt = loc.get("Location")
+                if not nxt:
+                    raise HTTPException(status_code=400, detail="image_url redirect had no target.")
+                # Resolve relative redirects against the current URL.
+                current = urlunsplit(urlsplit(nxt)) if urlsplit(nxt).scheme else \
+                    urlunsplit(parts._replace(path=nxt)) if nxt.startswith("/") else nxt
+                continue
+            raise HTTPException(status_code=400, detail=f"Could not fetch image_url: {exc}")
+        try:
+            data = resp.read(QA_MAX_BYTES + 1)
+        finally:
+            resp.close()
+        if len(data) > QA_MAX_BYTES:
+            raise HTTPException(status_code=400,
+                detail=f"Image exceeds the {QA_MAX_BYTES // (1024*1024)} MB limit.")
+        return data
+    raise HTTPException(status_code=400, detail="image_url has too many redirects.")
+
+
+def _qa_decode_image(data: bytes) -> dict:
+    """Validate image bytes within the configured limits and return basic
+    dimensions. Raises 400 with a clear message on a bad/oversized image."""
+    from PIL import Image
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty image.")
+    if len(data) > QA_MAX_BYTES:
+        raise HTTPException(status_code=400, detail=f"Image exceeds the {QA_MAX_BYTES // (1024*1024)} MB limit.")
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im.verify()
+        with Image.open(io.BytesIO(data)) as im:
+            w, h = int(im.width), int(im.height)
+            fmt = (im.format or "").upper()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Unsupported or corrupt image. Use PNG, JPG or WEBP.")
+    if fmt not in ("PNG", "JPEG", "WEBP"):
+        raise HTTPException(status_code=400, detail=f"Unsupported image format {fmt or '?'}. Use PNG, JPG or WEBP.")
+    if w > QA_MAX_SIDE or h > QA_MAX_SIDE:
+        raise HTTPException(status_code=400,
+            detail=f"Image too large ({w}x{h}px). Max {QA_MAX_SIDE}px per side.")
+    return {"width": w, "height": h, "format": fmt}
+
+
+def _qa_report_to_response(report: dict, dims: dict, data: bytes,
+                           dpi_override: float | None) -> dict:
+    """Shape a measure_print_ready() report into the public v1 response. Pulls
+    the DPI / print size / alpha / file size out of the report's own checks and
+    measurements so the numbers match exactly what the QA produced."""
+    checks_out = []
+    dpi_val = None
+    for c in report.get("checks", []):
+        checks_out.append({
+            "id": c.get("id"), "label": c.get("label"),
+            "value": c.get("value"), "value_str": c.get("value_str"),
+            "status": c.get("status"), "threshold": c.get("threshold_str"),
+            "weight": c.get("weight"), "detail": c.get("detail"),
+        })
+        if c.get("id") == "dpi":
+            dpi_val = c.get("value")
+    m = report.get("measurements", {})
+    print_in = [m.get("print_w_in"), m.get("print_h_in")]
+    image = {
+        "width": m.get("width_px", dims["width"]),
+        "height": m.get("height_px", dims["height"]),
+        "dpi": dpi_val if dpi_val is not None else (round(dpi_override) if dpi_override else None),
+        "print_in": print_in,
+        "has_alpha": bool(m.get("has_transparency")),
+        "file_kb": round(len(data) / 1024.0, 1),
+    }
+    return {
+        "ok": True,
+        "score": report.get("score"),
+        "band": report.get("band"),
+        "summary": report.get("summary"),
+        "image": image,
+        "checks": checks_out,
+        "measurements": m,
+    }
+
+
+def _qa_create_assessment_job(data: bytes, dpi: float | None) -> dict:
+    """Queue a normal Print Ready QA job (PhotoCraft OFF) for the written
+    assessment, built via create_job so all the precompute/queue logic is
+    shared. The job is attributed to an online agent's owner so that agent can
+    claim it. Returns {"job_id", "status"} or {"error"} when no agent is
+    available / the job could not be created."""
+    from PIL import Image
+    # The job must be owned by a REAL user who has an online agent, so the
+    # agent's per-user next-job claim picks it up. Walk online agents and take
+    # the first whose owner is an actual account.
+    owner = ""
+    for a in _online_agents():
+        u = (a.get("username") or "").strip()
+        if u and users.get_user(u) is not None:
+            owner = u
+            break
+    if not owner:
+        return {"error": "No agent is online to produce the written assessment."}
+
+    ext = ".png"
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            ext = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}.get((im.format or "").upper(), ".png")
+    except Exception:
+        pass
+    name = _unique_filename(INPUT_DIR, f"qa_api{ext}")
+    (INPUT_DIR / name).write_bytes(data)
+
+    req = GenerateRequest(workflow="printready", artwork_files=[name],
+                          pr_via_photocraft=False, aspect_dpi=int(round(dpi)) if dpi else 0)
+    # A synthetic Request carrying the owner's signed session cookie, so
+    # create_job attributes the job to that user (who has the online agent).
+    cookie = f"{COOKIE_NAME}={sign_cookie(owner)}".encode("latin-1")
+    scope = {"type": "http", "method": "POST", "path": "/api/generate",
+             "headers": [(b"cookie", cookie)], "query_string": b"", "client": ("qa-api", 0)}
+    fake_request = Request(scope)
+    try:
+        out = create_job(req, fake_request)
+    except HTTPException as exc:
+        return {"error": exc.detail}
+    jid = out.get("job_id")
+    return {"job_id": jid, "status": jobs.get(jid, {}).get("status", "queued")}
+
+
+@app.post("/api/v1/qa/print-ready", tags=["QA API"], summary="Measure print-readiness of an image")
+async def qa_print_ready(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    file: UploadFile | None = File(default=None),
+    dpi: float | None = Form(default=None),
+    assessment: bool = Form(default=False),
+):
+    """Run the OpenCV Print Ready QA on one image and return the score, band,
+    summary and per-check results.
+
+    Auth: send your key in the `X-API-Key` header. Provide the image as a
+    multipart `file`, or send a JSON body `{"image_url": ...}` or
+    `{"image_base64": ...}`. `dpi` overrides the DPI read from the file;
+    `assessment=true` also queues a job for the printer's written assessment and
+    returns 202 with a `poll_url`."""
+    _qa_check_key(x_api_key)
+    t0 = time.monotonic()
+
+    # Resolve the image source: multipart file, or JSON body (url / base64).
+    data: bytes
+    dpi_override = dpi
+    want_assessment = bool(assessment)
+    if file is not None:
+        data = await file.read()
+    else:
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400,
+                detail="Provide an image via multipart 'file', or a JSON body with 'image_url' or 'image_base64'.")
+        parsed = QAPrintReadyJSON(**body)
+        dpi_override = parsed.dpi if parsed.dpi is not None else dpi
+        want_assessment = bool(parsed.assessment)
+        if parsed.image_base64:
+            raw = parsed.image_base64.split(",", 1)[-1].strip()  # tolerate a data: URL prefix
+            try:
+                data = _base64.b64decode(raw, validate=True)
+            except (binascii.Error, ValueError):
+                raise HTTPException(status_code=400, detail="image_base64 is not valid base64.")
+        elif parsed.image_url:
+            data = await run_in_threadpool(_qa_fetch_url, parsed.image_url)
+        else:
+            raise HTTPException(status_code=400,
+                detail="JSON body must include 'image_url' or 'image_base64'.")
+
+    dims = _qa_decode_image(data)
+
+    report = await run_in_threadpool(_qa_measure_bytes, data, dpi_override)
+    if not report or report.get("error") or "checks" not in report:
+        raise HTTPException(status_code=400,
+            detail=(report or {}).get("error", "Could not measure this image."))
+
+    payload = _qa_report_to_response(report, dims, data, dpi_override)
+    payload["duration_ms"] = int((time.monotonic() - t0) * 1000)
+
+    if not want_assessment:
+        return JSONResponse(content=_json_safe(payload))
+
+    # assessment=true: also queue the written-assessment job and return 202.
+    job_info = _qa_create_assessment_job(data, dpi_override)
+    if job_info.get("error"):
+        payload["assessment_error"] = job_info["error"]
+        return JSONResponse(status_code=200, content=_json_safe(payload))
+    payload["job_id"] = job_info["job_id"]
+    payload["status"] = "queued"
+    payload["poll_url"] = f"/api/v1/qa/print-ready/{job_info['job_id']}"
+    return JSONResponse(status_code=202, content=_json_safe(payload))
+
+
+@app.get("/api/v1/qa/print-ready/{job_id}", tags=["QA API"],
+         summary="Poll a print-ready assessment job")
+def qa_print_ready_status(job_id: str,
+                          x_api_key: str | None = Header(default=None, alias="X-API-Key")):
+    """Poll an `assessment=true` job. Returns its status and, when done, the
+    score, band, per-check results and the printer's written assessment."""
+    _qa_check_key(x_api_key)
+    job = jobs.get(job_id)
+    if not job or job.get("workflow") != "printready":
+        raise HTTPException(status_code=404, detail="Job not found.")
+    raw_status = job.get("status") or ""
+    if raw_status in ("done", "done_with_errors"):
+        status = "done"
+    elif raw_status == "failed":
+        status = "failed"
+    elif raw_status in ("preparing", "queued"):
+        status = "queued"
+    else:
+        status = "running"
+    report = job.get("printready_measurements") or job.get("printready_report") or {}
+    checks = [
+        {"id": c.get("id"), "label": c.get("label"), "value": c.get("value"),
+         "value_str": c.get("value_str"), "status": c.get("status"),
+         "threshold": c.get("threshold_str"), "weight": c.get("weight"),
+         "detail": c.get("detail")}
+        for c in report.get("checks", [])
+    ]
+    return JSONResponse(content=_json_safe({
+        "status": status,
+        "score": report.get("score"),
+        "band": report.get("band"),
+        "checks": checks,
+        "assessment": job.get("printready_assessment") or "",
+        "error": job.get("error"),
+    }))
 
 
 app.mount("/input", StaticFiles(directory="input"), name="input")
