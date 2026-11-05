@@ -1,9 +1,9 @@
-"""UC-8 Print Ready QA — LOCAL measurement half (no ChatGPT).
+﻿"""UC-8 Print Ready QA â€” LOCAL measurement half (no ChatGPT).
 
 Everything numeric about an artwork's print-readiness for DTF garment printing is
 measured HERE, exactly and repeatably, with Pillow/numpy and (where it helps)
 OpenCV. ChatGPT is given these numbers plus the artwork and asked only for the
-JUDGEMENT a printer would make — never to re-measure.
+JUDGEMENT a printer would make â€” never to re-measure.
 
 Public entry point:
     measure_print_ready(image_bytes, dpi_override=None, file_size_bytes=None)
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
-# THRESHOLDS — the print team tunes everything here, in one place.
+# THRESHOLDS â€” the print team tunes everything here, in one place.
 #
 # Each entry drives one check's pass/warn/fail bands and its WEIGHT (how much a
 # failure pulls the overall score down). Weights are relative; the score is a
@@ -64,7 +64,7 @@ THRESHOLDS: dict[str, dict[str, Any]] = {
     # 8. Minimum stroke width in MM at the print DPI. Below ~0.8 mm a stroke can
     #    break up on a garment; below ~0.4 mm it may not transfer at all.
     "min_stroke_mm":  {"warn": 0.8, "fail": 0.4, "weight": 10},
-    # 9. Smallest text-like feature HEIGHT in MM — a legibility proxy. Below
+    # 9. Smallest text-like feature HEIGHT in MM â€” a legibility proxy. Below
     #    ~3 mm small text closes up; below ~2 mm it is usually illegible.
     "min_feature_mm": {"warn": 3.0, "fail": 2.0, "weight": 7},
     # 10. Gradient coverage: fraction of the image that is smooth tonal
@@ -73,15 +73,24 @@ THRESHOLDS: dict[str, dict[str, Any]] = {
     # 11. Margin to canvas edge (% of the shorter side). Content touching the
     #     edge risks being clipped when the film is cut/placed.
     "margin_pct":     {"warn": 2.0, "fail": 0.5, "weight": 4},  # SMALLER is worse
-    # 13. DTF transfer physical size limit (inches) — the widest film this shop
+    # 13. DTF transfer physical size limit (inches) â€” the widest film this shop
     #     runs. Larger than this cannot be printed in one piece.
     "max_print_in":   {"warn": 22.0, "fail": 24.0, "weight": 6},  # LARGER is worse
     # Supporting constants (not their own weighted checks, used by the ones above):
     "quantise_colours": 32,      # k for the colour-count quantisation
     "semi_alpha_low": 10,        # alpha in [low, high] counts as semi-transparent
     "semi_alpha_high": 245,
-    "edge_soft_band": (30, 120), # gradient-magnitude band counted as a "soft" edge
+    "edge_soft_band": (30, 120), # legacy (unused): old gradient band for "soft" edges
+    "edge_alpha_lo": 10,         # alpha <= this = fully clear (edge transition start)
+    "edge_alpha_hi": 245,        # alpha >= this = fully opaque (edge transition end)
+    "edge_soft_px": 3.0,         # silhouette transition wider than this = soft
     "default_dpi": 300,          # assumed when the file carries no DPI metadata
+    "black_min_lum": 80,         # luminance below this counts as a "dark" pixel
+    "black_min_share_pct": 2.0,  # <2% dark content -> pure-black check is n/a
+    "analysis_long_side": 1024,  # soft-edge / gradient measured on this size
+    "content_alpha": 20,         # alpha above this = content
+    "stroke_min_comp_mm": 0.5,   # stroke: ignore components smaller than this (mm square)
+    "feature_speck_mm": 1.0,     # feature: ignore components under this in BOTH dims
 }
 
 
@@ -100,9 +109,11 @@ def _status_high_bad(value: float, warn: float, fail: float) -> str:
 
 def _status_low_bad(value: float, warn: float, fail: float) -> str:
     """pass/warn/fail where a LOWER value is worse (e.g. dpi, margin)."""
-    if value <= fail:
+    # Strict '<': a value exactly AT the threshold (e.g. 300 DPI against a
+    # 300 DPI warn line) meets the requirement and must pass.
+    if value < fail:
         return "fail"
-    if value <= warn:
+    if value < warn:
         return "warn"
     return "pass"
 
@@ -140,7 +151,7 @@ def _content_mask(arr: np.ndarray) -> tuple[np.ndarray, bool]:
 def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
                         file_size_bytes: int | None = None) -> dict:
     """Measure all 13 print-readiness checks. Returns the report dict described
-    in the module docstring. Never raises — a broken sub-measurement becomes a
+    in the module docstring. Never raises â€” a broken sub-measurement becomes a
     'warn' check with a note."""
     T = THRESHOLDS
     checks: list[dict] = []
@@ -187,6 +198,11 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
         except Exception:
             dpi = 0.0
     dpi_known = dpi > 1
+    if dpi_known:
+        # PNG stores DPI as pixels-per-metre (300 DPI -> 11811 ppm), which reads
+        # back as 299.9994. Round before ANY comparison or display so a file saved
+        # at exactly 300 DPI is not warned against a 300 DPI threshold.
+        dpi = float(round(dpi))
     if not dpi_known:
         dpi = float(T["default_dpi"])
 
@@ -203,7 +219,7 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
     elif dpi_known:
         dpi_src = "from file metadata, may not reflect intended print size"
     else:
-        dpi_src = "assumed — no DPI in file"
+        dpi_src = "assumed â€” no DPI in file"
     add("dpi", "Resolution (DPI)", round(dpi, 1),
         f"{dpi:.0f} DPI ({dpi_src})", "DPI",
         f"warn <{T['dpi']['warn']}, fail <{T['dpi']['fail']}", st, T["dpi"]["weight"],
@@ -256,12 +272,13 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
 
     # 5. EDGE SHARPNESS: fraction of soft edges -----------------------------
     try:
-        soft_pct = _measure_soft_edges(lum, T["edge_soft_band"])
+        soft_pct = _measure_soft_edges(arr, has_alpha, content)
         raw["soft_edge_pct"] = round(soft_pct, 1)
         st = _status_high_bad(soft_pct, T["soft_edge_pct"]["warn"], T["soft_edge_pct"]["fail"])
         add("soft_edges", "Edge sharpness", round(soft_pct, 1), f"{soft_pct:.1f}% soft", "%",
             f"warn >{T['soft_edge_pct']['warn']}%, fail >{T['soft_edge_pct']['fail']}%", st,
-            T["soft_edge_pct"]["weight"], "soft edges feather in the transfer")
+            T["soft_edge_pct"]["weight"],
+            "% of the silhouette edge whose alpha transition is wider than ~3px")
     except Exception as exc:
         logger.info("printready: soft-edge measure failed (%s)", exc)
         add("soft_edges", "Edge sharpness", 0.0, "could not measure", "%", "-", "warn",
@@ -286,15 +303,23 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
         # Luminance of the darkest sizeable region: the 1st percentile of
         # content luminance (ignores stray single dark pixels).
         cl = lum[content] if n_content else lum.reshape(-1)
-        black_level = float(np.percentile(cl, 1)) if cl.size else 255.0
-        raw["darkest_luminance"] = round(black_level, 1)
-        # Higher darkest-area luminance = worse (washed-out blacks).
-        st = _status_high_bad(black_level, T["black_level"]["warn"], T["black_level"]["fail"])
-        add("black", "Pure black", round(black_level, 1),
-            f"darkest ~{black_level:.0f}/255", "luminance",
-            f"warn >{T['black_level']['warn']}, fail >{T['black_level']['fail']}", st,
-            T["black_level"]["weight"],
-            "near 0 = solid black; high = washed-out blacks")
+        dark_share = float((cl < T["black_min_lum"]).mean() * 100.0) if cl.size else 0.0
+        raw["dark_area_pct"] = round(dark_share, 2)
+        if dark_share < T["black_min_share_pct"]:
+            # No sizeable dark area: the design has no black to judge, so a
+            # "washed-out black" warning would be meaningless. Not scored.
+            add("black", "Pure black", None, "n/a (no dark area)", "luminance", "n/a",
+                "na", 0, f"only {dark_share:.1f}% of the design is dark - not scored")
+        else:
+            black_level = float(np.percentile(cl, 1)) if cl.size else 255.0
+            raw["darkest_luminance"] = round(black_level, 1)
+            # Higher darkest-area luminance = worse (washed-out blacks).
+            st = _status_high_bad(black_level, T["black_level"]["warn"], T["black_level"]["fail"])
+            add("black", "Pure black", round(black_level, 1),
+                f"darkest ~{black_level:.0f}/255", "luminance",
+                f"warn >{T['black_level']['warn']}, fail >{T['black_level']['fail']}", st,
+                T["black_level"]["weight"],
+                "near 0 = solid black; high = washed-out blacks")
     except Exception as exc:
         logger.info("printready: black measure failed (%s)", exc)
         add("black", "Pure black", 0.0, "could not measure", "luminance", "-", "warn",
@@ -302,7 +327,7 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
 
     # 8. MINIMUM STROKE WIDTH (px + mm) -------------------------------------
     try:
-        stroke_px = _measure_min_stroke(content)
+        stroke_px = _measure_min_stroke(content, dpi)
         stroke_mm = _px_to_mm(stroke_px, dpi)
         raw.update(min_stroke_px=round(stroke_px, 1), min_stroke_mm=round(stroke_mm, 2))
         st = _status_low_bad(stroke_mm, T["min_stroke_mm"]["warn"], T["min_stroke_mm"]["fail"])
@@ -317,7 +342,7 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
 
     # 9. SMALLEST TEXT-LIKE FEATURE HEIGHT (mm) -----------------------------
     try:
-        feat_px = _measure_min_feature(content)
+        feat_px = _measure_min_feature(content, dpi)
         feat_mm = _px_to_mm(feat_px, dpi)
         raw.update(min_feature_px=round(feat_px, 1), min_feature_mm=round(feat_mm, 2))
         st = _status_low_bad(feat_mm, T["min_feature_mm"]["warn"], T["min_feature_mm"]["fail"])
@@ -400,36 +425,122 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
 # ---------------------------------------------------------------------------
 
 def _measure_halo(arr: np.ndarray, content: np.ndarray, rgb: np.ndarray) -> float:
-    """% of pixels in a thin ring just OUTSIDE the content that are pale (i.e.
-    leftover near-background fringe). Uses cv2 dilation for the ring; the halo
-    is pale non-content pixels adjacent to content."""
+    """Halo / fringe: % of a thin ring just OUTSIDE the opaque core that is
+    leftover pale background.
+
+    Only ring pixels that are actually VISIBLE count: 0 < alpha < 255. A pixel
+    with alpha == 0 prints nothing, so its (often white) RGB is ignored. A
+    visible, pale pixel is a halo when it is also clearly lighter than the
+    artwork next to it, so light-coloured art does not flag its own edge.
+    The ring width scales with the image size (2px at 1024, ~6px at 3225) so an
+    upscaled file measures the same as the original. Denominator = the ring."""
     import cv2  # server-only
-    cm = content.astype(np.uint8)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    dilated = cv2.dilate(cm, kernel, iterations=2)
-    ring = (dilated > 0) & (~content)
-    if ring.sum() == 0:
+    alpha = arr[:, :, 3]
+    core = alpha >= 250
+    if not core.any():
+        return 0.0
+    h, w = alpha.shape
+    r = max(2, int(round(max(h, w) / 512.0)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    dilated = cv2.dilate(core.astype(np.uint8), kernel, iterations=1)
+    ring = (dilated > 0) & (~core)
+    n_ring = int(ring.sum())
+    if n_ring == 0:
         return 0.0
     lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
-    # "pale" = light-ish but not pure background; leftover feathering.
-    pale = ring & (lum > 140) & (lum < 250)
-    return float(pale.sum()) / float(ring.sum()) * 100.0
+    # Brightest neighbouring core luminance (what the fringe sits next to).
+    core_lum = np.where(core, lum, 0).astype(np.float32)
+    near_core = cv2.dilate(core_lum, kernel)
+    # alpha 0 prints nothing, and at very low alpha the 8-bit un-premultiplied
+    # RGB is rounding noise, so only pixels with real coverage can be a halo.
+    visible = (alpha >= 32) & (alpha < 255)
+    pale = ring & visible & (lum > 140) & (lum < 250) & (lum > near_core + 25)
+    return float(pale.sum()) / float(n_ring) * 100.0
 
 
-def _measure_soft_edges(lum: np.ndarray, band: tuple) -> float:
-    """% of EDGE pixels whose gradient magnitude falls in the 'soft' band —
-    gradual transitions rather than hard cuts. Uses cv2 Sobel."""
+def _analysis_copy(lum: np.ndarray, content: np.ndarray, long_side: int):
+    """Luminance + content mask resized so the LONG side is `long_side`, so
+    resolution-dependent measures (edge softness, gradients) do not call an
+    upscaled print file 'soft' just because it has more pixels."""
     import cv2
-    l8 = lum.astype(np.uint8)
+    h, w = lum.shape[:2]
+    s = long_side / float(max(h, w))
+    if abs(s - 1.0) < 1e-3:
+        return lum.astype(np.float32), content
+    nw, nh = max(1, int(round(w * s))), max(1, int(round(h * s)))
+    interp = cv2.INTER_AREA if s < 1.0 else cv2.INTER_CUBIC
+    l2 = cv2.resize(lum.astype(np.float32), (nw, nh), interpolation=interp)
+    c2 = cv2.resize(content.astype(np.uint8) * 255, (nw, nh), interpolation=cv2.INTER_AREA) > 127
+    return l2, c2
+
+
+def _grad_mag(lum: np.ndarray) -> np.ndarray:
+    import cv2
+    l8 = np.clip(lum, 0, 255).astype(np.uint8)
     gx = cv2.Sobel(l8, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(l8, cv2.CV_32F, 0, 1, ksize=3)
-    mag = np.sqrt(gx * gx + gy * gy)
-    lo, hi = band
-    edges = mag > lo               # any real edge
-    if edges.sum() == 0:
+    return np.sqrt(gx * gx + gy * gy)
+
+
+def _pseudo_alpha(arr: np.ndarray, content: np.ndarray) -> np.ndarray:
+    """Alpha-like 0..255 map for an OPAQUE image: colour distance from the
+    border background colour, normalised by the typical distance inside the
+    artwork. Lets the same transition-width maths run on images without alpha."""
+    rgb = arr[:, :, :3].astype(np.float32)
+    border = np.concatenate([rgb[0, :, :], rgb[-1, :, :], rgb[:, 0, :], rgb[:, -1, :]])
+    bg = np.median(border, axis=0)
+    dist = np.linalg.norm(rgb - bg, axis=2)
+    ref = float(np.median(dist[content])) if content.any() else 0.0
+    return np.clip(dist / max(ref, 1.0), 0.0, 1.0) * 255.0
+
+
+def _measure_soft_edges(arr: np.ndarray, has_alpha: bool,
+                        content: np.ndarray | None = None) -> float:
+    """% of the SILHOUETTE edge that is soft (feathered).
+
+    Interior shading, texture and brush strokes are NOT edges and are ignored.
+    Only the content boundary counts: the alpha = 50% contour (for opaque images,
+    a pseudo-alpha from the distance to the background colour). At each boundary
+    pixel the transition width is the distance to the nearest fully-clear pixel
+    plus the distance to the nearest fully-opaque pixel (the two meet at the
+    edge, so this is the width measured perpendicular to it), minus 1. Done at a
+    fixed ~1024 long side so resolution does not matter.
+
+    crisp = width <= 2px (a normal anti-aliased edge is ~1px); soft = width > 3px.
+    Returns the soft share of the boundary, 0..100 (0 if there is no edge)."""
+    import cv2
+    T = THRESHOLDS
+    if has_alpha:
+        a = arr[:, :, 3].astype(np.float32)
+    else:
+        if content is None:
+            content, _ = _content_mask(arr)
+        a = _pseudo_alpha(arr, content)
+    h, w = a.shape
+    s = T["analysis_long_side"] / float(max(h, w))
+    if abs(s - 1.0) > 1e-3:
+        a = cv2.resize(a, (max(1, int(round(w * s))), max(1, int(round(h * s)))),
+                       interpolation=cv2.INTER_AREA if s < 1.0 else cv2.INTER_CUBIC)
+    lo, hi = T["edge_alpha_lo"], T["edge_alpha_hi"]
+
+    inside = a >= 128
+    if not inside.any():
         return 0.0
-    soft = (mag > lo) & (mag < hi)  # present but not crisp
-    return float(soft.sum()) / float(edges.sum()) * 100.0
+    eroded = cv2.erode(inside.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3)))
+    boundary = inside & (eroded == 0)
+    if not boundary.any():
+        return 0.0
+    # Distance to the nearest fully-clear / fully-opaque pixel.
+    d_clear = cv2.distanceTransform((a > lo).astype(np.uint8), cv2.DIST_L2, 5)
+    d_opaque = cv2.distanceTransform((a < hi).astype(np.uint8), cv2.DIST_L2, 5)
+    width = d_clear + d_opaque - 1.0
+    # Boundary pixels with no opaque core anywhere near (hairlines thinner than a
+    # pixel) say nothing about feathering; the stroke check covers those.
+    usable = boundary & (d_opaque <= 16.0)
+    n = int(usable.sum())
+    if n == 0:
+        return 0.0
+    return float((width[usable] > T["edge_soft_px"]).sum()) / n * 100.0
 
 
 def _measure_colours(im: Image.Image, content: np.ndarray, k: int):
@@ -452,35 +563,88 @@ def _measure_colours(im: Image.Image, content: np.ndarray, k: int):
     return int(len(vals)), top
 
 
-def _measure_min_stroke(content: np.ndarray) -> float:
-    """Thinnest continuous run of content, in pixels. Approximated by the
-    distance transform: 2x the maximum inscribed radius of the THINNEST limb is
-    hard, so instead we take the median of local run-lengths across rows and
-    columns of the content and report the small percentile (a robust 'thin')."""
+def _skeleton(cm: np.ndarray, dist: np.ndarray) -> np.ndarray:
+    """Boolean skeleton of a 0/1 mask. Uses cv2.ximgproc.thinning when the
+    contrib build is installed, else the ridge of the distance transform
+    (pixels that are a local maximum of the distance map)."""
+    import cv2
+    try:
+        if hasattr(cv2, "ximgproc"):
+            return cv2.ximgproc.thinning(cm * 255) > 0
+    except Exception:
+        pass
+    ridge = dist >= cv2.dilate(dist, np.ones((3, 3), np.uint8))
+    return ridge & (cm > 0)
+
+
+def _local_thickness(dist: np.ndarray) -> np.ndarray:
+    """Per-pixel local thickness (as an inscribed RADIUS): the largest disc that
+    covers the pixel and fits inside the shape. Computed in ~30 geometric radius
+    levels. Needed because skeleton spurs run into corners, where the raw
+    distance falls toward 1 even though the stroke there is as thick as its
+    neighbours."""
+    import cv2
+    thick = np.zeros_like(dist)
+    dmax = float(dist.max())
+    if dmax <= 0:
+        return thick
+    r = 1.0
+    levels = []
+    while r < dmax:
+        levels.append(r)
+        r = max(r + 0.5, r * 1.3)
+    levels.append(dmax)
+    for r in levels:
+        seeds = (dist >= r - 1e-3)
+        reach = cv2.distanceTransform((~seeds).astype(np.uint8), cv2.DIST_L2, 3) <= r + 0.5
+        thick = np.where(reach, np.maximum(thick, r), thick)
+    return thick
+
+
+def _measure_min_stroke(content: np.ndarray, dpi: float = 300.0) -> float:
+    """Thinnest stroke width in PIXELS (original resolution).
+
+    The 5th percentile of the stroke width along the SKELETON of the content
+    mask. (Taking a percentile of 2*distance over ALL content pixels is always
+    ~1-2px, because every edge pixel is close to an edge.) Width at a skeleton
+    pixel is the local thickness (2*r - 1 px). Components smaller than ~0.5mm
+    square are ignored as specks. Works on a copy capped at 2048px for speed and
+    scales the answer back."""
     import cv2
     cm = content.astype(np.uint8)
     if cm.sum() == 0:
         return 0.0
-    # Distance transform gives, per content pixel, distance to nearest edge.
-    # Stroke width ~= 2 * distance along the skeleton. Use the 20th percentile
-    # of (2*dist) over content as a robust "thin stroke" figure.
-    dist = cv2.distanceTransform(cm, cv2.DIST_L2, 3)
-    d = dist[content]
-    if d.size == 0:
+    h, w = cm.shape
+    s = min(1.0, 2048.0 / max(h, w))
+    if s < 1.0:
+        cm = (cv2.resize(cm * 255, (max(1, int(round(w * s))), max(1, int(round(h * s)))),
+                         interpolation=cv2.INTER_AREA) > 127).astype(np.uint8)
+    # Drop specks smaller than ~0.5mm x 0.5mm at the print DPI.
+    min_area = max(4.0, (THRESHOLDS["stroke_min_comp_mm"] / 25.4 * dpi * s) ** 2)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(cm, connectivity=8)
+    keep = stats[:, cv2.CC_STAT_AREA] >= min_area
+    keep[0] = False
+    if keep.any():
+        cm = keep[labels].astype(np.uint8)
+    dist = cv2.distanceTransform(cm, cv2.DIST_L2, 5)
+    skel = _skeleton(cm, dist)
+    if not skel.any():
+        skel = cm > 0
+    thick = _local_thickness(dist)
+    widths = 2.0 * thick[skel] - 1.0
+    if widths.size == 0:
         return 0.0
-    thin = float(np.percentile(2.0 * d, 5))
+    thin = float(np.percentile(widths, 5)) / s
     return max(thin, 1.0)
 
 
-def _measure_min_feature(content: np.ndarray) -> float:
-    """Height (px) of the smallest text-like / detail feature — a legibility
-    proxy. We take the connected components of content, DROP sub-few-pixel noise
-    (a component must be at least 3px in BOTH dimensions and a handful of pixels
-    in area), then return a LOW PERCENTILE (10th) of the component heights. The
-    percentile — not the raw minimum — is robust to a stray speck, and, when a
-    large shape sits alongside small letters, it reflects the small letters
-    rather than the whole shape. When there is only one real component (e.g. a
-    single logo blob) it returns that component's height."""
+def _measure_min_feature(content: np.ndarray, dpi: float = 300.0) -> float:
+    """Height (px) of the smallest text-like / detail feature - a legibility
+    proxy. Connected components of content are filtered: noise (< 3px in either
+    dimension or a handful of pixels) AND decorative specks (smaller than 1mm in
+    BOTH dimensions at the print DPI) are ignored. Returns the 10th percentile of
+    the surviving component heights, which reflects the small letters without
+    letting a single stray artefact dominate."""
     import cv2
     cm = content.astype(np.uint8)
     n, _labels, stats, _ = cv2.connectedComponentsWithStats(cm, connectivity=8)
@@ -488,6 +652,7 @@ def _measure_min_feature(content: np.ndarray) -> float:
         return 0.0
     MIN_DIM = 3     # a real feature is at least a few px in each direction
     MIN_AREA = 12   # and more than a handful of pixels (drops antialiasing specks)
+    speck_px = THRESHOLDS["feature_speck_mm"] / 25.4 * dpi
     heights = []
     for i in range(1, n):
         h = int(stats[i, cv2.CC_STAT_HEIGHT])
@@ -495,26 +660,27 @@ def _measure_min_feature(content: np.ndarray) -> float:
         area = int(stats[i, cv2.CC_STAT_AREA])
         if h < MIN_DIM or w < MIN_DIM or area < MIN_AREA:
             continue   # noise / antialiasing speck
+        if h < speck_px and w < speck_px:
+            continue   # decorative speck: under 1mm in both dimensions
         heights.append(h)
     if not heights:
         return 0.0
-    # 10th percentile of the surviving component heights = "one of the smallest
-    # real features", without letting a single 1px artefact dominate.
     return float(np.percentile(heights, 10))
 
 
 def _measure_gradients(lum: np.ndarray, content: np.ndarray) -> float:
     """% of content that is smooth tonal transition: low-but-nonzero local
-    gradient magnitude (not flat, not a hard edge)."""
-    import cv2
-    l8 = lum.astype(np.uint8)
-    gx = cv2.Sobel(l8, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(l8, cv2.CV_32F, 0, 1, ksize=3)
-    mag = np.sqrt(gx * gx + gy * gy)
+    gradient magnitude (not flat, not a hard edge). Measured over content pixels
+    on a copy resized to a fixed ~1024 long side."""
     if content.sum() == 0:
         return 0.0
-    smooth = content & (mag > 3) & (mag < 25)   # gentle tonal change
-    return float(smooth.sum()) / float(content.sum()) * 100.0
+    l2, c2 = _analysis_copy(lum, content, THRESHOLDS["analysis_long_side"])
+    n = int(c2.sum())
+    if n == 0:
+        return 0.0
+    mag = _grad_mag(l2)
+    smooth = c2 & (mag > 3) & (mag < 25)   # gentle tonal change
+    return float(smooth.sum()) / float(n) * 100.0
 
 
 def _measure_margins(content: np.ndarray, w: int, h: int):
@@ -553,7 +719,7 @@ def _build_summary(checks: list[dict], score: int, band: str, raw: dict) -> str:
     warnings, then the passing checks, then the key numbers."""
     band_label = {"ready": "PRINT READY", "fixable": "FIXABLE",
                   "not_ready": "NOT READY"}[band]
-    lines = [f"PRINT READY QA — score {score}/100 ({band_label})", ""]
+    lines = [f"PRINT READY QA â€” score {score}/100 ({band_label})", ""]
     order = {"fail": 0, "warn": 1, "pass": 2, "na": 3}
     for c in sorted(checks, key=lambda c: (order.get(c["status"], 4), -c["weight"])):
         tag = c["status"].upper().ljust(4)
@@ -561,12 +727,12 @@ def _build_summary(checks: list[dict], score: int, band: str, raw: dict) -> str:
         if c["threshold_str"] and c["threshold_str"] not in ("informational", "-", "n/a"):
             line += f"  (threshold: {c['threshold_str']})"
         if c["detail"]:
-            line += f"  — {c['detail']}"
+            line += f"  â€” {c['detail']}"
         lines.append(line)
     return "\n".join(lines)
 
 
-# For the ChatGPT prompt: a compact measurements block (no pass/fail verbiage —
+# For the ChatGPT prompt: a compact measurements block (no pass/fail verbiage â€”
 # the printer judges those; we just give the numbers).
 def measurements_for_prompt(report: dict) -> str:
     """Format the report's raw measurements as a readable block for

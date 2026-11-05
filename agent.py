@@ -2442,13 +2442,51 @@ def _photocraft_print_ready_step(page: Any, job: dict[str, Any], input_path: str
     return out_bytes, pr_info
 
 
-def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
-    """Print Ready via PhotoCraft (standalone workflow). Thin wrapper around the
-    shared _photocraft_print_ready_step: open the chat, run the step on the
-    uploaded artwork, save + upload the result PNG and its summary. The
-    server-precomputed 13-check report, if present, is left on the job for
-    display."""
+def _printready_qa_turn(page: Any, job: dict[str, Any], image_path: str,
+                        report: dict) -> None:
+    """The Print Ready QA text turn (exactly the pre-1.19.0 behaviour): send the
+    artwork plus the SERVER-measured 13-check report with PRINTREADY_REVIEW
+    (Decoinks AIS.PRINTREADY.REVIEW) and store the printer's written judgement in
+    job['printready_assessment']. No PhotoCraft, no plugin selection."""
     job_id = job["id"]
+    job["stage_label"] = "Getting the printer's assessment"
+    measurements_block = _printready_measurements_block(report)
+    review_template = _tpl(job, "PRINTREADY_REVIEW", PRINTREADY_REVIEW)
+    try:
+        review_prompt = review_template.format(measurements=measurements_block)
+    except (KeyError, IndexError):
+        review_prompt = review_template.replace("{measurements}", measurements_block)
+    job.setdefault("prompts", []).append(review_prompt)
+    print(f"[printready] review prompt SENT ({len(review_prompt)} chars).")
+
+    _track_start(job)
+    assessment = send_text_turn(page, prompt=review_prompt,
+                                image_paths=[image_path],
+                                run_id=f"{job_id}_printready")
+    _track_end(job)
+    _rename_chat_once(page, job)
+
+    assessment = (assessment or "").strip()
+    job["printready_assessment"] = assessment
+    print(f"[printready] assessment stored ({len(assessment)} chars).")
+
+
+def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
+    """Print Ready QA, with an optional PhotoCraft print-ready step.
+
+    * pr_via_photocraft OFF -> the ORIGINAL QA flow only: the server-measured
+      report + ONE ChatGPT text turn (PRINTREADY_REVIEW). PhotoCraft is never
+      selected and nothing PhotoCraft-related is logged.
+    * pr_via_photocraft ON  -> the same QA flow FIRST, then the PhotoCraft
+      print-ready step (_photocraft_print_ready_step) in the SAME chat. Both
+      results are stored for display.
+
+    The server-measured report is required for the QA turn. With PhotoCraft OFF
+    the QA is the whole job, so a missing report FAILS it (as before 1.19.0).
+    With PhotoCraft ON it is soft: the QA turn is skipped with a warning and the
+    PhotoCraft step still runs."""
+    job_id = job["id"]
+    via_photocraft = bool(job.get("pr_via_photocraft"))
     artwork_file = job.get("artwork_files", [""])[0]
     current_image_path = str(INPUT_DIR / artwork_file)
     if not artwork_file or not Path(current_image_path).exists():
@@ -2457,7 +2495,19 @@ def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
         job["finished_at"] = time.time()
         return
 
+    report = job.get("printready_measurements") or job.get("printready_report")
+    if not report and not via_photocraft:
+        reason = job.get("printready_error") or (
+            "No server-side print-readiness measurements were attached to the job. "
+            "The local measurement (src/printready.py) did not run on the server.")
+        print(f"[printready] FAILING job - {reason}")
+        job["status"] = "failed"
+        job["error"] = reason
+        job["finished_at"] = time.time()
+        return
+
     job["printready_original_file"] = Path(current_image_path).name
+    print(f"[printready] mode: {'QA + PhotoCraft print-ready' if via_photocraft else 'QA only (PhotoCraft off)'}")
 
     # Open the chat in this workflow's project (falls back to plain chat).
     _track_start(job)
@@ -2465,32 +2515,41 @@ def _run_printready_workflow(page: Any, job: dict[str, Any]) -> None:
     _track_end(job)
 
     job["stage"] = 1
-    job["stage_label"] = "Making it print-ready with PhotoCraft"
+    # --- 1. QA (always) ---
+    if report:
+        _printready_qa_turn(page, job, current_image_path, report)
+    else:
+        print("[printready] no server measurements - skipping the QA turn "
+              "(PhotoCraft step still runs)")
 
-    try:
-        out_bytes, pr_info = _photocraft_print_ready_step(
-            page, job, current_image_path, run_id=f"{job_id}_printready")
-    except Exception as exc:
-        _track_end(job)
-        print(f"[printready] failed: {exc}")
-        job["status"] = "failed"
-        job["error"] = str(exc)
-        job["finished_at"] = time.time()
-        return
+    # --- 2. PhotoCraft print-ready step (only when ticked), same chat ---
+    if via_photocraft:
+        job["stage"] = 2
+        job["stage_label"] = "Making it print-ready with PhotoCraft"
+        try:
+            out_bytes, pr_info = _photocraft_print_ready_step(
+                page, job, current_image_path, run_id=f"{job_id}_printready")
+        except Exception as exc:
+            _track_end(job)
+            print(f"[printready] PhotoCraft step failed: {exc}")
+            job["status"] = "failed"
+            job["error"] = str(exc)
+            job["finished_at"] = time.time()
+            return
 
-    final_name = f"{job_id}_printready.png"
-    (OUTPUT_DIR / final_name).write_bytes(out_bytes)
-    job.setdefault("stage_images", {})["final"] = final_name
-    job["final_names"] = [final_name]
-    _mark_uploaded(job, _upload_files(job_id, [final_name]))
+        final_name = f"{job_id}_printready.png"
+        (OUTPUT_DIR / final_name).write_bytes(out_bytes)
+        job.setdefault("stage_images", {})["final"] = final_name
+        job["final_names"] = [final_name]
+        _mark_uploaded(job, _upload_files(job_id, [final_name]))
 
-    job["printready_summary"] = pr_info["summary"]
-    job["printready_target"] = {
-        "width_in": pr_info["width_in"], "height_in": pr_info["height_in"],
-        "dpi": pr_info["dpi"], "width_px": pr_info["to_size"][0],
-        "height_px": pr_info["to_size"][1],
-        "alpha_threshold": int(job.get("pr_alpha_threshold") or 120),
-    }
+        job["printready_summary"] = pr_info["summary"]
+        job["printready_target"] = {
+            "width_in": pr_info["width_in"], "height_in": pr_info["height_in"],
+            "dpi": pr_info["dpi"], "width_px": pr_info["to_size"][0],
+            "height_px": pr_info["to_size"][1],
+            "alpha_threshold": int(job.get("pr_alpha_threshold") or 120),
+        }
 
     job["status"] = "done"
     job["awaiting_input"] = False
