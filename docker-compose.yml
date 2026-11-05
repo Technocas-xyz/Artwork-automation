@@ -9,6 +9,9 @@ services:
       # so the container's QA key config is visible without reading .env.
       - QA_API_KEYS=${QA_API_KEYS:-}
       - QA_API_RATE_PER_MIN=${QA_API_RATE_PER_MIN:-60}
+      # image_url fetching is OFF by default (SSRF); CORS origins empty = off.
+      - QA_API_ALLOW_URL=${QA_API_ALLOW_URL:-false}
+      - QA_API_CORS_ORIGINS=${QA_API_CORS_ORIGINS:-}
     shm_size: '1gb'
     ports:
       # nginx owns 4400 now: it is the authentik gate for the web UI and the

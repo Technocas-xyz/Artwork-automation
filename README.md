@@ -32,6 +32,20 @@ to 300 when the file has none) and `assessment` (bool, default false).
 Limits: 25 MB per image, 12000 px per side. A bad or unsupported image returns
 `400` with a clear message.
 
+`image_url` is **disabled by default** (a caller-supplied URL is an SSRF risk).
+Enable it with `QA_API_ALLOW_URL=true`; even then only `http`/`https` is allowed,
+each request and redirect hop is resolved, and any host that maps to a loopback,
+private, link-local or cloud-metadata address (e.g. `169.254.169.254`) is
+refused. The fetch has a 10s timeout, follows at most 3 redirects, and is capped
+at 25 MB. Prefer `file` or `image_base64` where possible.
+
+### CORS
+
+Browser (cross-origin) access is off unless `QA_API_CORS_ORIGINS` is set
+(comma-separated origins). When set, those origins may call `/api/v1/qa/*` with
+methods `GET`/`POST`/`OPTIONS` and the `X-API-Key` header. CORS is scoped to the
+QA API only; the rest of the app emits no CORS headers.
+
 ```bash
 curl -X POST https://<server>/api/v1/qa/print-ready \
      -H "X-API-Key: <key>" \

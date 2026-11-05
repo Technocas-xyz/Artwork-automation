@@ -29,7 +29,10 @@ from typing import Any
 
 import base64 as _base64
 import binascii
-from urllib.request import Request as _UrlRequest, urlopen
+import ipaddress
+import socket
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import Request as _UrlRequest, urlopen, build_opener, HTTPRedirectHandler
 from urllib.error import URLError
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Request, Response
@@ -210,7 +213,37 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return RedirectResponse("/login", status_code=302)
 
 
+class QACorsMiddleware(BaseHTTPMiddleware):
+    """Scoped CORS for the public QA API ONLY (/api/v1/qa/*). Origins come from
+    QA_API_CORS_ORIGINS (empty = disabled, no CORS headers emitted). It answers
+    the preflight OPTIONS and adds the allow-origin header to actual responses,
+    exposing only GET/POST/OPTIONS and the X-API-Key header. The rest of the app
+    gets no CORS headers from here."""
+    async def dispatch(self, request: Request, call_next):
+        origins = QA_API_CORS_ORIGINS
+        path = request.url.path
+        origin = request.headers.get("origin", "")
+        scoped = path.startswith("/api/v1/qa/")
+        allow = scoped and bool(origins) and origin in origins
+
+        if scoped and request.method == "OPTIONS" and allow:
+            resp = Response(status_code=204)
+        else:
+            resp = await call_next(request)
+        if allow:
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Vary"] = "Origin"
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            resp.headers["Access-Control-Allow-Headers"] = "X-API-Key, Content-Type"
+            resp.headers["Access-Control-Max-Age"] = "600"
+        return resp
+
+
+# Order matters: the LAST added middleware runs FIRST. CORS must run before
+# Auth so an OPTIONS preflight (which carries no API key) is answered here and
+# never reaches the per-endpoint key check.
 app.add_middleware(AuthMiddleware)
+app.add_middleware(QACorsMiddleware)
 
 # Seed the admin account from .env on first run so nobody is locked out during
 # the move to multi-user login. Idempotent once any user exists.
@@ -4829,6 +4862,14 @@ QA_API_KEYS = {k.strip() for k in os.environ.get("QA_API_KEYS", "").split(",") i
 QA_MAX_BYTES = 25 * 1024 * 1024          # 25 MB upload cap
 QA_MAX_SIDE = 12_000                     # pixels per side
 QA_RATE_PER_MIN = int(os.environ.get("QA_API_RATE_PER_MIN", "60") or 60)
+# image_url fetching is DISABLED by default (an attacker-supplied URL is an SSRF
+# vector). Set QA_API_ALLOW_URL=true to enable it; even then every hop is
+# resolved and private/loopback/link-local/metadata targets are refused.
+QA_API_ALLOW_URL = (os.environ.get("QA_API_ALLOW_URL", "") or "").strip().lower() in ("1", "true", "yes", "on")
+QA_URL_TIMEOUT = 10.0                    # seconds per connect/read on image_url
+QA_URL_MAX_REDIRECTS = 3
+# Origins allowed to call /api/v1/qa/* from a browser (CORS). Empty = disabled.
+QA_API_CORS_ORIGINS = [o.strip() for o in os.environ.get("QA_API_CORS_ORIGINS", "").split(",") if o.strip()]
 
 # Per-key sliding-window (60s) call timestamps for rate limiting.
 _qa_rate: dict[str, deque] = {}
@@ -4863,22 +4904,97 @@ class QAPrintReadyJSON(BaseModel):
     assessment: bool = False
 
 
-def _qa_fetch_url(url: str) -> bytes:
-    """Fetch image bytes from an http(s) URL with the size cap enforced while
-    reading (so a huge or lying Content-Length can't blow up memory). 400 on any
-    problem."""
-    u = (url or "").strip()
-    if not (u.startswith("http://") or u.startswith("https://")):
-        raise HTTPException(status_code=400, detail="image_url must be an http(s) URL.")
+def _qa_ip_is_blocked(ip: str) -> bool:
+    """True if an IP must not be fetched: loopback, private (RFC1918/ULA),
+    link-local (incl. 169.254.x and the cloud metadata address 169.254.169.254),
+    multicast, reserved/unspecified. Anything that is not a normal public
+    address is refused."""
     try:
-        req = _UrlRequest(u, headers={"User-Agent": "artwork-qa/1.0"})
-        with urlopen(req, timeout=20) as resp:  # noqa: S310 (scheme checked above)
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return (addr.is_private or addr.is_loopback or addr.is_link_local
+            or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
+
+
+def _qa_resolve_public(host: str) -> None:
+    """Resolve `host` and raise 400 if ANY resolved address is a blocked
+    (internal) target. Resolving here and blocking every A/AAAA record stops a
+    hostname that points at an internal IP (DNS-rebinding-style SSRF)."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        raise HTTPException(status_code=400, detail=f"Could not resolve image_url host {host!r}.")
+    for info in infos:
+        ip = info[4][0]
+        if _qa_ip_is_blocked(ip):
+            raise HTTPException(status_code=400,
+                detail="image_url resolves to a private or internal address, which is not allowed.")
+
+
+class _QANoRedirect(HTTPRedirectHandler):
+    """A urllib redirect handler that never auto-follows, so _qa_fetch_url can
+    re-validate each redirect target's host itself (auto-follow would let a
+    redirect to an internal address bypass the SSRF check)."""
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def _qa_url_opener():
+    return build_opener(_QANoRedirect)
+
+
+def _qa_fetch_url(url: str) -> bytes:
+    """Fetch image bytes from an http(s) URL, guarding against SSRF.
+
+    * Disabled unless QA_API_ALLOW_URL is set.
+    * http/https only.
+    * The host of EVERY hop (initial + each redirect) is resolved and refused if
+      it maps to a loopback/private/link-local/metadata address.
+    * Redirects are followed manually (up to QA_URL_MAX_REDIRECTS) so a redirect
+      to a blocked host cannot slip through urllib's auto-follow.
+    * 10s timeout and the 25 MB cap enforced while streaming.
+    Raises 400 with a clear message on any problem."""
+    if not QA_API_ALLOW_URL:
+        raise HTTPException(status_code=400,
+            detail="Fetching image_url is disabled on this server. Send the image as 'file' or 'image_base64'.")
+    current = (url or "").strip()
+    for _hop in range(QA_URL_MAX_REDIRECTS + 1):
+        parts = urlsplit(current)
+        if parts.scheme not in ("http", "https"):
+            raise HTTPException(status_code=400, detail="image_url must be an http(s) URL.")
+        host = parts.hostname
+        if not host:
+            raise HTTPException(status_code=400, detail="image_url has no host.")
+        _qa_resolve_public(host)
+        try:
+            req = _UrlRequest(current, headers={"User-Agent": "artwork-qa/1.0"},
+                              method="GET")
+            resp = _qa_url_opener().open(req, timeout=QA_URL_TIMEOUT)  # noqa: S310 (scheme + host checked)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # A 3xx with our no-redirect handler surfaces as HTTPError (has .headers).
+            loc = getattr(exc, "headers", None)
+            code = getattr(exc, "code", None)
+            if code and 300 <= code < 400 and loc is not None:
+                nxt = loc.get("Location")
+                if not nxt:
+                    raise HTTPException(status_code=400, detail="image_url redirect had no target.")
+                # Resolve relative redirects against the current URL.
+                current = urlunsplit(urlsplit(nxt)) if urlsplit(nxt).scheme else \
+                    urlunsplit(parts._replace(path=nxt)) if nxt.startswith("/") else nxt
+                continue
+            raise HTTPException(status_code=400, detail=f"Could not fetch image_url: {exc}")
+        try:
             data = resp.read(QA_MAX_BYTES + 1)
-    except (URLError, ValueError, OSError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not fetch image_url: {exc}")
-    if len(data) > QA_MAX_BYTES:
-        raise HTTPException(status_code=400, detail=f"Image exceeds the {QA_MAX_BYTES // (1024*1024)} MB limit.")
-    return data
+        finally:
+            resp.close()
+        if len(data) > QA_MAX_BYTES:
+            raise HTTPException(status_code=400,
+                detail=f"Image exceeds the {QA_MAX_BYTES // (1024*1024)} MB limit.")
+        return data
+    raise HTTPException(status_code=400, detail="image_url has too many redirects.")
 
 
 def _qa_decode_image(data: bytes) -> dict:

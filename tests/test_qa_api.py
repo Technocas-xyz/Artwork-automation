@@ -13,8 +13,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-# Keys must exist BEFORE app is imported (QA_API_KEYS is read at import time).
+# Keys + CORS must exist BEFORE app is imported (read at import time).
 os.environ["QA_API_KEYS"] = "test-key-123, other-key"
+os.environ["QA_API_CORS_ORIGINS"] = "https://app.example.com, https://ok.example"
+os.environ.setdefault("QA_API_ALLOW_URL", "false")
 
 from PIL import Image, ImageDraw  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -155,6 +157,71 @@ finally:
             f.unlink()
         except OSError:
             pass
+
+# --- image_url SSRF guarding ------------------------------------------------
+# Disabled by default.
+r = client.post(URL, json={"image_url": "https://example.com/x.png"}, headers=KEY)
+check("image_url disabled by default -> 400", r.status_code == 400
+      and "disabled" in r.json().get("detail", "").lower(), r.json().get("detail", ""))
+
+# Enable it and check the IP/host guards (no real network needed).
+check("loopback IP blocked", server._qa_ip_is_blocked("127.0.0.1"))
+check("private 10.x blocked", server._qa_ip_is_blocked("10.1.2.3"))
+check("private 192.168.x blocked", server._qa_ip_is_blocked("192.168.0.9"))
+check("link-local 169.254.x blocked", server._qa_ip_is_blocked("169.254.1.1"))
+check("cloud metadata IP blocked", server._qa_ip_is_blocked("169.254.169.254"))
+check("IPv6 loopback blocked", server._qa_ip_is_blocked("::1"))
+check("public IP allowed", not server._qa_ip_is_blocked("8.8.8.8"))
+
+_orig_allow = server.QA_API_ALLOW_URL
+server.QA_API_ALLOW_URL = True
+try:
+    r = client.post(URL, json={"image_url": "ftp://example.com/x.png"}, headers=KEY)
+    check("non-http scheme -> 400", r.status_code == 400, str(r.status_code))
+    r = client.post(URL, json={"image_url": "http://127.0.0.1/x.png"}, headers=KEY)
+    check("loopback host -> 400", r.status_code == 400
+          and "private or internal" in r.json().get("detail", "").lower(), r.json().get("detail", ""))
+    r = client.post(URL, json={"image_url": "http://169.254.169.254/latest/meta-data/"}, headers=KEY)
+    check("metadata host -> 400", r.status_code == 400, str(r.status_code))
+    # A hostname resolving to a private IP is refused (stub DNS).
+    _orig_gai = server.socket.getaddrinfo
+    server.socket.getaddrinfo = lambda host, *a, **k: [(2, 1, 6, "", ("10.0.0.5", 0))]
+    try:
+        r = client.post(URL, json={"image_url": "http://evil.example/x.png"}, headers=KEY)
+        check("host resolving to private IP -> 400", r.status_code == 400
+              and "private or internal" in r.json().get("detail", "").lower(), r.json().get("detail", ""))
+    finally:
+        server.socket.getaddrinfo = _orig_gai
+finally:
+    server.QA_API_ALLOW_URL = _orig_allow
+
+# --- CORS (scoped to /api/v1/qa/*) -----------------------------------------
+# Preflight from an allowed origin on the QA endpoint.
+r = client.options(URL, headers={"Origin": "https://app.example.com",
+                                 "Access-Control-Request-Method": "POST"})
+check("CORS preflight allowed origin -> 204/200", r.status_code in (200, 204), str(r.status_code))
+check("CORS preflight echoes origin",
+      r.headers.get("access-control-allow-origin") == "https://app.example.com",
+      r.headers.get("access-control-allow-origin", ""))
+check("CORS preflight allows X-API-Key",
+      "x-api-key" in (r.headers.get("access-control-allow-headers", "").lower()))
+check("CORS preflight methods GET/POST/OPTIONS",
+      "POST" in r.headers.get("access-control-allow-methods", ""))
+# Disallowed origin: no CORS header.
+r = client.options(URL, headers={"Origin": "https://evil.example",
+                                 "Access-Control-Request-Method": "POST"})
+check("CORS disallowed origin -> no allow-origin header",
+      r.headers.get("access-control-allow-origin") is None)
+# Actual POST from an allowed origin carries the header.
+r = client.post(URL, files={"file": ("d.png", png, "image/png")}, data={"dpi": "300"},
+                headers={**KEY, "Origin": "https://ok.example"})
+check("CORS on real response for allowed origin",
+      r.headers.get("access-control-allow-origin") == "https://ok.example", str(r.status_code))
+# CORS must NOT leak onto the rest of the app.
+r = client.options("/api/options", headers={"Origin": "https://app.example.com",
+                                             "Access-Control-Request-Method": "GET"})
+check("CORS not applied outside /api/v1/qa",
+      r.headers.get("access-control-allow-origin") is None, str(r.status_code))
 
 print("RESULT: " + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"))
 sys.exit(1 if FAILS else 0)
