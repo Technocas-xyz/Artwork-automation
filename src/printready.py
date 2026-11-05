@@ -327,14 +327,14 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
 
     # 8. MINIMUM STROKE WIDTH (px + mm) -------------------------------------
     try:
-        stroke_px = _measure_min_stroke(content, dpi, lum=lum)
+        stroke_px = _measure_min_stroke(content, dpi)
         stroke_mm = _px_to_mm(stroke_px, dpi)
         raw.update(min_stroke_px=round(stroke_px, 1), min_stroke_mm=round(stroke_mm, 2))
         st = _status_low_bad(stroke_mm, T["min_stroke_mm"]["warn"], T["min_stroke_mm"]["fail"])
         add("min_stroke", "Minimum stroke width", round(stroke_mm, 2),
             f"{stroke_mm:.2f} mm ({stroke_px:.0f}px)", "mm",
             f"warn <{T['min_stroke_mm']['warn']}mm, fail <{T['min_stroke_mm']['fail']}mm", st,
-            T["min_stroke_mm"]["weight"], "thinnest stroke (silhouette or inner detail)")
+            T["min_stroke_mm"]["weight"], "thinnest continuous content run")
     except Exception as exc:
         logger.info("printready: stroke measure failed (%s)", exc)
         add("min_stroke", "Minimum stroke width", 0.0, "could not measure", "mm", "-", "warn",
@@ -342,14 +342,14 @@ def measure_print_ready(image_bytes: bytes, dpi_override: float | None = None,
 
     # 9. SMALLEST TEXT-LIKE FEATURE HEIGHT (mm) -----------------------------
     try:
-        feat_px = _measure_min_feature(content, dpi, lum=lum)
+        feat_px = _measure_min_feature(content, dpi)
         feat_mm = _px_to_mm(feat_px, dpi)
         raw.update(min_feature_px=round(feat_px, 1), min_feature_mm=round(feat_mm, 2))
         st = _status_low_bad(feat_mm, T["min_feature_mm"]["warn"], T["min_feature_mm"]["fail"])
         add("min_feature", "Smallest feature height", round(feat_mm, 2),
             f"{feat_mm:.2f} mm ({feat_px:.0f}px)", "mm",
             f"warn <{T['min_feature_mm']['warn']}mm, fail <{T['min_feature_mm']['fail']}mm", st,
-            T["min_feature_mm"]["weight"], "smallest text/detail (silhouette or inner detail)")
+            T["min_feature_mm"]["weight"], "legibility proxy for small text/detail")
     except Exception as exc:
         logger.info("printready: feature measure failed (%s)", exc)
         add("min_feature", "Smallest feature height", 0.0, "could not measure", "mm", "-", "warn",
@@ -563,76 +563,6 @@ def _measure_colours(im: Image.Image, content: np.ndarray, k: int):
     return int(len(vals)), top
 
 
-def _internal_detail_mask(lum: np.ndarray, content: np.ndarray,
-                          filled: bool = True) -> np.ndarray:
-    """Binary mask (uint8 0/1) of the INTERNAL structure inside a solid content
-    region: luminance strokes/text the alpha mask alone cannot see.
-
-    A design is often ONE big opaque shape (e.g. a filled badge) with thin text
-    and lines drawn ON it. The alpha content mask is then a single blob, so the
-    stroke/feature checks only measure the outer silhouette and miss the thin
-    inner detail. We recover that detail from the luminance channel, restricted
-    to the content (eroded 1px so the outer silhouette edge is not re-counted):
-
-      * `filled=True` (stroke width): the actual MARKS — an adaptive-threshold
-        split of both polarities, kept only where near a luminance edge, so the
-        returned region is the FILLED stroke (its skeleton thickness is the real
-        stroke width). Canny alone would return 1px edge rails and understate the
-        width, so it is only used to localise, not as the mask itself.
-      * `filled=False` (feature size): the above PLUS the dilated Canny edges, so
-        a hollow/outline mark still forms a measurable component.
-
-    Returns all-zeros when there is no meaningful internal structure. Never
-    raises."""
-    import cv2
-    if content.sum() == 0:
-        return np.zeros(content.shape, dtype=np.uint8)
-    l8 = np.clip(lum, 0, 255).astype(np.uint8)
-    # Erode the content enough to clear the anti-aliased silhouette ring, which
-    # otherwise leaks in as a 1px "stroke". Scales a little with resolution.
-    erode_r = max(3, int(round(max(lum.shape) / 600.0)))
-    inner = cv2.erode(content.astype(np.uint8),
-                      cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * erode_r + 1, 2 * erode_r + 1)))
-    if inner.sum() == 0:
-        inner = content.astype(np.uint8)
-    inner_b = inner > 0
-    n_inner = int(inner_b.sum())
-    if n_inner == 0:
-        return np.zeros(content.shape, dtype=np.uint8)
-
-    # Segment the interior into tonal regions by quantising luminance into bands.
-    # The artwork's own fill is the dominant band; every OTHER band is a "mark"
-    # (text / line / detail drawn on the fill), whatever its colour. This handles
-    # light-on-dark and dark-on-light alike, and a thick mark stays thick while a
-    # thin line stays thin — unlike a near-edge ring, which would understate a
-    # thick block. Only the inner (silhouette-cleared) region is considered.
-    band = (l8.astype(np.int32) // 32)        # 8 tonal bands
-    vals = band[inner_b]
-    # Dominant band = the artwork fill; everything else inside is a mark.
-    counts = np.bincount(vals.ravel(), minlength=8)
-    dominant = int(np.argmax(counts))
-    marks = inner_b & (band != dominant)
-    # A second, adjacent band is usually just the fill's anti-aliasing/shading,
-    # not a separate mark; drop a band that is merely one step from dominant AND
-    # large, so soft tonal variation in the fill is not read as strokes.
-    for adj in (dominant - 1, dominant + 1):
-        if 0 <= adj < 8 and counts[adj] > 0.15 * n_inner:
-            marks &= (band != adj)
-
-    marks = marks.astype(np.uint8)
-    # Opening removes 1px slivers (residual AA) so a genuine >=2px mark survives
-    # but a hairline artefact does not.
-    marks = cv2.morphologyEx(marks, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
-
-    detail = marks.astype(bool)
-    if not filled:
-        # For feature SIZE, also take the luminance edges so an outline-only mark
-        # (no tonal fill difference) still forms a measurable component.
-        canny = cv2.Canny(cv2.GaussianBlur(l8, (3, 3), 0), 60, 160)
-        detail = detail | ((cv2.dilate(canny, np.ones((2, 2), np.uint8)) > 0) & inner_b)
-    return detail.astype(np.uint8)
-
-
 def _skeleton(cm: np.ndarray, dist: np.ndarray) -> np.ndarray:
     """Boolean skeleton of a 0/1 mask. Uses cv2.ximgproc.thinning when the
     contrib build is installed, else the ridge of the distance transform
@@ -671,12 +601,17 @@ def _local_thickness(dist: np.ndarray) -> np.ndarray:
     return thick
 
 
-def _stroke_of_mask(mask: np.ndarray, dpi: float) -> float:
-    """5th-percentile stroke width (px, original resolution) of ONE binary mask,
-    or 0 when the mask has no qualifying content. Shared by the content-mask and
-    internal-detail stroke measurements so both use identical maths."""
+def _measure_min_stroke(content: np.ndarray, dpi: float = 300.0) -> float:
+    """Thinnest stroke width in PIXELS (original resolution).
+
+    The 5th percentile of the stroke width along the SKELETON of the content
+    mask. (Taking a percentile of 2*distance over ALL content pixels is always
+    ~1-2px, because every edge pixel is close to an edge.) Width at a skeleton
+    pixel is the local thickness (2*r - 1 px). Components smaller than ~0.5mm
+    square are ignored as specks. Works on a copy capped at 2048px for speed and
+    scales the answer back."""
     import cv2
-    cm = mask.astype(np.uint8)
+    cm = content.astype(np.uint8)
     if cm.sum() == 0:
         return 0.0
     h, w = cm.shape
@@ -691,8 +626,6 @@ def _stroke_of_mask(mask: np.ndarray, dpi: float) -> float:
     keep[0] = False
     if keep.any():
         cm = keep[labels].astype(np.uint8)
-    if cm.sum() == 0:
-        return 0.0
     dist = cv2.distanceTransform(cm, cv2.DIST_L2, 5)
     skel = _skeleton(cm, dist)
     if not skel.any():
@@ -705,33 +638,15 @@ def _stroke_of_mask(mask: np.ndarray, dpi: float) -> float:
     return max(thin, 1.0)
 
 
-def _measure_min_stroke(content: np.ndarray, dpi: float = 300.0,
-                        lum: np.ndarray | None = None) -> float:
-    """Thinnest stroke width in PIXELS (original resolution).
-
-    Measured on TWO masks and reported as the thinner of the two:
-      1. the alpha content mask (the outer silhouette), and
-      2. the INTERNAL detail inside that content (luminance edges/strokes), when
-         `lum` is given — so thin text/lines drawn on one big solid shape are
-         caught even though the alpha mask is a single blob.
-    Width is the 5th percentile of the local stroke thickness along each mask's
-    skeleton; sub-0.5mm specks are dropped. See _stroke_of_mask."""
-    outer = _stroke_of_mask(content, dpi)
-    best = outer
-    if lum is not None:
-        detail = _internal_detail_mask(lum, content, filled=True)
-        inner = _stroke_of_mask(detail, dpi)
-        if inner > 0 and (best == 0 or inner < best):
-            best = inner
-    return best
-
-
-def _feature_of_mask(mask: np.ndarray, dpi: float) -> float:
-    """10th-percentile component height (px) of ONE binary mask after dropping
-    noise and sub-1mm specks, or 0 when nothing qualifies. Shared by the
-    content-mask and internal-detail feature measurements."""
+def _measure_min_feature(content: np.ndarray, dpi: float = 300.0) -> float:
+    """Height (px) of the smallest text-like / detail feature - a legibility
+    proxy. Connected components of content are filtered: noise (< 3px in either
+    dimension or a handful of pixels) AND decorative specks (smaller than 1mm in
+    BOTH dimensions at the print DPI) are ignored. Returns the 10th percentile of
+    the surviving component heights, which reflects the small letters without
+    letting a single stray artefact dominate."""
     import cv2
-    cm = mask.astype(np.uint8)
+    cm = content.astype(np.uint8)
     n, _labels, stats, _ = cv2.connectedComponentsWithStats(cm, connectivity=8)
     if n <= 1:
         return 0.0
@@ -751,29 +666,6 @@ def _feature_of_mask(mask: np.ndarray, dpi: float) -> float:
     if not heights:
         return 0.0
     return float(np.percentile(heights, 10))
-
-
-def _measure_min_feature(content: np.ndarray, dpi: float = 300.0,
-                         lum: np.ndarray | None = None) -> float:
-    """Height (px) of the smallest text-like / detail feature - a legibility
-    proxy, reported as the smaller of:
-      1. the content mask's components, and
-      2. the INTERNAL detail components (luminance edges inside the content),
-         when `lum` is given — so small text ON a large solid shape is measured
-         even though the whole shape is one alpha component.
-    Each uses the same speck/noise filters; see _feature_of_mask."""
-    outer = _feature_of_mask(content, dpi)
-    best = outer
-    if lum is not None:
-        detail = _internal_detail_mask(lum, content, filled=False)
-        # Close 1px gaps so a dashed/aliased stroke forms one component, then
-        # measure its components' heights.
-        import cv2
-        detail = cv2.morphologyEx(detail, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-        inner = _feature_of_mask(detail, dpi)
-        if inner > 0 and (best == 0 or inner < best):
-            best = inner
-    return best
 
 
 def _measure_gradients(lum: np.ndarray, content: np.ndarray) -> float:

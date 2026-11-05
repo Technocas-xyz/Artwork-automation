@@ -15,8 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import numpy as np
 from PIL import Image, ImageDraw
 
-from src.printready import (measure_print_ready, _status_low_bad,
-                            _measure_min_stroke, _measure_min_feature)
+from src.printready import measure_print_ready, _status_low_bad, _measure_min_stroke
 
 FAILS: list[str] = []
 
@@ -196,53 +195,6 @@ c = by_id(measure_print_ready(png(feathered(text, 1.5)), dpi_override=300))["sof
 check("1.5px ramp (normal anti-alias) -> pass", c["status"] == "pass", c["value_str"])
 c = by_id(measure_print_ready(png(art), dpi_override=300))["soft_edges"]
 check("clean art -> pass", c["status"] == "pass", c["value_str"])
-
-# --- stroke/feature must see INTERNAL detail on one big solid shape ---------
-# The reported bug: a single large opaque shape (one alpha component) with thin
-# text/lines drawn on it. The alpha mask alone gives a huge stroke/feature; the
-# luminance-based inner detail must surface the thin parts.
-def badge(size=(2250, 1764), *, lines_px=6, bar_w=12, bar_h=60, inner=True):
-    W, H = size
-    im = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    d.ellipse((120, 120, W - 120, H - 120), fill=(40, 60, 150, 255))   # big solid fill
-    if inner:
-        for i in range(8):                                            # thin light lines
-            y = 400 + i * 110
-            d.line((500, y, W - 500, y), fill=(240, 240, 240, 255), width=lines_px)
-        for i in range(10):                                           # small light bars (text-like)
-            x = 500 + i * 120
-            d.rectangle((x, 1300, x + bar_w, 1300 + bar_h), fill=(250, 250, 250, 255))
-    b = io.BytesIO(); im.save(b, "PNG", dpi=(300, 300))
-    return b.getvalue()
-
-cb = by_id(measure_print_ready(badge(inner=True), dpi_override=300))
-check("big shape + thin inner detail: stroke reports the thin lines (<2mm)",
-      cb["min_stroke"]["status"] in ("warn", "fail") and cb["min_stroke"]["value"] < 2.0,
-      cb["min_stroke"]["value_str"])
-check("big shape + thin inner detail: feature reports the small bars (<3mm)",
-      cb["min_feature"]["status"] in ("warn", "fail") and cb["min_feature"]["value"] < 3.0,
-      cb["min_feature"]["value_str"])
-
-# No inner detail -> the thin-detail path must NOT invent a thin stroke; the
-# solid silhouette is large and must pass.
-cs = by_id(measure_print_ready(badge(inner=False), dpi_override=300))
-check("big solid shape, no inner detail: stroke stays large (pass)",
-      cs["min_stroke"]["status"] == "pass" and cs["min_stroke"]["value"] > 10.0,
-      cs["min_stroke"]["value_str"])
-check("big solid shape, no inner detail: feature stays large (pass)",
-      cs["min_feature"]["status"] == "pass", cs["min_feature"]["value_str"])
-
-# A big shape with a THICK inner mark must measure the mark's real thickness,
-# not its edge (no false thin-stroke flag).
-thick = io.BytesIO()
-_im = Image.new("RGBA", (2250, 1764), (0, 0, 0, 0)); _d = ImageDraw.Draw(_im)
-_d.ellipse((120, 120, 2130, 1644), fill=(40, 60, 150, 255))
-_d.rectangle((400, 700, 1850, 1100), fill=(250, 250, 250, 255))   # 400px-thick mark
-_im.save(thick, "PNG", dpi=(300, 300))
-ct = by_id(measure_print_ready(thick.getvalue(), dpi_override=300))["min_stroke"]
-check("thick inner mark: stroke is large (not its edge)",
-      ct["status"] == "pass" and ct["value"] > 10.0, ct["value_str"])
 
 print("RESULT: " + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"))
 sys.exit(1 if FAILS else 0)
