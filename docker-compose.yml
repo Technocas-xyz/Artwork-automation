@@ -4,6 +4,11 @@ services:
     container_name: artwork_automation
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Public Print Ready QA API. Set these in .env (loaded above); listed here
+      # so the container's QA key config is visible without reading .env.
+      - QA_API_KEYS=${QA_API_KEYS:-}
+      - QA_API_RATE_PER_MIN=${QA_API_RATE_PER_MIN:-60}
     shm_size: '1gb'
     ports:
       # nginx owns 4400 now: it is the authentik gate for the web UI and the

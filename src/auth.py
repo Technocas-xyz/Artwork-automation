@@ -117,4 +117,7 @@ PUBLIC_PATHS = {"/login", "/api/auth/login", "/api/auth/logout"}
 # are opaque, non-sensitive filenames and must not be gated by the auth
 # middleware — otherwise a missing/late cookie turns the image request into a
 # 302 -> /login and the browser renders a broken-image icon.
-PUBLIC_PREFIXES = ("/static/", "/input/")
+# /api/v1/ is the public JSON API (Print Ready QA): it authenticates with an
+# X-API-Key header checked inside each endpoint, NOT the operator cookie, so it
+# must bypass the cookie middleware here.
+PUBLIC_PREFIXES = ("/static/", "/input/", "/api/v1/")
